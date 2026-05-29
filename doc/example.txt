@@ -1,17 +1,23 @@
 
-int main(){
+i32 main(){
 
-    int x = 5;
-    float y = 1.0;
-    double z = 0.5;
-
+    i32 x = 5;
+    f32 y = 1.0;
+    f64 z = 0.5;
+    char c = '!';
     string variable = "Hello World!";
+
+    bool cond = true;
+
+    if (x < y){
+        c = '$';
+    }
 
     //This is a comment
 
     /* This is
     a multiline
-    comment /*
+    comment */
 
     return 0;
 

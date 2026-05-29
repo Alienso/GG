@@ -10,23 +10,47 @@
 enum class TokenType {
     // Single-character tokens.
     LEFT_PAREN, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE,
-    COMMA, DOT, MINUS, PLUS, SEMICOLON, SLASH, STAR,
+    LEFT_BRACKET, RIGHT_BRACKET,
+    COMMA, DOT, SEMICOLON,
+    TILDE, QUESTION, COLON,
 
     // One or two character tokens.
     BANG, BANG_EQUAL,
     EQUAL, EQUAL_EQUAL,
-    GREATER, GREATER_EQUAL,
-    LESS, LESS_EQUAL,
+    PLUS, INCREMENT, PLUS_EQUAL,
+    MINUS, DECREMENT, MINUS_EQUAL, ARROW,
+    STAR, STAR_EQUAL,
+    SLASH, SLASH_EQUAL,
+    PERCENT, PERCENT_EQUAL,
+    CARET, CARET_EQUAL,
+    AMPERSAND, AND, AMPERSAND_EQUAL,
+    PIPE, OR, PIPE_EQUAL,
+    LESS, LESS_EQUAL, SHIFT_LEFT,
+    GREATER, GREATER_EQUAL, SHIFT_RIGHT,
 
     // Literals.
-    IDENTIFIER, STRING, NUMBER,
+    IDENTIFIER, STRING, CHAR, NUMBER,
 
     // Keywords.
     CLASS, ELSE, FALSE, FOR, IF,
     RETURN, SUPER, THIS, TRUE, VAR, WHILE,
 
+    // Type keywords — signed integers.
+    I8, I16, I32, I64,
+
+    // Type keywords — unsigned integers.
+    U8, U16, U32, U64,
+
+    // Type keywords — floating point.
+    F32, F64,
+
+    // Type keywords — other.
+    BOOL, CHAR_TYPE, STRING_TYPE,
+
     END_OF_FILE
 };
+
+TokenType lookupKeyword(const std::string& text);
 
 class Token {
 public:

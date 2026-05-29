@@ -5,6 +5,48 @@
 #include "Token.h"
 
 #include <utility>
+#include <unordered_map>
+
+static const std::unordered_map<std::string, TokenType> keywords = {
+    // Signed integer types
+    {"i8",     TokenType::I8},
+    {"i16",    TokenType::I16},
+    {"i32",    TokenType::I32},
+    {"i64",    TokenType::I64},
+
+    // Unsigned integer types
+    {"u8",     TokenType::U8},
+    {"u16",    TokenType::U16},
+    {"u32",    TokenType::U32},
+    {"u64",    TokenType::U64},
+
+    // Floating point types
+    {"f32",    TokenType::F32},
+    {"f64",    TokenType::F64},
+
+    // Other types
+    {"bool",   TokenType::BOOL},
+    {"char",   TokenType::CHAR_TYPE},
+    {"string", TokenType::STRING_TYPE},
+
+    // Keywords
+    {"return", TokenType::RETURN},
+    {"if",     TokenType::IF},
+    {"else",   TokenType::ELSE},
+    {"for",    TokenType::FOR},
+    {"while",  TokenType::WHILE},
+    {"class",  TokenType::CLASS},
+    {"true",   TokenType::TRUE},
+    {"false",  TokenType::FALSE},
+    {"var",    TokenType::VAR},
+    {"super",  TokenType::SUPER},
+    {"this",   TokenType::THIS}
+};
+
+TokenType lookupKeyword(const std::string& text) {
+    auto it = keywords.find(text);
+    return it != keywords.end() ? it->second : TokenType::IDENTIFIER;
+}
 
 Token::Token(TokenType tokenType, std::string lexeme, int line) : type(tokenType), lexeme(std::move(lexeme)), line(line) {
 

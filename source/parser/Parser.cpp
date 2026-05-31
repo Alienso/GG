@@ -8,7 +8,7 @@
 Parser::Parser() {}
 
 Program Parser::parse(const std::vector<Token>& tokens_) {
-    tokens  = std::vector<Token>(tokens);
+    tokens  = std::vector<Token>(tokens_);
     current = 0;
 
     Program program;

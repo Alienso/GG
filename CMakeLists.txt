@@ -11,4 +11,6 @@ add_executable(GG main.cpp
         source/parser/Parser.cpp
         source/parser/Parser.h
         source/parser/Ast.h
+        source/parser/AstPrinter.h
+        source/parser/AstPrinter.cpp
 )

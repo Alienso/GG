@@ -10,4 +10,5 @@ add_executable(GG main.cpp
         source/lexer/Token.h
         source/parser/Parser.cpp
         source/parser/Parser.h
+        source/parser/Ast.h
 )

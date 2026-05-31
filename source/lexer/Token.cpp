@@ -48,6 +48,4 @@ TokenType lookupKeyword(const std::string& text) {
     return it != keywords.end() ? it->second : TokenType::IDENTIFIER;
 }
 
-Token::Token(TokenType tokenType, std::string lexeme, int line) : type(tokenType), lexeme(std::move(lexeme)), line(line) {
-
-}
+Token::Token(TokenType tokenType, std::string lexeme, int line) : type(tokenType), lexeme(std::move(lexeme)), line(line) {}

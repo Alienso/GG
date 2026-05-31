@@ -11,4 +11,7 @@ GG::GG(std::vector<std::string>& paths) : lexer(paths) {
 
 void GG::run() {
     lexer.lex();
+    for (const auto& fileTokens : lexer.tokensForFiles) {
+        Program ast = parser.parse(fileTokens);
+    }
 }

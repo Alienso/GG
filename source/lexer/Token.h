@@ -50,13 +50,12 @@ enum class TokenType {
     END_OF_FILE
 };
 
-TokenType lookupKeyword(const std::string& text);
+[[nodiscard]] TokenType lookupKeyword(const std::string& text);
 
 class Token {
 public:
     Token(TokenType tokenType, std::string lexeme, int line);
 
-private:
     const TokenType type;
     const std::string lexeme;
     const int line;

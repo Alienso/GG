@@ -1,0 +1,40 @@
+program         -> declaration* EOF
+
+declaration     -> funcDecl | statement
+
+funcDecl        -> typeName IDENTIFIER "(" paramList? ")" block
+paramList       -> typeName IDENTIFIER ( "," typeName IDENTIFIER )*
+
+typeName        -> I8|I16|I32|I64 | U8|U16|U32|U64 | F32|F64 | BOOL|CHAR_TYPE|STRING_TYPE
+
+statement       -> block | ifStmt | whileStmt | forStmt | returnStmt | exprStmt
+
+block           -> "{" declaration* "}"
+ifStmt          -> "if" "(" expression ")" statement ( "else" statement )?
+whileStmt       -> "while" "(" expression ")" statement
+forStmt         -> "for" "(" ( exprStmt | ";" ) expression? ";" expression? ")" statement
+returnStmt      -> "return" expression? ";"
+exprStmt        -> expression ";"
+
+// Expressions — lowest to highest precedence
+expression      -> varDecl | assignment
+varDecl         -> typeName IDENTIFIER ( "=" expression )?
+assignment      -> IDENTIFIER ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "&=" | "|=" ) assignment
+                 | logicalOr
+logicalOr       -> logicalAnd  ( "||" logicalAnd  )*
+logicalAnd      -> bitwiseOr   ( "&&" bitwiseOr   )*
+bitwiseOr       -> bitwiseXor  ( "|"  bitwiseXor  )*
+bitwiseXor      -> bitwiseAnd  ( "^"  bitwiseAnd  )*
+bitwiseAnd      -> equality    ( "&"  equality    )*
+equality        -> comparison  ( ("==" | "!=") comparison )*
+comparison      -> shift       ( ("<" | "<=" | ">" | ">=") shift )*
+shift           -> addSub      ( ("<<" | ">>") addSub )*
+addSub          -> mulDiv      ( ("+" | "-") mulDiv )*
+mulDiv          -> unary       ( ("*" | "/" | "%") unary )*
+unary           -> ("!" | "-" | "~" | "++" | "--") unary | postfix
+postfix         -> primary ( "++" | "--" )*
+primary         -> IDENTIFIER "(" argList? ")"
+                 | IDENTIFIER
+                 | NUMBER | STRING | CHAR | "true" | "false"
+                 | "(" expression ")"
+argList         -> expression ( "," expression )*

@@ -15,10 +15,10 @@ public:
 
     void lex();
 
-private:
     std::vector<std::ifstream> inputFiles{};
     std::vector<std::vector<Token>> tokensForFiles{};
 
+private:
     static void processFile(std::ifstream &file, std::vector<Token>& tokens);
 };
 

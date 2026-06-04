@@ -64,6 +64,11 @@ CastResult canImplicitlyCast(Type from, Type to) {
         (f == TypeKind::U32  && t == TypeKind::Char))
         return CastResult::Silent;
 
+    // string and ptr are both 'ptr' in LLVM IR — interchangeable at the FFI boundary
+    if ((f == TypeKind::String && t == TypeKind::Ptr) ||
+        (f == TypeKind::Ptr    && t == TypeKind::String))
+        return CastResult::Silent;
+
     // Any integer → float (silent widening)
     if (isInteger(f) && isFloat(t))          return CastResult::Silent;
 
@@ -155,6 +160,7 @@ Type typeFromToken(TokenType tt) {
         case TokenType::CHAR_TYPE:   return Type{TypeKind::Char};
         case TokenType::STRING_TYPE: return Type{TypeKind::String};
         case TokenType::VOID:        return Type{TypeKind::Void};
+        case TokenType::PTR:         return Type{TypeKind::Ptr};
         default:                     return Type{TypeKind::Error};
     }
 }
@@ -178,6 +184,7 @@ std::string typeName(Type t) {
         case TypeKind::Bool:   return "bool";
         case TypeKind::Char:   return "char";
         case TypeKind::String: return "string";
+        case TypeKind::Ptr:    return "ptr";
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "<error>";
     }

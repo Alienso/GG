@@ -99,6 +99,7 @@ void Parser::synchronize() {
             case TokenType::CHAR_TYPE:
             case TokenType::STRING_TYPE:
             case TokenType::VOID:
+            case TokenType::PTR:
                 return;
             default:
                 break;
@@ -127,6 +128,7 @@ bool Parser::isTypeName() const {
         case TokenType::CHAR_TYPE:
         case TokenType::STRING_TYPE:
         case TokenType::VOID:
+        case TokenType::PTR:
             return true;
         default:
             return false;

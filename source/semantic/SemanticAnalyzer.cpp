@@ -110,22 +110,22 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
             }
         }
         else if (std::holds_alternative<ExternFuncDeclStmt>(*stmt.node)) {
-            const auto& ext = std::get<ExternFuncDeclStmt>(*stmt.node);
+            const auto& externDecl = std::get<ExternFuncDeclStmt>(*stmt.node);
 
             std::vector<Type> paramTypes;
-            for (const ParamDecl& param : ext.params)
+            for (const ParamDecl& param : externDecl.params)
                 paramTypes.push_back(typeFromToken(param.typeName.type));
 
             Symbol sym{
                 Symbol::Kind::Function,
-                typeFromToken(ext.returnType.type),
-                ext.name,
+                typeFromToken(externDecl.returnType.type),
+                externDecl.name,
                 std::move(paramTypes)
             };
 
-            if (!symbolTable.declare(ext.name.lexeme, sym)) {
-                const Symbol* prev = symbolTable.lookupCurrentScope(ext.name.lexeme);
-                error(ext.name, "extern '" + ext.name.lexeme + "' already declared in this scope"
+            if (!symbolTable.declare(externDecl.name.lexeme, sym)) {
+                const Symbol* prev = symbolTable.lookupCurrentScope(externDecl.name.lexeme);
+                error(externDecl.name, "extern '" + externDecl.name.lexeme + "' already declared in this scope"
                       + (prev ? " (previously declared at line "
                                + std::to_string(prev->declarationToken.line) + ")" : ""));
             }
@@ -260,10 +260,10 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     loopDepth         = savedLoopDepth;
 }
 
-void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& ext) {
+void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl) {
     // Signature was already registered in pass 1 (collectFunctions).
     // Just validate that no parameter has type 'void'.
-    for (const ParamDecl& param : ext.params) {
+    for (const ParamDecl& param : externDecl.params) {
         Type paramType = typeFromToken(param.typeName.type);
         if (paramType.kind == TypeKind::Void)
             error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");

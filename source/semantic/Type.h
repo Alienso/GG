@@ -15,7 +15,8 @@ enum class TypeKind {
     U8, U16, U32, U64,
     F32, F64,
     Bool, Char, String,
-    Void,   // for functions that return nothing (future)
+    Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
+    Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
 

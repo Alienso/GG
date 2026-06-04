@@ -29,6 +29,9 @@ private:
     int          labelCounter       = 0;
     Type         currentReturnType  = Type{TypeKind::Void};
 
+    // funcName → ordered list of declared parameter types (populated in generate())
+    std::unordered_map<std::string, std::vector<Type>> funcParamTypes;
+
     // varName → alloca pointer register name, e.g. "x" → "%x.addr"
     std::unordered_map<std::string, std::string> allocaMap;
 

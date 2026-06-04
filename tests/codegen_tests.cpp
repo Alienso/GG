@@ -898,3 +898,45 @@ TEST_CASE("CodeGen - extern call emits call instruction", "[codegen]") {
     )");
     REQUIRE(irContains(ir, "call i32 @add"));
 }
+
+// ============================================================
+// ptr type
+// ============================================================
+
+TEST_CASE("CodeGen - ptr variable declaration", "[codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr malloc(u64 size);
+        void main() { ptr p = malloc(64); }
+    )");
+    REQUIRE(irContains(ir, "declare ptr @malloc(i64)"));
+    REQUIRE(irContains(ir, "alloca ptr"));
+    REQUIRE(irContains(ir, "call ptr @malloc"));
+}
+
+TEST_CASE("CodeGen - ptr parameter in extern uses ptr IR type", "[codegen]") {
+    auto ir = codegenString("extern void free(ptr p);");
+    REQUIRE(irContains(ir, "declare void @free(ptr)"));
+}
+
+TEST_CASE("CodeGen - string passes to extern ptr param without cast", "[codegen]") {
+    // string and ptr are the same IR type; no bitcast should appear
+    auto ir = codegenString(R"(
+        extern i32 puts(ptr s);
+        void main() { puts("hello"); }
+    )");
+    REQUIRE(irContains(ir, "call i32 @puts(ptr"));
+    REQUIRE(!irContains(ir, "bitcast"));
+}
+
+TEST_CASE("CodeGen - ptr returned from extern can be stored and passed", "[codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr  malloc(u64 size);
+        extern void free(ptr p);
+        void main() {
+            ptr buf = malloc(32);
+            free(buf);
+        }
+    )");
+    REQUIRE(irContains(ir, "call ptr @malloc"));
+    REQUIRE(irContains(ir, "call void @free(ptr"));
+}

@@ -439,3 +439,47 @@ TEST_CASE("Semantic - extern call with wrong arg type is an error", "[semantic]"
     )");
     REQUIRE(result.hadError);
 }
+
+// ============================================================
+// ptr type
+// ============================================================
+
+TEST_CASE("Semantic - ptr variable is valid", "[semantic]") {
+    auto result = analyzeString(R"(
+        extern ptr malloc(u64 size);
+        void main() { ptr p = malloc(64); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - string can be passed where ptr is expected", "[semantic]") {
+    auto result = analyzeString(R"(
+        extern i32 puts(ptr s);
+        void main() { puts("hello"); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - ptr can be passed where string is expected", "[semantic]") {
+    auto result = analyzeString(R"(
+        extern ptr getStr();
+        void useStr(string s) { }
+        void main() { useStr(getStr()); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - ptr function parameter is valid", "[semantic]") {
+    auto result = analyzeString(R"(
+        void process(ptr data) { }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - ptr return type is valid", "[semantic]") {
+    auto result = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        ptr alloc(u64 size) { return malloc(size); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

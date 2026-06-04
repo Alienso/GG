@@ -17,6 +17,25 @@ IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeM
     module        = {};
     this->typeMap = &inputTypeMap;
     stringCounter = 0;
+    funcParamTypes.clear();
+
+    // Build function parameter type table (used in genCall to cast arguments).
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (std::holds_alternative<FunctionDeclStmt>(*decl.node)) {
+            const auto& function = std::get<FunctionDeclStmt>(*decl.node);
+            std::vector<Type> paramTypes;
+            for (const auto& param : function.params)
+                paramTypes.push_back(typeFromToken(param.typeName.type));
+            funcParamTypes[function.name.lexeme] = std::move(paramTypes);
+        } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
+            const auto& externDecl = std::get<ExternFuncDeclStmt>(*decl.node);
+            std::vector<Type> paramTypes;
+            for (const auto& param : externDecl.params)
+                paramTypes.push_back(typeFromToken(param.typeName.type));
+            funcParamTypes[externDecl.name.lexeme] = std::move(paramTypes);
+        }
+    }
 
     for (const auto& decl : program.declarations) {
         if (!decl.node) continue;
@@ -99,19 +118,19 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     currentBasicBlock = nullptr;
 }
 
-void CodeGen::genExternDecl(const ExternFuncDeclStmt& ext) {
-    std::string returnIrType = irTypeName(typeFromToken(ext.returnType.type));
+void CodeGen::genExternDecl(const ExternFuncDeclStmt& externDecl) {
+    std::string returnIrType = irTypeName(typeFromToken(externDecl.returnType.type));
 
-    std::string paramStr;
+    std::string parameterString;
     bool first = true;
-    for (const auto& param : ext.params) {
-        if (!first) paramStr += ", ";
+    for (const auto& param : externDecl.params) {
+        if (!first) parameterString += ", ";
         first = false;
-        paramStr += irTypeName(typeFromToken(param.typeName.type));
+        parameterString += irTypeName(typeFromToken(param.typeName.type));
     }
 
     module.declares.push_back(
-        "declare " + returnIrType + " @" + ext.name.lexeme + "(" + paramStr + ")");
+        "declare " + returnIrType + " @" + externDecl.name.lexeme + "(" + parameterString + ")");
 }
 
 // ============================================================
@@ -604,14 +623,29 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
 std::string CodeGen::genCall(const CallExpr& call, Type resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
 
+    // Look up declared parameter types so we can cast each argument correctly.
+    auto funcLookup = funcParamTypes.find(call.callee.lexeme);
+    const std::vector<Type>* declaredParamTypes =
+        funcLookup != funcParamTypes.end() ? &funcLookup->second : nullptr;
+
     std::string argumentString;
-    bool first = true;
+    bool   first      = true;
+    size_t paramIndex = 0;
     for (const auto& arg : call.args) {
         if (!first) argumentString += ", ";
         first = false;
-        Type        argumentType = exprType(*arg);
-        std::string value        = genExpr(*arg);
-        argumentString += irTypeName(argumentType) + " " + value;
+        Type        argType = exprType(*arg);
+        std::string value   = genExpr(*arg);
+
+        // Cast to the declared parameter type when the IR types differ.
+        if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
+            Type paramType = (*declaredParamTypes)[paramIndex];
+            value   = emitCast(value, argType, paramType);
+            argType = paramType;
+        }
+        ++paramIndex;
+
+        argumentString += irTypeName(argType) + " " + value;
     }
 
     if (returnIrType == "void") {
@@ -727,6 +761,10 @@ Type CodeGen::exprType(const Expr& expression) const {
 std::string CodeGen::emitCast(const std::string& value, Type from, Type to) {
     if (from == to) return value;
     if (isError(from) || isError(to)) return value;
+
+    // If both types map to the same LLVM IR type (e.g. string ↔ ptr, i32 ↔ u32,
+    // char ↔ u32) no cast instruction is needed — bits are already identical.
+    if (irTypeName(from) == irTypeName(to)) return value;
 
     auto getBitWidth = [](TypeKind kind) -> int {
         switch (kind) {

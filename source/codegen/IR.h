@@ -28,6 +28,7 @@ inline std::string irTypeName(Type t) {
         case TypeKind::Bool:   return "i1";
         case TypeKind::Char:   return "i32";
         case TypeKind::String: return "ptr";
+        case TypeKind::Ptr:    return "ptr";
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "i32";   // fallback — suppressed errors
     }

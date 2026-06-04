@@ -1,12 +1,19 @@
-// Demonstrates extern declarations — call CRT's puts() and exit().
+// Demonstrates extern declarations and the ptr type for CRT bindings.
 // Compile with: .\compile.ps1 .\samples\extern_demo.gg -run
 //
-// 'string' maps to 'ptr' in LLVM IR, matching C's 'const char*'.
+// 'ptr' is GG's opaque pointer type — maps directly to LLVM's 'ptr'.
+// Use it at the FFI boundary when calling C functions that take/return raw pointers.
 
-extern i32 puts(string s);
+extern i32  puts(ptr s);
+extern ptr  malloc(u64 size);
+extern void free(ptr p);
 extern void exit(i32 code);
 
 void main() {
     puts("Hello from GG with extern!");
+
+    ptr buf = malloc(64);
+    free(buf);
+
     exit(0);
 }

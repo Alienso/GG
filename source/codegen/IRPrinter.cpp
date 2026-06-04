@@ -6,29 +6,27 @@
 
 void IRPrinter::print(const IRModule& module, std::ostream& out) {
     // Global string constants
-    for (const auto& g : module.globals) {
-        out << g << "\n";
-    }
+    for (const auto& global : module.globals)
+        out << global << "\n";
     if (!module.globals.empty()) out << "\n";
 
     // Functions
-    for (const auto& fn : module.functions) {
-        out << fn.signature << " {\n";
+    for (const auto& irFunction : module.functions) {
+        out << irFunction.signature << " {\n";
 
-        for (size_t bi = 0; bi < fn.blocks.size(); ++bi) {
-            const BasicBlock& bb = fn.blocks[bi];
-            out << bb.label << ":\n";
+        bool isEntryBlock = true;
+        for (const auto& basicBlock : irFunction.blocks) {
+            out << basicBlock.label << ":\n";
 
             // Prepend allocas to the first (entry) block only
-            if (bi == 0) {
-                for (const auto& alloca : fn.allocas) {
+            if (isEntryBlock) {
+                for (const auto& alloca : irFunction.allocas)
                     out << alloca << "\n";
-                }
+                isEntryBlock = false;
             }
 
-            for (const auto& instr : bb.instructions) {
-                out << instr << "\n";
-            }
+            for (const auto& instruction : basicBlock.instructions)
+                out << instruction << "\n";
         }
 
         out << "}\n\n";

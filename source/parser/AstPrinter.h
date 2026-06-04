@@ -14,8 +14,8 @@ public:
     void print(const Program& program, std::ostream& stream);
 
 private:
-    int           indent_  = 0;
-    std::ostream* stream_  = nullptr;
+    int           indent = 0;
+    std::ostream* stream = nullptr;
 
     void printExpr(const Expr& expr);
     void printStmt(const Stmt& stmt);

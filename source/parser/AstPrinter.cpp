@@ -5,83 +5,82 @@
 #include "AstPrinter.h"
 
 void AstPrinter::out(const std::string& text) {
-    *stream_ << std::string(indent_ * 2, ' ') << text << '\n';
+    *stream << std::string(indent * 2, ' ') << text << '\n';
 }
 
-void AstPrinter::print(const Program& program, std::ostream& stream) {
-    stream_  = &stream;
-    indent_  = 0;
+void AstPrinter::print(const Program& program, std::ostream& outputStream) {
+    stream = &outputStream;
+    indent = 0;
     out("Program");
-    indent_++;
-    for (const Stmt& stmt : program.declarations) {
+    indent++;
+    for (const Stmt& stmt : program.declarations)
         printStmt(stmt);
-    }
-    indent_--;
+    indent--;
 }
 
 void AstPrinter::printExpr(const Expr& expr) {
     std::visit(overloaded{
 
-        [&](const LiteralExpr& e) {
-            out("Literal '" + e.token.lexeme + "'");
+        [&](const LiteralExpr& literal) {
+            out("Literal '" + literal.token.lexeme + "'");
         },
 
-        [&](const IdentifierExpr& e) {
-            out("Identifier '" + e.name.lexeme + "'");
+        [&](const IdentifierExpr& identifier) {
+            out("Identifier '" + identifier.name.lexeme + "'");
         },
 
-        [&](const UnaryExpr& e) {
-            out("Unary '" + e.op.lexeme + "'");
-            indent_++;
-            printExpr(*e.operand);
-            indent_--;
+        [&](const UnaryExpr& unary) {
+            out("Unary '" + unary.operatorToken.lexeme + "'");
+            indent++;
+            printExpr(*unary.operand);
+            indent--;
         },
 
-        [&](const BinaryExpr& e) {
-            out("Binary '" + e.op.lexeme + "'");
-            indent_++;
-            printExpr(*e.left);
-            printExpr(*e.right);
-            indent_--;
+        [&](const BinaryExpr& binary) {
+            out("Binary '" + binary.operatorToken.lexeme + "'");
+            indent++;
+            printExpr(*binary.left);
+            printExpr(*binary.right);
+            indent--;
         },
 
-        [&](const AssignExpr& e) {
-            out("Assign '" + e.name.lexeme + "'");
-            indent_++;
-            printExpr(*e.value);
-            indent_--;
+        [&](const AssignExpr& assign) {
+            out("Assign '" + assign.name.lexeme + "'");
+            indent++;
+            printExpr(*assign.value);
+            indent--;
         },
 
-        [&](const CompoundAssignExpr& e) {
-            out("CompoundAssign '" + e.name.lexeme + "' '" + e.op.lexeme + "'");
-            indent_++;
-            printExpr(*e.value);
-            indent_--;
+        [&](const CompoundAssignExpr& compoundAssign) {
+            out("CompoundAssign '" + compoundAssign.name.lexeme + "' '" + compoundAssign.operatorToken.lexeme + "'");
+            indent++;
+            printExpr(*compoundAssign.value);
+            indent--;
         },
 
-        [&](const PostfixExpr& e) {
-            out("Postfix '" + e.op.lexeme + "'");
-            indent_++;
-            printExpr(*e.operand);
-            indent_--;
+        [&](const PostfixExpr& postfix) {
+            out("Postfix '" + postfix.operatorToken.lexeme + "'");
+            indent++;
+            printExpr(*postfix.operand);
+            indent--;
         },
 
-        [&](const CallExpr& e) {
-            out("Call '" + e.callee.lexeme + "'");
-            indent_++;
-            for (const auto& arg : e.args) {
+        [&](const CallExpr& call) {
+            out("Call '" + call.callee.lexeme + "'");
+            indent++;
+            for (const auto& arg : call.args)
                 printExpr(*arg);
-            }
-            if (e.args.empty()) out("(no args)");
-            indent_--;
+            if (call.args.empty())
+                out("(no args)");
+            indent--;
         },
 
-        [&](const VarDeclExpr& e) {
-            out("VarDecl " + e.typeName.lexeme + " '" + e.name.lexeme + "'");
-            indent_++;
-            if (e.initializer) printExpr(*e.initializer);
-            else               out("(no initializer)");
-            indent_--;
+        [&](const VarDeclExpr& varDecl) {
+            out("VarDecl " + varDecl.typeName.lexeme + " '" + varDecl.name.lexeme + "'");
+            indent++;
+            if (varDecl.initializer) printExpr(*varDecl.initializer);
+            else                     out("(no initializer)");
+            indent--;
         },
 
     }, *expr.node);
@@ -90,95 +89,97 @@ void AstPrinter::printExpr(const Expr& expr) {
 void AstPrinter::printStmt(const Stmt& stmt) {
     std::visit(overloaded{
 
-        [&](const ExprStmt& s) {
+        [&](const ExprStmt& exprStmt) {
             out("ExprStmt");
-            indent_++;
-            printExpr(s.expression);
-            indent_--;
+            indent++;
+            printExpr(exprStmt.expression);
+            indent--;
         },
 
-        [&](const BlockStmt& s) {
-            printBlock(s);
+        [&](const BlockStmt& blockStmt) {
+            printBlock(blockStmt);
         },
 
-        [&](const IfStmt& s) {
+        [&](const IfStmt& ifStmt) {
             out("If");
-            indent_++;
+            indent++;
             out("condition:");
-            indent_++;
-            printExpr(s.condition);
-            indent_--;
+            indent++;
+            printExpr(ifStmt.condition);
+            indent--;
             out("then:");
-            indent_++;
-            printStmt(*s.thenBranch);
-            indent_--;
-            if (s.elseBranch) {
+            indent++;
+            printStmt(*ifStmt.thenBranch);
+            indent--;
+            if (ifStmt.elseBranch) {
                 out("else:");
-                indent_++;
-                printStmt(*s.elseBranch);
-                indent_--;
+                indent++;
+                printStmt(*ifStmt.elseBranch);
+                indent--;
             }
-            indent_--;
+            indent--;
         },
 
-        [&](const WhileStmt& s) {
+        [&](const WhileStmt& whileStmt) {
             out("While");
-            indent_++;
+            indent++;
             out("condition:");
-            indent_++;
-            printExpr(s.condition);
-            indent_--;
+            indent++;
+            printExpr(whileStmt.condition);
+            indent--;
             out("body:");
-            indent_++;
-            printStmt(*s.body);
-            indent_--;
-            indent_--;
+            indent++;
+            printStmt(*whileStmt.body);
+            indent--;
+            indent--;
         },
 
-        [&](const ForStmt& s) {
+        [&](const ForStmt& forStmt) {
             out("For");
-            indent_++;
+            indent++;
             out("init:");
-            indent_++;
-            if (s.init) printStmt(*s.init);
-            else        out("(empty)");
-            indent_--;
+            indent++;
+            if (forStmt.init) printStmt(*forStmt.init);
+            else              out("(empty)");
+            indent--;
             out("condition:");
-            indent_++;
-            if (s.condition) printExpr(*s.condition);
-            else             out("(empty)");
-            indent_--;
+            indent++;
+            if (forStmt.condition) printExpr(*forStmt.condition);
+            else                   out("(empty)");
+            indent--;
             out("increment:");
-            indent_++;
-            if (s.increment) printExpr(*s.increment);
-            else             out("(empty)");
-            indent_--;
+            indent++;
+            if (forStmt.increment) printExpr(*forStmt.increment);
+            else                   out("(empty)");
+            indent--;
             out("body:");
-            indent_++;
-            printStmt(*s.body);
-            indent_--;
-            indent_--;
+            indent++;
+            printStmt(*forStmt.body);
+            indent--;
+            indent--;
         },
 
-        [&](const ReturnStmt& s) {
+        [&](const ReturnStmt& returnStmt) {
             out("Return");
-            if (s.value) {
-                indent_++;
-                printExpr(*s.value);
-                indent_--;
+            if (returnStmt.value) {
+                indent++;
+                printExpr(*returnStmt.value);
+                indent--;
             }
         },
 
-        [&](const FunctionDeclStmt& s) {
+        [&](const FunctionDeclStmt& functionDecl) {
             std::string params;
-            for (size_t i = 0; i < s.params.size(); i++) {
-                if (i > 0) params += ", ";
-                params += s.params[i].typeName.lexeme + " " + s.params[i].name.lexeme;
+            bool first = true;
+            for (const auto& param : functionDecl.params) {
+                if (!first) params += ", ";
+                first = false;
+                params += param.typeName.lexeme + " " + param.name.lexeme;
             }
-            out("FunctionDecl " + s.returnType.lexeme + " '" + s.name.lexeme + "' (" + params + ")");
-            indent_++;
-            printBlock(s.body);
-            indent_--;
+            out("FunctionDecl " + functionDecl.returnType.lexeme + " '" + functionDecl.name.lexeme + "' (" + params + ")");
+            indent++;
+            printBlock(functionDecl.body);
+            indent--;
         },
 
     }, *stmt.node);
@@ -186,10 +187,9 @@ void AstPrinter::printStmt(const Stmt& stmt) {
 
 void AstPrinter::printBlock(const BlockStmt& block) {
     out("Block");
-    indent_++;
-    for (const auto& stmt : block.body) {
-        printStmt(*stmt);
-    }
+    indent++;
+    for (const auto& statement : block.body)
+        printStmt(*statement);
     if (block.body.empty()) out("(empty)");
-    indent_--;
+    indent--;
 }

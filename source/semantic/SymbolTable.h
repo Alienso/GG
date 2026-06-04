@@ -35,7 +35,7 @@ public:
     const Symbol* lookupCurrentScope(const std::string& name) const;
 
 private:
-    std::vector<std::unordered_map<std::string, Symbol>> scopes_;
+    std::vector<std::unordered_map<std::string, Symbol>> scopes;
 };
 
 #endif //GG_SYMBOLTABLE_H

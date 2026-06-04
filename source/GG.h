@@ -20,11 +20,11 @@ public:
     explicit GG(std::vector<std::string> &paths);
     void run();
 private:
-    std::vector<std::string> paths_;
+    std::vector<std::string> paths;
     Lexer            lexer;
     Parser           parser;
     SemanticAnalyzer semanticAnalyzer;
-    CodeGen          codeGen;
+    CodeGen          codeGenerator;
 };
 
 

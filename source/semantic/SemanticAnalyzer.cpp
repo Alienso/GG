@@ -12,15 +12,15 @@
 
 static const Token& firstToken(const Expr& expr) {
     struct Visitor {
-        const Token& operator()(const LiteralExpr& e)        const { return e.token; }
-        const Token& operator()(const IdentifierExpr& e)     const { return e.name; }
-        const Token& operator()(const UnaryExpr& e)          const { return e.op; }
-        const Token& operator()(const BinaryExpr& e)         const { return firstToken(*e.left); }
-        const Token& operator()(const AssignExpr& e)         const { return e.name; }
-        const Token& operator()(const CompoundAssignExpr& e) const { return e.name; }
-        const Token& operator()(const PostfixExpr& e)        const { return firstToken(*e.operand); }
-        const Token& operator()(const CallExpr& e)           const { return e.callee; }
-        const Token& operator()(const VarDeclExpr& e)        const { return e.typeName; }
+        const Token& operator()(const LiteralExpr& literal)            const { return literal.token; }
+        const Token& operator()(const IdentifierExpr& identifier)      const { return identifier.name; }
+        const Token& operator()(const UnaryExpr& unary)                const { return unary.operatorToken; }
+        const Token& operator()(const BinaryExpr& binary)              const { return firstToken(*binary.left); }
+        const Token& operator()(const AssignExpr& assign)              const { return assign.name; }
+        const Token& operator()(const CompoundAssignExpr& compoundAssign) const { return compoundAssign.name; }
+        const Token& operator()(const PostfixExpr& postfix)            const { return firstToken(*postfix.operand); }
+        const Token& operator()(const CallExpr& call)                  const { return call.callee; }
+        const Token& operator()(const VarDeclExpr& varDecl)            const { return varDecl.typeName; }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -30,22 +30,21 @@ static const Token& firstToken(const Expr& expr) {
 // ============================================================
 
 SemanticResult SemanticAnalyzer::analyze(const Program& program) {
-    symbolTable_       = SymbolTable{};
-    typeMap_.clear();
-    hadError_          = false;
-    currentReturnType_ = std::nullopt;
+    symbolTable       = SymbolTable{};
+    typeMap.clear();
+    hadError          = false;
+    currentReturnType = std::nullopt;
 
-    symbolTable_.enterScope();   // global scope
+    symbolTable.enterScope();   // global scope
 
-    collectFunctions(program);   // pass 1: hoist function signatures
+    collectFunctions(program);  // pass 1: hoist function signatures
 
-    for (const Stmt& stmt : program.declarations) {
-        analyzeStmt(stmt);       // pass 2: full analysis
-    }
+    for (const Stmt& stmt : program.declarations)
+        analyzeStmt(stmt);      // pass 2: full analysis
 
-    symbolTable_.exitScope();
+    symbolTable.exitScope();
 
-    return SemanticResult{ hadError_, std::move(typeMap_) };
+    return SemanticResult{ hadError, std::move(typeMap) };
 }
 
 // ============================================================
@@ -55,22 +54,22 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
 void SemanticAnalyzer::collectFunctions(const Program& program) {
     for (const Stmt& stmt : program.declarations) {
         if (!std::holds_alternative<FunctionDeclStmt>(*stmt.node)) continue;
-        const auto& f = std::get<FunctionDeclStmt>(*stmt.node);
+        const auto& function = std::get<FunctionDeclStmt>(*stmt.node);
 
         std::vector<Type> paramTypes;
-        for (const ParamDecl& p : f.params)
-            paramTypes.push_back(typeFromToken(p.typeName.type));
+        for (const ParamDecl& param : function.params)
+            paramTypes.push_back(typeFromToken(param.typeName.type));
 
         Symbol sym{
             Symbol::Kind::Function,
-            typeFromToken(f.returnType.type),
-            f.name,
+            typeFromToken(function.returnType.type),
+            function.name,
             std::move(paramTypes)
         };
 
-        if (!symbolTable_.declare(f.name.lexeme, sym)) {
-            const Symbol* prev = symbolTable_.lookupCurrentScope(f.name.lexeme);
-            error(f.name, "function '" + f.name.lexeme + "' already declared in this scope"
+        if (!symbolTable.declare(function.name.lexeme, sym)) {
+            const Symbol* prev = symbolTable.lookupCurrentScope(function.name.lexeme);
+            error(function.name, "function '" + function.name.lexeme + "' already declared in this scope"
                   + (prev ? " (previously declared at line "
                            + std::to_string(prev->declarationToken.line) + ")" : ""));
         }
@@ -83,105 +82,104 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
 
 void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
     std::visit(overloaded{
-        [&](const ExprStmt& s)         { analyzeExpr(s.expression); },
-        [&](const BlockStmt& s)        { analyzeBlock(s); },
-        [&](const IfStmt& s)           { analyzeIf(s); },
-        [&](const WhileStmt& s)        { analyzeWhile(s); },
-        [&](const ForStmt& s)          { analyzeFor(s); },
-        [&](const ReturnStmt& s)       { analyzeReturn(s); },
-        [&](const FunctionDeclStmt& s) { analyzeFunctionDecl(s); },
+        [&](const ExprStmt& exprStmt)              { analyzeExpr(exprStmt.expression); },
+        [&](const BlockStmt& blockStmt)            { analyzeBlock(blockStmt); },
+        [&](const IfStmt& ifStmt)                  { analyzeIf(ifStmt); },
+        [&](const WhileStmt& whileStmt)            { analyzeWhile(whileStmt); },
+        [&](const ForStmt& forStmt)                { analyzeFor(forStmt); },
+        [&](const ReturnStmt& returnStmt)          { analyzeReturn(returnStmt); },
+        [&](const FunctionDeclStmt& functionDecl)  { analyzeFunctionDecl(functionDecl); },
     }, *stmt.node);
 }
 
 void SemanticAnalyzer::analyzeBlock(const BlockStmt& block) {
     enterScope();
-    for (const auto& s : block.body) analyzeStmt(*s);
+    for (const auto& statement : block.body) analyzeStmt(*statement);
     exitScope();
 }
 
-void SemanticAnalyzer::analyzeIf(const IfStmt& s) {
-    Type condType = analyzeExpr(s.condition);
-    if (!isError(condType) && !isBoolCompatible(condType)) {
-        error(firstToken(s.condition),
-              "if condition must be bool-compatible, got " + typeName(condType));
+void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
+    Type conditionType = analyzeExpr(ifStmt.condition);
+    if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
+        error(firstToken(ifStmt.condition),
+              "if condition must be bool-compatible, got " + typeName(conditionType));
     }
-    analyzeStmt(*s.thenBranch);
-    if (s.elseBranch) analyzeStmt(*s.elseBranch);
+    analyzeStmt(*ifStmt.thenBranch);
+    if (ifStmt.elseBranch) analyzeStmt(*ifStmt.elseBranch);
 }
 
-void SemanticAnalyzer::analyzeWhile(const WhileStmt& s) {
-    Type condType = analyzeExpr(s.condition);
-    if (!isError(condType) && !isBoolCompatible(condType)) {
-        error(firstToken(s.condition),
-              "while condition must be bool-compatible, got " + typeName(condType));
+void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
+    Type conditionType = analyzeExpr(whileStmt.condition);
+    if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
+        error(firstToken(whileStmt.condition),
+              "while condition must be bool-compatible, got " + typeName(conditionType));
     }
-    analyzeStmt(*s.body);
+    analyzeStmt(*whileStmt.body);
 }
 
-void SemanticAnalyzer::analyzeFor(const ForStmt& s) {
+void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
     enterScope();   // scope for the init variable
 
-    if (s.init) analyzeStmt(*s.init);
+    if (forStmt.init) analyzeStmt(*forStmt.init);
 
-    if (s.condition) {
-        Type condType = analyzeExpr(*s.condition);
-        if (!isError(condType) && !isBoolCompatible(condType)) {
-            error(firstToken(*s.condition),
-                  "for condition must be bool-compatible, got " + typeName(condType));
+    if (forStmt.condition) {
+        Type conditionType = analyzeExpr(*forStmt.condition);
+        if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
+            error(firstToken(*forStmt.condition),
+                  "for condition must be bool-compatible, got " + typeName(conditionType));
         }
     }
 
-    if (s.increment) analyzeExpr(*s.increment);
+    if (forStmt.increment) analyzeExpr(*forStmt.increment);
 
-    analyzeStmt(*s.body);
+    analyzeStmt(*forStmt.body);
 
     exitScope();
 }
 
-void SemanticAnalyzer::analyzeReturn(const ReturnStmt& s) {
-    if (!currentReturnType_) {
-        error(s.keyword, "return statement outside of function");
+void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
+    if (!currentReturnType) {
+        error(returnStmt.keyword, "return statement outside of function");
         return;
     }
 
-    if (!s.value) {
-        if (currentReturnType_->kind != TypeKind::Void) {
-            error(s.keyword, "return with no value in function returning "
-                  + typeName(*currentReturnType_));
+    if (!returnStmt.value) {
+        if (currentReturnType->kind != TypeKind::Void) {
+            error(returnStmt.keyword, "return with no value in function returning "
+                  + typeName(*currentReturnType));
         }
         return;
     }
 
-    Type actualType = analyzeExpr(*s.value);
-    checkCast(actualType, *currentReturnType_, s.keyword, "return");
+    Type actualType = analyzeExpr(*returnStmt.value);
+    checkCast(actualType, *currentReturnType, returnStmt.keyword, "return");
 }
 
-void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& s) {
+void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl) {
     // Signature is already registered in the global scope by collectFunctions.
-    std::optional<Type> savedReturnType = currentReturnType_;
-    currentReturnType_ = typeFromToken(s.returnType.type);
+    std::optional<Type> savedReturnType = currentReturnType;
+    currentReturnType = typeFromToken(functionDecl.returnType.type);
 
     enterScope();  // function scope — parameters live here
 
-    for (const ParamDecl& p : s.params) {
+    for (const ParamDecl& param : functionDecl.params) {
         Symbol sym{
             Symbol::Kind::Variable,
-            typeFromToken(p.typeName.type),
-            p.name,
+            typeFromToken(param.typeName.type),
+            param.name,
             {}
         };
-        if (!symbolTable_.declare(p.name.lexeme, sym)) {
-            error(p.name, "duplicate parameter name '" + p.name.lexeme + "'");
-        }
+        if (!symbolTable.declare(param.name.lexeme, sym))
+            error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
     }
 
     // Analyse body statements directly — do NOT call analyzeBlock to avoid
     // opening a second scope on top of the function scope.
-    for (const auto& stmt : s.body.body) analyzeStmt(*stmt);
+    for (const auto& statement : functionDecl.body.body) analyzeStmt(*statement);
 
     exitScope();
 
-    currentReturnType_ = savedReturnType;
+    currentReturnType = savedReturnType;
 }
 
 // ============================================================
@@ -189,29 +187,29 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& s) {
 // ============================================================
 
 Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
-    Type t = std::visit(overloaded{
-        [&](const LiteralExpr& e)        { return analyzeLiteral(e); },
-        [&](const IdentifierExpr& e)     { return analyzeIdentifier(e); },
-        [&](const UnaryExpr& e)          { return analyzeUnary(e); },
-        [&](const BinaryExpr& e)         { return analyzeBinary(e); },
-        [&](const AssignExpr& e)         { return analyzeAssign(e); },
-        [&](const CompoundAssignExpr& e) { return analyzeCompoundAssign(e); },
-        [&](const PostfixExpr& e)        { return analyzePostfix(e); },
-        [&](const CallExpr& e)           { return analyzeCall(e); },
-        [&](const VarDeclExpr& e)        { return analyzeVarDecl(e); },
+    Type resolvedType = std::visit(overloaded{
+        [&](const LiteralExpr& literal)               { return analyzeLiteral(literal); },
+        [&](const IdentifierExpr& identifier)         { return analyzeIdentifier(identifier); },
+        [&](const UnaryExpr& unary)                   { return analyzeUnary(unary); },
+        [&](const BinaryExpr& binary)                 { return analyzeBinary(binary); },
+        [&](const AssignExpr& assign)                 { return analyzeAssign(assign); },
+        [&](const CompoundAssignExpr& compoundAssign) { return analyzeCompoundAssign(compoundAssign); },
+        [&](const PostfixExpr& postfix)               { return analyzePostfix(postfix); },
+        [&](const CallExpr& call)                     { return analyzeCall(call); },
+        [&](const VarDeclExpr& varDecl)               { return analyzeVarDecl(varDecl); },
     }, *expr.node);
-    recordType(expr, t);
-    return t;
+    recordType(expr, resolvedType);
+    return resolvedType;
 }
 
-Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& e) {
-    switch (e.token.type) {
+Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
+    switch (literal.token.type) {
         case TokenType::TRUE:
         case TokenType::FALSE:
             return Type{TypeKind::Bool};
         case TokenType::NUMBER:
             // Decimal point present → floating-point literal → f64
-            if (e.token.lexeme.find('.') != std::string::npos)
+            if (literal.token.lexeme.find('.') != std::string::npos)
                 return Type{TypeKind::F64};
             return Type{TypeKind::I32};
         case TokenType::STRING:
@@ -223,52 +221,52 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& e) {
     }
 }
 
-Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& e) {
-    const Symbol* sym = symbolTable_.lookup(e.name.lexeme);
+Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
+    const Symbol* sym = symbolTable.lookup(identifier.name.lexeme);
     if (!sym) {
-        error(e.name, "use of undeclared identifier '" + e.name.lexeme + "'");
+        error(identifier.name, "use of undeclared identifier '" + identifier.name.lexeme + "'");
         return Type{TypeKind::Error};
     }
     if (sym->kind == Symbol::Kind::Function) {
-        error(e.name, "cannot use function '" + e.name.lexeme + "' as a value");
+        error(identifier.name, "cannot use function '" + identifier.name.lexeme + "' as a value");
         return Type{TypeKind::Error};
     }
     return sym->type;
 }
 
-Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& e) {
-    Type operandType = analyzeExpr(*e.operand);
+Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
+    Type operandType = analyzeExpr(*unary.operand);
 
-    switch (e.op.type) {
+    switch (unary.operatorToken.type) {
         case TokenType::BANG:
             if (!isError(operandType) && !isBoolCompatible(operandType)) {
-                error(e.op, "operand of '!' must be bool-compatible, got " + typeName(operandType));
+                error(unary.operatorToken, "operand of '!' must be bool-compatible, got " + typeName(operandType));
                 return Type{TypeKind::Error};
             }
             return Type{TypeKind::Bool};
 
         case TokenType::MINUS:
             if (!isError(operandType) && !isNumeric(operandType.kind)) {
-                error(e.op, "operand of unary '-' must be numeric, got " + typeName(operandType));
+                error(unary.operatorToken, "operand of unary '-' must be numeric, got " + typeName(operandType));
                 return Type{TypeKind::Error};
             }
             return operandType;
 
         case TokenType::TILDE:
             if (!isError(operandType) && !isInteger(operandType.kind)) {
-                error(e.op, "operand of '~' must be integer, got " + typeName(operandType));
+                error(unary.operatorToken, "operand of '~' must be integer, got " + typeName(operandType));
                 return Type{TypeKind::Error};
             }
             return operandType;
 
         case TokenType::INCREMENT:
         case TokenType::DECREMENT:
-            if (!std::holds_alternative<IdentifierExpr>(*e.operand->node)) {
-                error(e.op, "operand of '" + e.op.lexeme + "' must be an identifier");
+            if (!std::holds_alternative<IdentifierExpr>(*unary.operand->node)) {
+                error(unary.operatorToken, "operand of '" + unary.operatorToken.lexeme + "' must be an identifier");
                 return Type{TypeKind::Error};
             }
             if (!isError(operandType) && !isNumeric(operandType.kind)) {
-                error(e.op, "operand of '" + e.op.lexeme + "' must be numeric, got "
+                error(unary.operatorToken, "operand of '" + unary.operatorToken.lexeme + "' must be numeric, got "
                       + typeName(operandType));
                 return Type{TypeKind::Error};
             }
@@ -279,77 +277,87 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& e) {
     }
 }
 
-Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& e) {
-    Type lt = analyzeExpr(*e.left);
-    Type rt = analyzeExpr(*e.right);
+Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
+    Type leftType  = analyzeExpr(*binary.left);
+    Type rightType = analyzeExpr(*binary.right);
 
-    if (isError(lt) || isError(rt)) return Type{TypeKind::Error};
+    if (isError(leftType) || isError(rightType)) return Type{TypeKind::Error};
 
-    switch (e.op.type) {
+    switch (binary.operatorToken.type) {
         // Arithmetic
-        case TokenType::PLUS: case TokenType::MINUS:
-        case TokenType::STAR: case TokenType::SLASH: case TokenType::PERCENT: {
-            if (!isNumeric(lt.kind)) {
-                error(e.op, "left operand of '" + e.op.lexeme + "' must be numeric, got "
-                      + typeName(lt));
+        case TokenType::PLUS:
+        case TokenType::MINUS:
+        case TokenType::STAR:
+        case TokenType::SLASH:
+        case TokenType::PERCENT: {
+            if (!isNumeric(leftType.kind)) {
+                error(binary.operatorToken, "left operand of '" + binary.operatorToken.lexeme + "' must be numeric, got "
+                      + typeName(leftType));
                 return Type{TypeKind::Error};
             }
-            if (!isNumeric(rt.kind)) {
-                error(e.op, "right operand of '" + e.op.lexeme + "' must be numeric, got "
-                      + typeName(rt));
+            if (!isNumeric(rightType.kind)) {
+                error(binary.operatorToken, "right operand of '" + binary.operatorToken.lexeme + "' must be numeric, got "
+                      + typeName(rightType));
                 return Type{TypeKind::Error};
             }
-            return commonArithmeticType(lt, rt);
+            return commonArithmeticType(leftType, rightType);
         }
 
         // Bitwise
-        case TokenType::PIPE: case TokenType::CARET: case TokenType::AMPERSAND:
-        case TokenType::SHIFT_LEFT: case TokenType::SHIFT_RIGHT: {
-            if (!isInteger(lt.kind)) {
-                error(e.op, "left operand of '" + e.op.lexeme + "' must be integer, got "
-                      + typeName(lt));
+        case TokenType::PIPE:
+        case TokenType::CARET:
+        case TokenType::AMPERSAND:
+        case TokenType::SHIFT_LEFT:
+        case TokenType::SHIFT_RIGHT: {
+            if (!isInteger(leftType.kind)) {
+                error(binary.operatorToken, "left operand of '" + binary.operatorToken.lexeme + "' must be integer, got "
+                      + typeName(leftType));
                 return Type{TypeKind::Error};
             }
-            if (!isInteger(rt.kind)) {
-                error(e.op, "right operand of '" + e.op.lexeme + "' must be integer, got "
-                      + typeName(rt));
+            if (!isInteger(rightType.kind)) {
+                error(binary.operatorToken, "right operand of '" + binary.operatorToken.lexeme + "' must be integer, got "
+                      + typeName(rightType));
                 return Type{TypeKind::Error};
             }
-            return commonArithmeticType(lt, rt);
+            return commonArithmeticType(leftType, rightType);
         }
 
         // Ordering comparisons
-        case TokenType::LESS: case TokenType::LESS_EQUAL:
-        case TokenType::GREATER: case TokenType::GREATER_EQUAL: {
-            if (!isNumeric(lt.kind))
-                error(e.op, "left operand of '" + e.op.lexeme + "' must be numeric, got "
-                      + typeName(lt));
-            if (!isNumeric(rt.kind))
-                error(e.op, "right operand of '" + e.op.lexeme + "' must be numeric, got "
-                      + typeName(rt));
+        case TokenType::LESS:
+        case TokenType::LESS_EQUAL:
+        case TokenType::GREATER:
+        case TokenType::GREATER_EQUAL: {
+            if (!isNumeric(leftType.kind))
+                error(binary.operatorToken, "left operand of '" + binary.operatorToken.lexeme + "' must be numeric, got "
+                      + typeName(leftType));
+            if (!isNumeric(rightType.kind))
+                error(binary.operatorToken, "right operand of '" + binary.operatorToken.lexeme + "' must be numeric, got "
+                      + typeName(rightType));
             return Type{TypeKind::Bool};
         }
 
         // Equality comparisons
-        case TokenType::EQUAL_EQUAL: case TokenType::BANG_EQUAL: {
+        case TokenType::EQUAL_EQUAL:
+        case TokenType::BANG_EQUAL: {
             bool compatible =
-                (lt.kind == rt.kind) ||
-                (isNumeric(lt.kind) && isNumeric(rt.kind));
+                (leftType.kind == rightType.kind) ||
+                (isNumeric(leftType.kind) && isNumeric(rightType.kind));
             if (!compatible) {
-                error(e.op, "incompatible types for '" + e.op.lexeme + "': "
-                      + typeName(lt) + " and " + typeName(rt));
+                error(binary.operatorToken, "incompatible types for '" + binary.operatorToken.lexeme + "': "
+                      + typeName(leftType) + " and " + typeName(rightType));
             }
             return Type{TypeKind::Bool};
         }
 
         // Logical
-        case TokenType::AND: case TokenType::OR: {
-            if (!isBoolCompatible(lt))
-                error(e.op, "left operand of '" + e.op.lexeme
-                      + "' must be bool-compatible, got " + typeName(lt));
-            if (!isBoolCompatible(rt))
-                error(e.op, "right operand of '" + e.op.lexeme
-                      + "' must be bool-compatible, got " + typeName(rt));
+        case TokenType::AND:
+        case TokenType::OR: {
+            if (!isBoolCompatible(leftType))
+                error(binary.operatorToken, "left operand of '" + binary.operatorToken.lexeme
+                      + "' must be bool-compatible, got " + typeName(leftType));
+            if (!isBoolCompatible(rightType))
+                error(binary.operatorToken, "right operand of '" + binary.operatorToken.lexeme
+                      + "' must be bool-compatible, got " + typeName(rightType));
             return Type{TypeKind::Bool};
         }
 
@@ -358,144 +366,148 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& e) {
     }
 }
 
-Type SemanticAnalyzer::analyzeAssign(const AssignExpr& e) {
-    const Symbol* sym = symbolTable_.lookup(e.name.lexeme);
+Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
+    const Symbol* sym = symbolTable.lookup(assign.name.lexeme);
     if (!sym) {
-        error(e.name, "use of undeclared identifier '" + e.name.lexeme + "'");
-        analyzeExpr(*e.value);
+        error(assign.name, "use of undeclared identifier '" + assign.name.lexeme + "'");
+        analyzeExpr(*assign.value);
         return Type{TypeKind::Error};
     }
     if (sym->kind == Symbol::Kind::Function) {
-        error(e.name, "cannot assign to function '" + e.name.lexeme + "'");
-        analyzeExpr(*e.value);
+        error(assign.name, "cannot assign to function '" + assign.name.lexeme + "'");
+        analyzeExpr(*assign.value);
         return Type{TypeKind::Error};
     }
 
     Type lhsType = sym->type;
-    Type rhsType = analyzeExpr(*e.value);
-    checkCast(rhsType, lhsType, e.name, "assignment");
+    Type rhsType = analyzeExpr(*assign.value);
+    checkCast(rhsType, lhsType, assign.name, "assignment");
     return lhsType;
 }
 
-Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& e) {
-    const Symbol* sym = symbolTable_.lookup(e.name.lexeme);
+Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundAssign) {
+    const Symbol* sym = symbolTable.lookup(compoundAssign.name.lexeme);
     if (!sym) {
-        error(e.name, "use of undeclared identifier '" + e.name.lexeme + "'");
-        analyzeExpr(*e.value);
+        error(compoundAssign.name, "use of undeclared identifier '" + compoundAssign.name.lexeme + "'");
+        analyzeExpr(*compoundAssign.value);
         return Type{TypeKind::Error};
     }
     if (sym->kind == Symbol::Kind::Function) {
-        error(e.name, "cannot assign to function '" + e.name.lexeme + "'");
-        analyzeExpr(*e.value);
+        error(compoundAssign.name, "cannot assign to function '" + compoundAssign.name.lexeme + "'");
+        analyzeExpr(*compoundAssign.value);
         return Type{TypeKind::Error};
     }
 
     Type lhsType = sym->type;
-    Type rhsType = analyzeExpr(*e.value);
+    Type rhsType = analyzeExpr(*compoundAssign.value);
 
     if (isError(lhsType) || isError(rhsType)) return Type{TypeKind::Error};
 
     bool isArith =
-        e.op.type == TokenType::PLUS_EQUAL   || e.op.type == TokenType::MINUS_EQUAL  ||
-        e.op.type == TokenType::STAR_EQUAL   || e.op.type == TokenType::SLASH_EQUAL  ||
-        e.op.type == TokenType::PERCENT_EQUAL;
+        compoundAssign.operatorToken.type == TokenType::PLUS_EQUAL   ||
+        compoundAssign.operatorToken.type == TokenType::MINUS_EQUAL  ||
+        compoundAssign.operatorToken.type == TokenType::STAR_EQUAL   ||
+        compoundAssign.operatorToken.type == TokenType::SLASH_EQUAL  ||
+        compoundAssign.operatorToken.type == TokenType::PERCENT_EQUAL;
 
     bool isBitw =
-        e.op.type == TokenType::CARET_EQUAL  ||
-        e.op.type == TokenType::AMPERSAND_EQUAL ||
-        e.op.type == TokenType::PIPE_EQUAL;
+        compoundAssign.operatorToken.type == TokenType::CARET_EQUAL     ||
+        compoundAssign.operatorToken.type == TokenType::AMPERSAND_EQUAL ||
+        compoundAssign.operatorToken.type == TokenType::PIPE_EQUAL;
 
     if (isArith) {
         if (!isNumeric(lhsType.kind))
-            error(e.op, "left operand of '" + e.op.lexeme
+            error(compoundAssign.operatorToken, "left operand of '" + compoundAssign.operatorToken.lexeme
                   + "' must be numeric, got " + typeName(lhsType));
         if (!isNumeric(rhsType.kind))
-            error(e.op, "right operand of '" + e.op.lexeme
+            error(compoundAssign.operatorToken, "right operand of '" + compoundAssign.operatorToken.lexeme
                   + "' must be numeric, got " + typeName(rhsType));
     } else if (isBitw) {
         if (!isInteger(lhsType.kind))
-            error(e.op, "left operand of '" + e.op.lexeme
+            error(compoundAssign.operatorToken, "left operand of '" + compoundAssign.operatorToken.lexeme
                   + "' must be integer, got " + typeName(lhsType));
         if (!isInteger(rhsType.kind))
-            error(e.op, "right operand of '" + e.op.lexeme
+            error(compoundAssign.operatorToken, "right operand of '" + compoundAssign.operatorToken.lexeme
                   + "' must be integer, got " + typeName(rhsType));
     }
 
-    checkCast(rhsType, lhsType, e.op, "compound assignment");
+    checkCast(rhsType, lhsType, compoundAssign.operatorToken, "compound assignment");
     return lhsType;
 }
 
-Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& e) {
-    Type operandType = analyzeExpr(*e.operand);
+Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
+    Type operandType = analyzeExpr(*postfix.operand);
 
-    if (!std::holds_alternative<IdentifierExpr>(*e.operand->node)) {
-        error(e.op, "operand of '" + e.op.lexeme + "' must be an identifier");
+    if (!std::holds_alternative<IdentifierExpr>(*postfix.operand->node)) {
+        error(postfix.operatorToken, "operand of '" + postfix.operatorToken.lexeme + "' must be an identifier");
         return Type{TypeKind::Error};
     }
     if (!isError(operandType) && !isNumeric(operandType.kind)) {
-        error(e.op, "operand of '" + e.op.lexeme + "' must be numeric, got "
+        error(postfix.operatorToken, "operand of '" + postfix.operatorToken.lexeme + "' must be numeric, got "
               + typeName(operandType));
         return Type{TypeKind::Error};
     }
     return operandType;
 }
 
-Type SemanticAnalyzer::analyzeCall(const CallExpr& e) {
-    const Symbol* sym = symbolTable_.lookup(e.callee.lexeme);
+Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
+    const Symbol* sym = symbolTable.lookup(call.callee.lexeme);
     if (!sym) {
-        error(e.callee, "undeclared function '" + e.callee.lexeme + "'");
-        for (const auto& arg : e.args) analyzeExpr(*arg);
+        error(call.callee, "undeclared function '" + call.callee.lexeme + "'");
+        for (const auto& arg : call.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
     }
     if (sym->kind != Symbol::Kind::Function) {
-        error(e.callee, "'" + e.callee.lexeme + "' is not a function");
-        for (const auto& arg : e.args) analyzeExpr(*arg);
+        error(call.callee, "'" + call.callee.lexeme + "' is not a function");
+        for (const auto& arg : call.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
     }
 
     // Check argument count
-    if (e.args.size() != sym->paramTypes.size()) {
-        error(e.callee, "function '" + e.callee.lexeme + "' expects "
+    if (call.args.size() != sym->paramTypes.size()) {
+        error(call.callee, "function '" + call.callee.lexeme + "' expects "
               + std::to_string(sym->paramTypes.size()) + " argument(s), got "
-              + std::to_string(e.args.size()));
-        for (const auto& arg : e.args) analyzeExpr(*arg);
+              + std::to_string(call.args.size()));
+        for (const auto& arg : call.args) analyzeExpr(*arg);
         return sym->type;
     }
 
     // Check each argument type
-    for (size_t i = 0; i < e.args.size(); ++i) {
-        Type argType = analyzeExpr(*e.args[i]);
-        checkCast(argType, sym->paramTypes[i], e.callee,
-                  "argument " + std::to_string(i + 1)
-                  + " of '" + e.callee.lexeme + "'");
+    size_t argIndex = 0;
+    for (const auto& arg : call.args) {
+        Type argumentType = analyzeExpr(*arg);
+        checkCast(argumentType, sym->paramTypes[argIndex], call.callee,
+                  "argument " + std::to_string(argIndex + 1)
+                  + " of '" + call.callee.lexeme + "'");
+        ++argIndex;
     }
 
     return sym->type;
 }
 
-Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& e) {
-    Type declaredType = typeFromToken(e.typeName.type);
+Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
+    Type declaredType = typeFromToken(varDecl.typeName.type);
 
     // Redeclaration in the same scope?
-    const Symbol* existing = symbolTable_.lookupCurrentScope(e.name.lexeme);
+    const Symbol* existing = symbolTable.lookupCurrentScope(varDecl.name.lexeme);
     if (existing) {
-        error(e.name, "variable '" + e.name.lexeme + "' already declared in this scope"
+        error(varDecl.name, "variable '" + varDecl.name.lexeme + "' already declared in this scope"
               + " (previously declared at line "
               + std::to_string(existing->declarationToken.line) + ")");
-        if (e.initializer) analyzeExpr(*e.initializer);
+        if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
         return declaredType;  // return declared type so downstream uses don't compound errors
     }
 
     // Analyse initializer
-    if (e.initializer) {
-        Type initType = analyzeExpr(*e.initializer);
-        checkCast(initType, declaredType, e.name, "variable initializer");
+    if (varDecl.initializer) {
+        Type initializerType = analyzeExpr(*varDecl.initializer);
+        checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
     }
 
-    symbolTable_.declare(e.name.lexeme, Symbol{
+    symbolTable.declare(varDecl.name.lexeme, Symbol{
         Symbol::Kind::Variable,
         declaredType,
-        e.name,
+        varDecl.name,
         {}
     });
 
@@ -506,17 +518,17 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& e) {
 // Helpers
 // ============================================================
 
-void SemanticAnalyzer::enterScope() { symbolTable_.enterScope(); }
-void SemanticAnalyzer::exitScope()  { symbolTable_.exitScope(); }
+void SemanticAnalyzer::enterScope() { symbolTable.enterScope(); }
+void SemanticAnalyzer::exitScope()  { symbolTable.exitScope(); }
 
 const Symbol* SemanticAnalyzer::lookupSymbol(const Token& nameToken) {
-    const Symbol* sym = symbolTable_.lookup(nameToken.lexeme);
+    const Symbol* sym = symbolTable.lookup(nameToken.lexeme);
     if (!sym) error(nameToken, "use of undeclared identifier '" + nameToken.lexeme + "'");
     return sym;
 }
 
 void SemanticAnalyzer::error(const Token& token, const std::string& message) {
-    hadError_ = true;
+    hadError = true;
     std::cerr << "[line " << token.line << "] Error: " << message << '\n';
 }
 
@@ -524,20 +536,20 @@ void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
     std::cerr << "[line " << token.line << "] Warning: " << message << '\n';
 }
 
-void SemanticAnalyzer::recordType(const Expr& expr, Type t) {
-    typeMap_[expr.node.get()] = t;
+void SemanticAnalyzer::recordType(const Expr& expr, Type type) {
+    typeMap[expr.node.get()] = type;
 }
 
 void SemanticAnalyzer::checkCast(Type from, Type to,
                                   const Token& site, const std::string& context) {
     if (isError(from) || isError(to)) return;
-    CastResult cr = canImplicitlyCast(from, to);
-    std::string ctx = context.empty() ? "" : " in " + context;
-    if (cr == CastResult::None) {
+    CastResult castResult = canImplicitlyCast(from, to);
+    std::string contextString = context.empty() ? "" : " in " + context;
+    if (castResult == CastResult::None) {
         error(site, "cannot implicitly convert " + typeName(from)
-              + " to " + typeName(to) + ctx);
-    } else if (cr == CastResult::Warn) {
+              + " to " + typeName(to) + contextString);
+    } else if (castResult == CastResult::Warn) {
         warn(site, "implicit conversion from " + typeName(from)
-             + " to " + typeName(to) + " may lose data" + ctx);
+             + " to " + typeName(to) + " may lose data" + contextString);
     }
 }

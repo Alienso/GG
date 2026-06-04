@@ -7,263 +7,259 @@
 
 #include <cassert>
 #include <sstream>
-#include <stdexcept>
 
 // ============================================================
 // Public entry point
 // ============================================================
 
-IRModule CodeGen::generate(const Program& program, const ExprTypeMap& typeMap) {
-    module_     = {};
-    typeMap_    = &typeMap;
-    strCounter_ = 0;
+IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeMap) {
+    module        = {};
+    this->typeMap = &inputTypeMap;
+    stringCounter = 0;
 
     for (const auto& decl : program.declarations) {
-        if (decl.node && std::holds_alternative<FunctionDeclStmt>(*decl.node)) {
+        if (decl.node && std::holds_alternative<FunctionDeclStmt>(*decl.node))
             genFunction(std::get<FunctionDeclStmt>(*decl.node));
-        }
     }
-    return std::move(module_);
+    return std::move(module);
 }
 
 // ============================================================
 // Function codegen
 // ============================================================
 
-void CodeGen::genFunction(const FunctionDeclStmt& f) {
+void CodeGen::genFunction(const FunctionDeclStmt& function) {
     // Reset per-function state
-    tempCounter_        = 0;
-    labelCounter_       = 0;
-    allocaMap_.clear();
-    varTypeMap_.clear();
+    tempCounter         = 0;
+    labelCounter        = 0;
+    allocaMap.clear();
+    varTypeMap.clear();
 
     // Return type
-    currentReturnType_  = typeFromToken(f.returnType.type);
-    std::string retIrT  = irTypeName(currentReturnType_);
+    currentReturnType        = typeFromToken(function.returnType.type);
+    std::string returnIrType = irTypeName(currentReturnType);
 
     // Build parameter list string
-    std::string paramStr;
-    for (size_t i = 0; i < f.params.size(); ++i) {
-        if (i > 0) paramStr += ", ";
-        paramStr += irTypeName(typeFromToken(f.params[i].typeName.type));
-        paramStr += " %";
-        paramStr += f.params[i].name.lexeme;
+    std::string parameterString;
+    bool first = true;
+    for (const auto& param : function.params) {
+        if (!first) parameterString += ", ";
+        first = false;
+        parameterString += irTypeName(typeFromToken(param.typeName.type));
+        parameterString += " %";
+        parameterString += param.name.lexeme;
     }
 
-    IRFunction fn;
-    fn.signature = "define " + retIrT + " @" + f.name.lexeme + "(" + paramStr + ")";
+    IRFunction irFunction;
+    irFunction.signature = "define " + returnIrType + " @" + function.name.lexeme + "(" + parameterString + ")";
 
-    module_.functions.push_back(std::move(fn));
-    currentFn_ = &module_.functions.back();
+    module.functions.push_back(std::move(irFunction));
+    currentFunction = &module.functions.back();
 
     // Create the entry basic block
-    currentFn_->blocks.push_back(BasicBlock{"entry", {}, false});
-    currentBB_ = &currentFn_->blocks.back();
+    currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
+    currentBasicBlock = &currentFunction->blocks.back();
 
     // Spill each parameter into an alloca so it can be reassigned.
-    for (const auto& p : f.params) {
-        Type    paramType = typeFromToken(p.typeName.type);
-        std::string irT   = irTypeName(paramType);
-        std::string ptrReg = "%" + p.name.lexeme + ".addr";
-        emitAlloca(ptrReg, irT);
-        allocaMap_[p.name.lexeme]   = ptrReg;
-        varTypeMap_[p.name.lexeme]  = paramType;
-        emitStore(irT, "%" + p.name.lexeme, ptrReg);
+    for (const auto& param : function.params) {
+        Type        paramType  = typeFromToken(param.typeName.type);
+        std::string irType     = irTypeName(paramType);
+        std::string ptrName    = "%" + param.name.lexeme + ".addr";
+        emitAlloca(ptrName, irType);
+        allocaMap[param.name.lexeme]  = ptrName;
+        varTypeMap[param.name.lexeme] = paramType;
+        emitStore(irType, "%" + param.name.lexeme, ptrName);
     }
 
     // Codegen body statements
-    for (const auto& stmtPtr : f.body.body) {
+    for (const auto& stmtPtr : function.body.body) {
         if (stmtPtr) genStmt(*stmtPtr);
     }
 
     // Ensure each block is terminated
-    if (currentBB_ && !currentBB_->terminated) {
-        if (retIrT == "void") {
+    if (currentBasicBlock && !currentBasicBlock->terminated) {
+        if (returnIrType == "void") {
             emit("ret void");
         } else {
             // Semantic pass should have caught missing return; emit unreachable
             emit("unreachable");
         }
-        currentBB_->terminated = true;
+        currentBasicBlock->terminated = true;
     }
 
-    currentFn_ = nullptr;
-    currentBB_ = nullptr;
+    currentFunction   = nullptr;
+    currentBasicBlock = nullptr;
 }
 
 // ============================================================
 // Statement codegen
 // ============================================================
 
-void CodeGen::genStmt(const Stmt& s) {
-    // We need the function's return IR type for genReturn.
-    // Extract it from the current function's signature lazily.
+void CodeGen::genStmt(const Stmt& stmt) {
     std::visit(overloaded{
-        [&](const ExprStmt& es)      { genExpr(es.expression); },
-        [&](const BlockStmt& bs)     { genBlock(bs); },
-        [&](const IfStmt& is)        { genIf(is); },
-        [&](const WhileStmt& ws)     { genWhile(ws); },
-        [&](const ForStmt& fs)       { genFor(fs); },
-        [&](const ReturnStmt& rs)    { genReturn(rs); },
-        [&](const FunctionDeclStmt&) { /* nested functions not supported */ },
-    }, *s.node);
+        [&](const ExprStmt& exprStmt)      { genExpr(exprStmt.expression); },
+        [&](const BlockStmt& blockStmt)    { genBlock(blockStmt); },
+        [&](const IfStmt& ifStmt)          { genIf(ifStmt); },
+        [&](const WhileStmt& whileStmt)    { genWhile(whileStmt); },
+        [&](const ForStmt& forStmt)        { genFor(forStmt); },
+        [&](const ReturnStmt& returnStmt)  { genReturn(returnStmt); },
+        [&](const FunctionDeclStmt&)       { /* nested functions not supported */ },
+    }, *stmt.node);
 }
 
-void CodeGen::genBlock(const BlockStmt& b) {
+void CodeGen::genBlock(const BlockStmt& blockStmt) {
     // Snapshot current scope so inner declarations / shadows are undone on exit.
-    auto savedAllocas = allocaMap_;
-    auto savedTypes   = varTypeMap_;
+    auto savedAllocas = allocaMap;
+    auto savedTypes   = varTypeMap;
 
-    for (const auto& stmtPtr : b.body)
+    for (const auto& stmtPtr : blockStmt.body) {
         if (stmtPtr) genStmt(*stmtPtr);
+    }
 
     // Restore: removes names added in this block and restores any shadowed names.
-    // Allocas themselves remain in the IR (they live in the entry block), but they
-    // become unreachable via the map after the scope exits — correct scoping.
-    allocaMap_ = std::move(savedAllocas);
-    varTypeMap_ = std::move(savedTypes);
+    allocaMap  = std::move(savedAllocas);
+    varTypeMap = std::move(savedTypes);
 }
 
-void CodeGen::genIf(const IfStmt& s) {
-    int n = ++labelCounter_;
-    std::string thenLabel  = "if.then."  + std::to_string(n);
-    std::string elseLabel  = "if.else."  + std::to_string(n);
-    std::string mergeLabel = "if.merge." + std::to_string(n);
+void CodeGen::genIf(const IfStmt& ifStmt) {
+    int labelIndex          = ++labelCounter;
+    std::string thenLabel   = "if.then."  + std::to_string(labelIndex);
+    std::string elseLabel   = "if.else."  + std::to_string(labelIndex);
+    std::string mergeLabel  = "if.merge." + std::to_string(labelIndex);
 
-    Type condTy     = exprType(s.condition);
-    std::string cv  = genExpr(s.condition);
-    std::string cb  = emitToBool(cv, condTy);
+    Type        conditionType  = exprType(ifStmt.condition);
+    std::string conditionValue = genExpr(ifStmt.condition);
+    std::string conditionBool  = emitToBool(conditionValue, conditionType);
 
-    if (s.elseBranch) {
-        emitCondBr(cb, thenLabel, elseLabel);
-    } else {
-        emitCondBr(cb, thenLabel, mergeLabel);
-    }
+    if (ifStmt.elseBranch)
+        emitCondBr(conditionBool, thenLabel, elseLabel);
+    else
+        emitCondBr(conditionBool, thenLabel, mergeLabel);
 
     // Then block
     switchBlock(thenLabel);
-    genStmt(*s.thenBranch);
-    if (!currentBB_->terminated) emitBr(mergeLabel);
+    genStmt(*ifStmt.thenBranch);
+    if (!currentBasicBlock->terminated) emitBr(mergeLabel);
 
     // Else block
-    if (s.elseBranch) {
+    if (ifStmt.elseBranch) {
         switchBlock(elseLabel);
-        genStmt(*s.elseBranch);
-        if (!currentBB_->terminated) emitBr(mergeLabel);
+        genStmt(*ifStmt.elseBranch);
+        if (!currentBasicBlock->terminated) emitBr(mergeLabel);
     }
 
     // Merge block
     switchBlock(mergeLabel);
 }
 
-void CodeGen::genWhile(const WhileStmt& s) {
-    int n = ++labelCounter_;
-    std::string condLabel  = "while.cond."  + std::to_string(n);
-    std::string bodyLabel  = "while.body."  + std::to_string(n);
-    std::string mergeLabel = "while.merge." + std::to_string(n);
+void CodeGen::genWhile(const WhileStmt& whileStmt) {
+    int labelIndex          = ++labelCounter;
+    std::string condLabel   = "while.cond."  + std::to_string(labelIndex);
+    std::string bodyLabel   = "while.body."  + std::to_string(labelIndex);
+    std::string mergeLabel  = "while.merge." + std::to_string(labelIndex);
 
     emitBr(condLabel);
 
     switchBlock(condLabel);
-    Type condTy     = exprType(s.condition);
-    std::string cv  = genExpr(s.condition);
-    std::string cb  = emitToBool(cv, condTy);
-    emitCondBr(cb, bodyLabel, mergeLabel);
+    Type        conditionType  = exprType(whileStmt.condition);
+    std::string conditionValue = genExpr(whileStmt.condition);
+    std::string conditionBool  = emitToBool(conditionValue, conditionType);
+    emitCondBr(conditionBool, bodyLabel, mergeLabel);
 
     switchBlock(bodyLabel);
-    genStmt(*s.body);
-    if (!currentBB_->terminated) emitBr(condLabel);
+    genStmt(*whileStmt.body);
+    if (!currentBasicBlock->terminated) emitBr(condLabel);
 
     switchBlock(mergeLabel);
 }
 
-void CodeGen::genFor(const ForStmt& s) {
+void CodeGen::genFor(const ForStmt& forStmt) {
     // The for-init variable belongs to the for scope (not the enclosing scope).
-    auto savedAllocas = allocaMap_;
-    auto savedTypes   = varTypeMap_;
+    auto savedAllocas = allocaMap;
+    auto savedTypes   = varTypeMap;
 
-    int n = ++labelCounter_;
-    std::string condLabel  = "for.cond."  + std::to_string(n);
-    std::string bodyLabel  = "for.body."  + std::to_string(n);
-    std::string incLabel   = "for.inc."   + std::to_string(n);
-    std::string mergeLabel = "for.merge." + std::to_string(n);
+    int labelIndex          = ++labelCounter;
+    std::string condLabel   = "for.cond."  + std::to_string(labelIndex);
+    std::string bodyLabel   = "for.body."  + std::to_string(labelIndex);
+    std::string incLabel    = "for.inc."   + std::to_string(labelIndex);
+    std::string mergeLabel  = "for.merge." + std::to_string(labelIndex);
 
-    if (s.init) genStmt(*s.init);
+    if (forStmt.init) genStmt(*forStmt.init);
 
     emitBr(condLabel);
 
     switchBlock(condLabel);
-    if (s.condition.has_value()) {
-        Type condTy     = exprType(*s.condition);
-        std::string cv  = genExpr(*s.condition);
-        std::string cb  = emitToBool(cv, condTy);
-        emitCondBr(cb, bodyLabel, mergeLabel);
+    if (forStmt.condition.has_value()) {
+        Type        conditionType  = exprType(*forStmt.condition);
+        std::string conditionValue = genExpr(*forStmt.condition);
+        std::string conditionBool  = emitToBool(conditionValue, conditionType);
+        emitCondBr(conditionBool, bodyLabel, mergeLabel);
     } else {
         emitBr(bodyLabel);  // for(;;)
     }
 
     switchBlock(bodyLabel);
-    genStmt(*s.body);
-    if (!currentBB_->terminated) emitBr(incLabel);
+    genStmt(*forStmt.body);
+    if (!currentBasicBlock->terminated) emitBr(incLabel);
 
     switchBlock(incLabel);
-    if (s.increment.has_value()) genExpr(*s.increment);
+    if (forStmt.increment.has_value()) genExpr(*forStmt.increment);
     emitBr(condLabel);
 
     switchBlock(mergeLabel);
 
     // Restore scope — for-init variable goes out of scope
-    allocaMap_ = std::move(savedAllocas);
-    varTypeMap_ = std::move(savedTypes);
+    allocaMap  = std::move(savedAllocas);
+    varTypeMap = std::move(savedTypes);
 }
 
-void CodeGen::genReturn(const ReturnStmt& s) {
-    if (s.value.has_value()) {
-        Type valTy      = exprType(*s.value);
-        std::string val = genExpr(*s.value);
+void CodeGen::genReturn(const ReturnStmt& returnStmt) {
+    if (returnStmt.value.has_value()) {
+        Type        returnValueType = exprType(*returnStmt.value);
+        std::string value           = genExpr(*returnStmt.value);
         // Cast the value to the declared return type if needed
-        val = emitCast(val, valTy, currentReturnType_);
-        emit("ret " + irTypeName(currentReturnType_) + " " + val);
+        value = emitCast(value, returnValueType, currentReturnType);
+        emit("ret " + irTypeName(currentReturnType) + " " + value);
     } else {
         emit("ret void");
     }
-    if (currentBB_) currentBB_->terminated = true;
+    if (currentBasicBlock) currentBasicBlock->terminated = true;
 }
 
 // ============================================================
 // Expression codegen
 // ============================================================
 
-std::string CodeGen::genExpr(const Expr& e) {
-    Type resolvedType = exprType(e);
+std::string CodeGen::genExpr(const Expr& expr) {
+    Type resolvedType = exprType(expr);
     return std::visit(overloaded{
-        [&](const LiteralExpr& x)        -> std::string { return genLiteral(x, resolvedType); },
-        [&](const IdentifierExpr& x)     -> std::string { return genIdentifier(x); },
-        [&](const UnaryExpr& x)          -> std::string { return genUnary(x, resolvedType); },
-        [&](const BinaryExpr& x)         -> std::string { return genBinary(x, resolvedType); },
-        [&](const AssignExpr& x)         -> std::string { return genAssign(x); },
-        [&](const CompoundAssignExpr& x) -> std::string { return genCompoundAssign(x); },
-        [&](const PostfixExpr& x)        -> std::string { return genPostfix(x); },
-        [&](const CallExpr& x)           -> std::string { return genCall(x, resolvedType); },
-        [&](const VarDeclExpr& x)        -> std::string { return genVarDecl(x); },
-    }, *e.node);
+        [&](const LiteralExpr& literal)              -> std::string { return genLiteral(literal, resolvedType); },
+        [&](const IdentifierExpr& identifier)        -> std::string { return genIdentifier(identifier); },
+        [&](const UnaryExpr& unary)                  -> std::string { return genUnary(unary, resolvedType); },
+        [&](const BinaryExpr& binary)                -> std::string { return genBinary(binary, resolvedType); },
+        [&](const AssignExpr& assign)                -> std::string { return genAssign(assign); },
+        [&](const CompoundAssignExpr& compoundAssign)-> std::string { return genCompoundAssign(compoundAssign); },
+        [&](const PostfixExpr& postfix)              -> std::string { return genPostfix(postfix); },
+        [&](const CallExpr& call)                    -> std::string { return genCall(call, resolvedType); },
+        [&](const VarDeclExpr& varDecl)              -> std::string { return genVarDecl(varDecl); },
+    }, *expr.node);
 }
 
 // ---- Literal ----
 
-std::string CodeGen::genLiteral(const LiteralExpr& e, Type resolvedType) {
-    const std::string& lex = e.token.lexeme;
+std::string CodeGen::genLiteral(const LiteralExpr& literal, Type resolvedType) {
+    const std::string& lexeme = literal.token.lexeme;
 
-    switch (e.token.type) {
+    switch (literal.token.type) {
         case TokenType::NUMBER: {
-            if (lex.find('.') != std::string::npos) {
+            if (lexeme.find('.') != std::string::npos) {
                 // Float literal — ensure at least one digit after '.'
-                std::string val = lex;
-                if (!val.empty() && val.back() == '.') val += '0';
-                return val;
+                std::string value = lexeme;
+                if (!value.empty() && value.back() == '.') value += '0';
+                return value;
             }
             // Integer literal
-            return lex;
+            return lexeme;
         }
         case TokenType::TRUE:  return "1";
         case TokenType::FALSE: return "0";
@@ -271,58 +267,57 @@ std::string CodeGen::genLiteral(const LiteralExpr& e, Type resolvedType) {
         case TokenType::CHAR: {
             // The lexer stores the char lexeme WITHOUT the surrounding single quotes.
             // e.g., 'A' → lexeme "A", '\n' → lexeme "\n" (backslash + n).
-            if (!lex.empty()) {
-                if (lex[0] == '\\' && lex.size() >= 2) {
+            if (!lexeme.empty()) {
+                if (lexeme[0] == '\\' && lexeme.size() >= 2) {
                     // Escape sequence
-                    switch (lex[1]) {
+                    switch (lexeme[1]) {
                         case 'n':  return "10";
                         case 't':  return "9";
                         case '\\': return "92";
                         case '\'': return "39";
                         case '0':  return "0";
-                        default:   return std::to_string(static_cast<int>((unsigned char)lex[1]));
+                        default:   return std::to_string(static_cast<int>((unsigned char)lexeme[1]));
                     }
                 }
-                return std::to_string(static_cast<int>((unsigned char)lex[0]));
+                return std::to_string(static_cast<int>((unsigned char)lexeme[0]));
             }
             return "0";
         }
 
         case TokenType::STRING: {
             // The lexer stores the string lexeme WITHOUT the surrounding double quotes.
-            // e.g., "Hello" → lexeme "Hello".
             // Convert GG escape sequences to LLVM hex escape sequences.
             std::string content;
             int byteCount = 0;
-            for (size_t i = 0; i < lex.size(); ++i) {
-                if (lex[i] == '\\' && i + 1 < lex.size()) {
-                    char esc = lex[++i];
-                    switch (esc) {
+            for (size_t i = 0; i < lexeme.size(); ++i) {
+                if (lexeme[i] == '\\' && i + 1 < lexeme.size()) {
+                    char escaped = lexeme[++i];
+                    switch (escaped) {
                         case 'n':  content += "\\0A"; break;
                         case 't':  content += "\\09"; break;
                         case '\\': content += "\\5C"; break;
                         case '"':  content += "\\22"; break;
                         case '0':  content += "\\00"; break;
-                        default:   content += lex[i]; break;
+                        default:   content += lexeme[i]; break;
                     }
                 } else {
-                    content += lex[i];
+                    content += lexeme[i];
                 }
                 ++byteCount;
             }
             int totalBytes = byteCount + 1;  // +1 for null terminator
 
-            std::string globalName = "@.str." + std::to_string(strCounter_++);
-            module_.globals.push_back(
+            std::string globalName = "@.str." + std::to_string(stringCounter++);
+            module.globals.push_back(
                 globalName + " = private unnamed_addr constant ["
                 + std::to_string(totalBytes) + " x i8] c\""
                 + content + "\\00\", align 1");
 
-            std::string t = freshTemp();
-            emit("%" + t + " = getelementptr inbounds ["
+            std::string tempName = freshTemp();
+            emit("%" + tempName + " = getelementptr inbounds ["
                 + std::to_string(totalBytes) + " x i8], ptr "
                 + globalName + ", i32 0, i32 0");
-            return "%" + t;
+            return "%" + tempName;
         }
 
         default:
@@ -333,249 +328,251 @@ std::string CodeGen::genLiteral(const LiteralExpr& e, Type resolvedType) {
 
 // ---- Identifier ----
 
-std::string CodeGen::genIdentifier(const IdentifierExpr& e) {
-    auto it = allocaMap_.find(e.name.lexeme);
-    if (it == allocaMap_.end()) return "0";  // undefined — semantic pass should catch this
+std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
+    auto allocaIt  = allocaMap.find(identifier.name.lexeme);
+    if (allocaIt == allocaMap.end()) return "0";  // undefined — semantic pass should catch this
 
-    auto tit = varTypeMap_.find(e.name.lexeme);
-    if (tit == varTypeMap_.end()) return "0";
+    auto varTypeIt = varTypeMap.find(identifier.name.lexeme);
+    if (varTypeIt == varTypeMap.end()) return "0";
 
-    std::string irT   = irTypeName(tit->second);
-    std::string ptrReg = it->second;
-    return emitLoad(irT, ptrReg);
+    std::string irType  = irTypeName(varTypeIt->second);
+    std::string ptrName = allocaIt->second;
+    return emitLoad(irType, ptrName);
 }
 
 // ---- Unary ----
 
-std::string CodeGen::genUnary(const UnaryExpr& e, Type resolvedType) {
-    switch (e.op.type) {
+std::string CodeGen::genUnary(const UnaryExpr& unary, Type resolvedType) {
+    switch (unary.operatorToken.type) {
         case TokenType::MINUS: {
-            std::string val = genExpr(*e.operand);
-            Type opTy = exprType(*e.operand);
-            std::string irT = irTypeName(opTy);
-            std::string t = freshTemp();
-            if (isFloat(opTy.kind)) {
-                emit("%" + t + " = fneg " + irT + " " + val);
-            } else {
-                emit("%" + t + " = sub " + irT + " 0, " + val);
-            }
-            return "%" + t;
+            std::string value      = genExpr(*unary.operand);
+            Type        operandType = exprType(*unary.operand);
+            std::string irType     = irTypeName(operandType);
+            std::string tempName   = freshTemp();
+            if (isFloat(operandType.kind))
+                emit("%" + tempName + " = fneg " + irType + " " + value);
+            else
+                emit("%" + tempName + " = sub " + irType + " 0, " + value);
+            return "%" + tempName;
         }
         case TokenType::BANG: {
-            std::string val = genExpr(*e.operand);
-            Type opTy = exprType(*e.operand);
-            std::string bv  = emitToBool(val, opTy);
-            std::string t   = freshTemp();
-            emit("%" + t + " = xor i1 " + bv + ", true");
-            return "%" + t;
+            std::string value      = genExpr(*unary.operand);
+            Type        operandType = exprType(*unary.operand);
+            std::string boolValue  = emitToBool(value, operandType);
+            std::string tempName   = freshTemp();
+            emit("%" + tempName + " = xor i1 " + boolValue + ", true");
+            return "%" + tempName;
         }
         case TokenType::TILDE: {
-            std::string val = genExpr(*e.operand);
-            Type opTy = exprType(*e.operand);
-            std::string irT = irTypeName(opTy);
-            std::string t   = freshTemp();
-            emit("%" + t + " = xor " + irT + " " + val + ", -1");
-            return "%" + t;
+            std::string value      = genExpr(*unary.operand);
+            Type        operandType = exprType(*unary.operand);
+            std::string irType     = irTypeName(operandType);
+            std::string tempName   = freshTemp();
+            emit("%" + tempName + " = xor " + irType + " " + value + ", -1");
+            return "%" + tempName;
         }
         case TokenType::INCREMENT:
         case TokenType::DECREMENT: {
             // Prefix ++/-- : load, modify, store, return new value
-            const auto& id = std::get<IdentifierExpr>(*e.operand->node);
-            auto tit  = varTypeMap_.find(id.name.lexeme);
-            auto ait  = allocaMap_.find(id.name.lexeme);
-            if (tit == varTypeMap_.end() || ait == allocaMap_.end()) return "0";
-            Type t2     = tit->second;
-            std::string irT  = irTypeName(t2);
-            std::string ptrR = ait->second;
-            std::string old  = emitLoad(irT, ptrR);
-            std::string t    = freshTemp();
-            std::string one  = isFloat(t2.kind) ? "1.0" : "1";
-            std::string op   = (e.op.type == TokenType::INCREMENT) ? "add" : "sub";
-            if (isFloat(t2.kind)) op = (e.op.type == TokenType::INCREMENT) ? "fadd" : "fsub";
-            emit("%" + t + " = " + op + " " + irT + " " + old + ", " + one);
-            emitStore(irT, "%" + t, ptrR);
-            return "%" + t;
+            const auto& id       = std::get<IdentifierExpr>(*unary.operand->node);
+            auto        varTypeIt = varTypeMap.find(id.name.lexeme);
+            auto        allocaIt  = allocaMap.find(id.name.lexeme);
+            if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
+            Type        variableType = varTypeIt->second;
+            std::string irType       = irTypeName(variableType);
+            std::string ptrName      = allocaIt->second;
+            std::string oldValue     = emitLoad(irType, ptrName);
+            std::string tempName     = freshTemp();
+            std::string one          = isFloat(variableType.kind) ? "1.0" : "1";
+            std::string instruction  = (unary.operatorToken.type == TokenType::INCREMENT) ? "add" : "sub";
+            if (isFloat(variableType.kind))
+                instruction = (unary.operatorToken.type == TokenType::INCREMENT) ? "fadd" : "fsub";
+            emit("%" + tempName + " = " + instruction + " " + irType + " " + oldValue + ", " + one);
+            emitStore(irType, "%" + tempName, ptrName);
+            return "%" + tempName;
         }
         default:
             (void)resolvedType;
-            return genExpr(*e.operand);
+            return genExpr(*unary.operand);
     }
 }
 
 // ---- Binary ----
 
-std::string CodeGen::genBinary(const BinaryExpr& e, Type resolvedType) {
-    TokenType op = e.op.type;
+std::string CodeGen::genBinary(const BinaryExpr& binary, Type resolvedType) {
+    TokenType operatorType = binary.operatorToken.type;
 
     // Short-circuit logical ops
-    if (op == TokenType::AND || op == TokenType::OR) {
+    if (operatorType == TokenType::AND || operatorType == TokenType::OR) {
         // Eager evaluation — emit and i1 / or i1
-        Type lTy    = exprType(*e.left);
-        Type rTy    = exprType(*e.right);
-        std::string lv = genExpr(*e.left);
-        std::string rv = genExpr(*e.right);
-        std::string lb = emitToBool(lv, lTy);
-        std::string rb = emitToBool(rv, rTy);
-        std::string t  = freshTemp();
-        std::string inst = (op == TokenType::AND) ? "and" : "or";
-        emit("%" + t + " = " + inst + " i1 " + lb + ", " + rb);
-        return "%" + t;
+        Type        leftType  = exprType(*binary.left);
+        Type        rightType = exprType(*binary.right);
+        std::string leftValue  = genExpr(*binary.left);
+        std::string rightValue = genExpr(*binary.right);
+        std::string leftBool   = emitToBool(leftValue,  leftType);
+        std::string rightBool  = emitToBool(rightValue, rightType);
+        std::string tempName   = freshTemp();
+        std::string instruction = (operatorType == TokenType::AND) ? "and" : "or";
+        emit("%" + tempName + " = " + instruction + " i1 " + leftBool + ", " + rightBool);
+        return "%" + tempName;
     }
 
     // Comparison ops — result is Bool (i1)
-    bool isComparison = (op == TokenType::EQUAL_EQUAL || op == TokenType::BANG_EQUAL ||
-                         op == TokenType::LESS         || op == TokenType::LESS_EQUAL  ||
-                         op == TokenType::GREATER      || op == TokenType::GREATER_EQUAL);
+    bool isComparison = (operatorType == TokenType::EQUAL_EQUAL || operatorType == TokenType::BANG_EQUAL ||
+                         operatorType == TokenType::LESS         || operatorType == TokenType::LESS_EQUAL  ||
+                         operatorType == TokenType::GREATER      || operatorType == TokenType::GREATER_EQUAL);
 
-    Type lTy = exprType(*e.left);
-    Type rTy = exprType(*e.right);
+    Type leftType  = exprType(*binary.left);
+    Type rightType = exprType(*binary.right);
 
     // Determine the arithmetic type for the operation
-    Type opTy = isComparison
-                ? commonArithmeticType(lTy, rTy)
-                : resolvedType;
+    Type operandType = isComparison
+                     ? commonArithmeticType(leftType, rightType)
+                     : resolvedType;
 
-    std::string lv = genExpr(*e.left);
-    std::string rv = genExpr(*e.right);
+    std::string leftValue  = genExpr(*binary.left);
+    std::string rightValue = genExpr(*binary.right);
 
     // Cast operands to the common type
-    lv = emitCast(lv, lTy, opTy);
-    rv = emitCast(rv, rTy, opTy);
+    leftValue  = emitCast(leftValue,  leftType,  operandType);
+    rightValue = emitCast(rightValue, rightType, operandType);
 
-    std::string irT = irTypeName(opTy);
-    std::string t   = freshTemp();
+    std::string irType   = irTypeName(operandType);
+    std::string tempName = freshTemp();
 
     if (isComparison) {
-        std::string cmp = cmpInstr(op, opTy);
-        emit("%" + t + " = " + cmp + " " + irT + " " + lv + ", " + rv);
+        std::string comparisonInstruction = cmpInstr(operatorType, operandType);
+        emit("%" + tempName + " = " + comparisonInstruction + " " + irType + " " + leftValue + ", " + rightValue);
     } else {
-        std::string arith = arithInstr(op, opTy);
-        emit("%" + t + " = " + arith + " " + irT + " " + lv + ", " + rv);
+        std::string arithmeticInstruction = arithInstr(operatorType, operandType);
+        emit("%" + tempName + " = " + arithmeticInstruction + " " + irType + " " + leftValue + ", " + rightValue);
     }
-    return "%" + t;
+    return "%" + tempName;
 }
 
 // ---- Assign ----
 
-std::string CodeGen::genAssign(const AssignExpr& e) {
-    auto tit = varTypeMap_.find(e.name.lexeme);
-    auto ait = allocaMap_.find(e.name.lexeme);
-    if (tit == varTypeMap_.end() || ait == allocaMap_.end()) return "0";
+std::string CodeGen::genAssign(const AssignExpr& assign) {
+    auto varTypeIt = varTypeMap.find(assign.name.lexeme);
+    auto allocaIt  = allocaMap.find(assign.name.lexeme);
+    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
 
-    Type lhsTy = tit->second;
-    std::string irT  = irTypeName(lhsTy);
-    std::string ptrR = ait->second;
+    Type        lhsType = varTypeIt->second;
+    std::string irType  = irTypeName(lhsType);
+    std::string ptrName = allocaIt->second;
 
-    Type rhsTy      = exprType(*e.value);
-    std::string val = genExpr(*e.value);
-    val = emitCast(val, rhsTy, lhsTy);
+    Type        rhsType = exprType(*assign.value);
+    std::string value   = genExpr(*assign.value);
+    value = emitCast(value, rhsType, lhsType);
 
-    emitStore(irT, val, ptrR);
-    return val;
+    emitStore(irType, value, ptrName);
+    return value;
 }
 
 // ---- CompoundAssign ----
 
-std::string CodeGen::genCompoundAssign(const CompoundAssignExpr& e) {
-    auto tit = varTypeMap_.find(e.name.lexeme);
-    auto ait = allocaMap_.find(e.name.lexeme);
-    if (tit == varTypeMap_.end() || ait == allocaMap_.end()) return "0";
+std::string CodeGen::genCompoundAssign(const CompoundAssignExpr& compoundAssign) {
+    auto varTypeIt = varTypeMap.find(compoundAssign.name.lexeme);
+    auto allocaIt  = allocaMap.find(compoundAssign.name.lexeme);
+    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
 
-    Type lhsTy  = tit->second;
-    std::string irT   = irTypeName(lhsTy);
-    std::string ptrR  = ait->second;
+    Type        lhsType      = varTypeIt->second;
+    std::string irType       = irTypeName(lhsType);
+    std::string ptrName      = allocaIt->second;
 
     // Load current value
-    std::string cur = emitLoad(irT, ptrR);
+    std::string currentValue = emitLoad(irType, ptrName);
 
     // Evaluate RHS
-    Type rhsTy      = exprType(*e.value);
-    std::string rhs = genExpr(*e.value);
-    rhs = emitCast(rhs, rhsTy, lhsTy);
+    Type        rhsType    = exprType(*compoundAssign.value);
+    std::string rightValue = genExpr(*compoundAssign.value);
+    rightValue = emitCast(rightValue, rhsType, lhsType);
 
     // Apply the base operation
-    TokenType baseOp = compoundBaseOp(e.op.type);
-    std::string arith = arithInstr(baseOp, lhsTy);
-    std::string t = freshTemp();
-    emit("%" + t + " = " + arith + " " + irT + " " + cur + ", " + rhs);
+    TokenType   baseOperatorType        = compoundBaseOp(compoundAssign.operatorToken.type);
+    std::string arithmeticInstruction   = arithInstr(baseOperatorType, lhsType);
+    std::string tempName                = freshTemp();
+    emit("%" + tempName + " = " + arithmeticInstruction + " " + irType + " " + currentValue + ", " + rightValue);
 
-    emitStore(irT, "%" + t, ptrR);
-    return "%" + t;
+    emitStore(irType, "%" + tempName, ptrName);
+    return "%" + tempName;
 }
 
 // ---- Postfix ----
 
-std::string CodeGen::genPostfix(const PostfixExpr& e) {
-    const auto& id = std::get<IdentifierExpr>(*e.operand->node);
-    auto tit  = varTypeMap_.find(id.name.lexeme);
-    auto ait  = allocaMap_.find(id.name.lexeme);
-    if (tit == varTypeMap_.end() || ait == allocaMap_.end()) return "0";
+std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
+    const auto& id       = std::get<IdentifierExpr>(*postfix.operand->node);
+    auto        varTypeIt = varTypeMap.find(id.name.lexeme);
+    auto        allocaIt  = allocaMap.find(id.name.lexeme);
+    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
 
-    Type t2     = tit->second;
-    std::string irT  = irTypeName(t2);
-    std::string ptrR = ait->second;
+    Type        variableType = varTypeIt->second;
+    std::string irType       = irTypeName(variableType);
+    std::string ptrName      = allocaIt->second;
 
     // Load old value (this is the result of the postfix expression)
-    std::string old = emitLoad(irT, ptrR);
+    std::string oldValue = emitLoad(irType, ptrName);
 
     // Compute new value
-    std::string t   = freshTemp();
-    std::string one = isFloat(t2.kind) ? "1.0" : "1";
-    std::string op  = (e.op.type == TokenType::INCREMENT) ? "add" : "sub";
-    if (isFloat(t2.kind)) op = (e.op.type == TokenType::INCREMENT) ? "fadd" : "fsub";
-    emit("%" + t + " = " + op + " " + irT + " " + old + ", " + one);
-    emitStore(irT, "%" + t, ptrR);
+    std::string tempName    = freshTemp();
+    std::string one         = isFloat(variableType.kind) ? "1.0" : "1";
+    std::string instruction = (postfix.operatorToken.type == TokenType::INCREMENT) ? "add" : "sub";
+    if (isFloat(variableType.kind))
+        instruction = (postfix.operatorToken.type == TokenType::INCREMENT) ? "fadd" : "fsub";
+    emit("%" + tempName + " = " + instruction + " " + irType + " " + oldValue + ", " + one);
+    emitStore(irType, "%" + tempName, ptrName);
 
-    return old;  // return OLD value
+    return oldValue;  // return OLD value
 }
 
 // ---- Call ----
 
-std::string CodeGen::genCall(const CallExpr& e, Type resolvedType) {
-    std::string irRetT = irTypeName(resolvedType);
+std::string CodeGen::genCall(const CallExpr& call, Type resolvedType) {
+    std::string returnIrType = irTypeName(resolvedType);
 
-    std::string argStr;
-    for (size_t i = 0; i < e.args.size(); ++i) {
-        if (i > 0) argStr += ", ";
-        Type argTy      = exprType(*e.args[i]);
-        std::string val = genExpr(*e.args[i]);
-        argStr += irTypeName(argTy) + " " + val;
+    std::string argumentString;
+    bool first = true;
+    for (const auto& arg : call.args) {
+        if (!first) argumentString += ", ";
+        first = false;
+        Type        argumentType = exprType(*arg);
+        std::string value        = genExpr(*arg);
+        argumentString += irTypeName(argumentType) + " " + value;
     }
 
-    if (irRetT == "void") {
-        emit("call void @" + e.callee.lexeme + "(" + argStr + ")");
+    if (returnIrType == "void") {
+        emit("call void @" + call.callee.lexeme + "(" + argumentString + ")");
         return "";  // void call has no result
     }
 
-    std::string t = freshTemp();
-    emit("%" + t + " = call " + irRetT + " @" + e.callee.lexeme + "(" + argStr + ")");
-    return "%" + t;
+    std::string tempName = freshTemp();
+    emit("%" + tempName + " = call " + returnIrType + " @" + call.callee.lexeme + "(" + argumentString + ")");
+    return "%" + tempName;
 }
 
 // ---- VarDecl ----
 
-std::string CodeGen::genVarDecl(const VarDeclExpr& e) {
-    Type declTy      = typeFromToken(e.typeName.type);
-    std::string irT  = irTypeName(declTy);
-    std::string name = e.name.lexeme;
+std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
+    Type        declaredType = typeFromToken(varDecl.typeName.type);
+    std::string irType       = irTypeName(declaredType);
+    std::string name         = varDecl.name.lexeme;
 
     // Build a unique alloca pointer name.
     // If the variable shadows a name from an enclosing scope, append a counter
     // so the alloca names remain unique within the function.
     std::string ptrName = "%" + name + ".addr";
-    if (allocaMap_.count(name)) {
-        ptrName = "%" + name + ".addr." + std::to_string(tempCounter_++);
-    }
+    if (allocaMap.count(name))
+        ptrName = "%" + name + ".addr." + std::to_string(tempCounter++);
 
-    emitAlloca(ptrName, irT);
-    allocaMap_[name]  = ptrName;
-    varTypeMap_[name] = declTy;
+    emitAlloca(ptrName, irType);
+    allocaMap[name]  = ptrName;
+    varTypeMap[name] = declaredType;
 
-    if (e.initializer) {
-        Type initTy     = exprType(*e.initializer);
-        std::string val = genExpr(*e.initializer);
-        val = emitCast(val, initTy, declTy);
-        emitStore(irT, val, ptrName);
+    if (varDecl.initializer) {
+        Type        initializerType = exprType(*varDecl.initializer);
+        std::string value           = genExpr(*varDecl.initializer);
+        value = emitCast(value, initializerType, declaredType);
+        emitStore(irType, value, ptrName);
     }
 
     return ptrName;
@@ -585,46 +582,46 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& e) {
 // Low-level emit helpers
 // ============================================================
 
-void CodeGen::emit(const std::string& instr) {
-    if (currentBB_ && !currentBB_->terminated)
-        currentBB_->instructions.push_back("  " + instr);
+void CodeGen::emit(const std::string& instruction) {
+    if (currentBasicBlock && !currentBasicBlock->terminated)
+        currentBasicBlock->instructions.push_back("  " + instruction);
 }
 
-void CodeGen::emitAlloca(const std::string& ptrName, const std::string& irT) {
-    if (currentFn_)
-        currentFn_->allocas.push_back("  " + ptrName + " = alloca " + irT);
+void CodeGen::emitAlloca(const std::string& ptrName, const std::string& irType) {
+    if (currentFunction)
+        currentFunction->allocas.push_back("  " + ptrName + " = alloca " + irType);
 }
 
-void CodeGen::emitStore(const std::string& irT, const std::string& val, const std::string& ptr) {
-    emit("store " + irT + " " + val + ", ptr " + ptr);
+void CodeGen::emitStore(const std::string& irType, const std::string& value, const std::string& ptr) {
+    emit("store " + irType + " " + value + ", ptr " + ptr);
 }
 
-std::string CodeGen::emitLoad(const std::string& irT, const std::string& ptr) {
-    std::string t = freshTemp();
-    emit("%" + t + " = load " + irT + ", ptr " + ptr);
-    return "%" + t;
+std::string CodeGen::emitLoad(const std::string& irType, const std::string& ptr) {
+    std::string tempName = freshTemp();
+    emit("%" + tempName + " = load " + irType + ", ptr " + ptr);
+    return "%" + tempName;
 }
 
 void CodeGen::emitBr(const std::string& label) {
-    if (currentBB_ && !currentBB_->terminated) {
+    if (currentBasicBlock && !currentBasicBlock->terminated) {
         emit("br label %" + label);
-        currentBB_->terminated = true;
+        currentBasicBlock->terminated = true;
     }
 }
 
 void CodeGen::emitCondBr(const std::string& cond,
                           const std::string& trueLabel,
                           const std::string& falseLabel) {
-    if (currentBB_ && !currentBB_->terminated) {
+    if (currentBasicBlock && !currentBasicBlock->terminated) {
         emit("br i1 " + cond + ", label %" + trueLabel + ", label %" + falseLabel);
-        currentBB_->terminated = true;
+        currentBasicBlock->terminated = true;
     }
 }
 
 void CodeGen::switchBlock(const std::string& label) {
-    if (currentFn_) {
-        currentFn_->blocks.push_back(BasicBlock{label, {}, false});
-        currentBB_ = &currentFn_->blocks.back();
+    if (currentFunction) {
+        currentFunction->blocks.push_back(BasicBlock{label, {}, false});
+        currentBasicBlock = &currentFunction->blocks.back();
     }
 }
 
@@ -633,117 +630,127 @@ void CodeGen::switchBlock(const std::string& label) {
 // ============================================================
 
 std::string CodeGen::freshTemp() {
-    return "t" + std::to_string(tempCounter_++);
+    return "t" + std::to_string(tempCounter++);
 }
 
 std::string CodeGen::freshLabel(const std::string& hint) {
-    return hint + "." + std::to_string(++labelCounter_);
+    return hint + "." + std::to_string(++labelCounter);
 }
 
-Type CodeGen::exprType(const Expr& e) const {
-    if (!e.node || !typeMap_) return Type{TypeKind::Error};
-    auto it = typeMap_->find(e.node.get());
-    if (it == typeMap_->end()) return Type{TypeKind::Error};
+Type CodeGen::exprType(const Expr& expression) const {
+    if (!expression.node || !typeMap) return Type{TypeKind::Error};
+    auto it = typeMap->find(expression.node.get());
+    if (it == typeMap->end()) return Type{TypeKind::Error};
     return it->second;
 }
 
-std::string CodeGen::emitCast(const std::string& val, Type from, Type to) {
-    if (from == to) return val;
-    if (isError(from) || isError(to)) return val;
+std::string CodeGen::emitCast(const std::string& value, Type from, Type to) {
+    if (from == to) return value;
+    if (isError(from) || isError(to)) return value;
 
-    auto fw = [](TypeKind k) -> int {
-        switch (k) {
-            case TypeKind::I8:  case TypeKind::U8:  case TypeKind::Char: return 8;
-            case TypeKind::I16: case TypeKind::U16: return 16;
-            case TypeKind::I32: case TypeKind::U32: return 32;
-            case TypeKind::I64: case TypeKind::U64: return 64;
-            case TypeKind::F32: return 32;
-            case TypeKind::F64: return 64;
-            case TypeKind::Bool: return 1;
-            default: return 32;
+    auto getBitWidth = [](TypeKind kind) -> int {
+        switch (kind) {
+            case TypeKind::I8:
+            case TypeKind::U8:
+            case TypeKind::Char:
+                return 8;
+            case TypeKind::I16:
+            case TypeKind::U16:
+                return 16;
+            case TypeKind::I32:
+            case TypeKind::U32:
+                return 32;
+            case TypeKind::I64:
+            case TypeKind::U64:
+                return 64;
+            case TypeKind::F32:
+                return 32;
+            case TypeKind::F64:
+                return 64;
+            case TypeKind::Bool:
+                return 1;
+            default:
+                return 32;
         }
     };
 
-    std::string fromIr = irTypeName(from);
-    std::string toIr   = irTypeName(to);
-    std::string instr;
+    std::string fromIrType = irTypeName(from);
+    std::string toIrType   = irTypeName(to);
+    std::string instruction;
 
     if (isInteger(from.kind) && isInteger(to.kind)) {
-        int fb = fw(from.kind), tb = fw(to.kind);
-        if (tb > fb) {
-            instr = isUnsignedInt(from.kind) ? "zext" : "sext";
-        } else if (tb < fb) {
-            instr = "trunc";
-        } else {
-            // Same IR bit-width — just reinterpret; no instruction needed
-            return val;
-        }
+        int fromBits = getBitWidth(from.kind);
+        int toBits   = getBitWidth(to.kind);
+        if (toBits > fromBits)
+            instruction = isUnsignedInt(from.kind) ? "zext" : "sext";
+        else if (toBits < fromBits)
+            instruction = "trunc";
+        else
+            return value;  // Same IR bit-width — just reinterpret; no instruction needed
     } else if (from.kind == TypeKind::Bool && isInteger(to.kind)) {
-        instr = "zext";
+        instruction = "zext";
     } else if (isInteger(from.kind) && to.kind == TypeKind::Bool) {
         // Convert to i1 via icmp ne
-        return emitToBool(val, from);
+        return emitToBool(value, from);
     } else if (isFloat(from.kind) && isFloat(to.kind)) {
-        int fb = fw(from.kind), tb = fw(to.kind);
-        instr = (tb > fb) ? "fpext" : "fptrunc";
+        int fromBits = getBitWidth(from.kind);
+        int toBits   = getBitWidth(to.kind);
+        instruction  = (toBits > fromBits) ? "fpext" : "fptrunc";
     } else if (isInteger(from.kind) && isFloat(to.kind)) {
-        instr = isSignedInt(from.kind) ? "sitofp" : "uitofp";
+        instruction = isSignedInt(from.kind) ? "sitofp" : "uitofp";
     } else if (isFloat(from.kind) && isInteger(to.kind)) {
-        instr = isSignedInt(to.kind) ? "fptosi" : "fptoui";
+        instruction = isSignedInt(to.kind) ? "fptosi" : "fptoui";
     } else {
-        return val;  // no known cast
+        return value;  // no known cast
     }
 
-    std::string t = freshTemp();
-    emit("%" + t + " = " + instr + " " + fromIr + " " + val + " to " + toIr);
-    return "%" + t;
+    std::string tempName = freshTemp();
+    emit("%" + tempName + " = " + instruction + " " + fromIrType + " " + value + " to " + toIrType);
+    return "%" + tempName;
 }
 
-std::string CodeGen::emitToBool(const std::string& val, Type t) {
-    if (t.kind == TypeKind::Bool) return val;
+std::string CodeGen::emitToBool(const std::string& value, Type valueType) {
+    if (valueType.kind == TypeKind::Bool) return value;
 
-    std::string irT = irTypeName(t);
-    std::string tb  = freshTemp();
-    if (isFloat(t.kind)) {
-        emit("%" + tb + " = fcmp une " + irT + " " + val + ", 0.0");
-    } else {
-        // integer or char
-        std::string zero = "0";
-        emit("%" + tb + " = icmp ne " + irT + " " + val + ", " + zero);
-    }
-    return "%" + tb;
+    std::string irType   = irTypeName(valueType);
+    std::string tempName = freshTemp();
+    if (isFloat(valueType.kind))
+        emit("%" + tempName + " = fcmp une " + irType + " " + value + ", 0.0");
+    else
+        emit("%" + tempName + " = icmp ne " + irType + " " + value + ", 0");
+    return "%" + tempName;
 }
 
 // ============================================================
 // Arithmetic / comparison instruction selection
 // ============================================================
 
-std::string CodeGen::arithInstr(TokenType op, Type t) {
-    bool fp  = isFloat(t.kind);
-    bool sig = isSignedInt(t.kind);
+std::string CodeGen::arithInstr(TokenType operatorType, Type type) {
+    bool isFloat  = ::isFloat(type.kind);
+    bool isSigned = isSignedInt(type.kind);
 
-    switch (op) {
-        case TokenType::PLUS:         return fp ? "fadd" : "add";
-        case TokenType::MINUS:        return fp ? "fsub" : "sub";
-        case TokenType::STAR:         return fp ? "fmul" : "mul";
-        case TokenType::SLASH:        return fp ? "fdiv" : (sig ? "sdiv" : "udiv");
-        case TokenType::PERCENT:      return fp ? "frem" : (sig ? "srem" : "urem");
-        case TokenType::AMPERSAND:    return "and";
-        case TokenType::PIPE:         return "or";
-        case TokenType::CARET:        return "xor";
-        case TokenType::SHIFT_LEFT:   return "shl";
-        case TokenType::SHIFT_RIGHT:  return sig ? "ashr" : "lshr";
-        default:                      return "add";  // fallback
+    switch (operatorType) {
+        case TokenType::PLUS:        return isFloat ? "fadd" : "add";
+        case TokenType::MINUS:       return isFloat ? "fsub" : "sub";
+        case TokenType::STAR:        return isFloat ? "fmul" : "mul";
+        case TokenType::SLASH:       return isFloat ? "fdiv" : (isSigned ? "sdiv" : "udiv");
+        case TokenType::PERCENT:     return isFloat ? "frem" : (isSigned ? "srem" : "urem");
+        case TokenType::AMPERSAND:   return "and";
+        case TokenType::PIPE:        return "or";
+        case TokenType::CARET:       return "xor";
+        case TokenType::SHIFT_LEFT:  return "shl";
+        case TokenType::SHIFT_RIGHT: return isSigned ? "ashr" : "lshr";
+        default:                     return "add";  // fallback
     }
 }
 
-std::string CodeGen::cmpInstr(TokenType op, Type t) {
-    bool fp  = isFloat(t.kind);
-    bool sig = isSignedInt(t.kind) || t.kind == TypeKind::Bool;
+std::string CodeGen::cmpInstr(TokenType operatorType, Type type) {
+    bool isFloat  = ::isFloat(type.kind);
+    bool isSigned = isSignedInt(type.kind) || type.kind == TypeKind::Bool;
 
-    if (fp) {
+    if (isFloat) {
         // ordered comparisons (quiet NaN → false)
-        switch (op) {
+        switch (operatorType) {
             case TokenType::EQUAL_EQUAL:   return "fcmp oeq";
             case TokenType::BANG_EQUAL:    return "fcmp one";
             case TokenType::LESS:          return "fcmp olt";
@@ -753,28 +760,28 @@ std::string CodeGen::cmpInstr(TokenType op, Type t) {
             default:                       return "fcmp oeq";
         }
     } else {
-        switch (op) {
+        switch (operatorType) {
             case TokenType::EQUAL_EQUAL:   return "icmp eq";
             case TokenType::BANG_EQUAL:    return "icmp ne";
-            case TokenType::LESS:          return sig ? "icmp slt" : "icmp ult";
-            case TokenType::LESS_EQUAL:    return sig ? "icmp sle" : "icmp ule";
-            case TokenType::GREATER:       return sig ? "icmp sgt" : "icmp ugt";
-            case TokenType::GREATER_EQUAL: return sig ? "icmp sge" : "icmp uge";
+            case TokenType::LESS:          return isSigned ? "icmp slt" : "icmp ult";
+            case TokenType::LESS_EQUAL:    return isSigned ? "icmp sle" : "icmp ule";
+            case TokenType::GREATER:       return isSigned ? "icmp sgt" : "icmp ugt";
+            case TokenType::GREATER_EQUAL: return isSigned ? "icmp sge" : "icmp uge";
             default:                       return "icmp eq";
         }
     }
 }
 
-TokenType CodeGen::compoundBaseOp(TokenType op) {
-    switch (op) {
-        case TokenType::PLUS_EQUAL:    return TokenType::PLUS;
-        case TokenType::MINUS_EQUAL:   return TokenType::MINUS;
-        case TokenType::STAR_EQUAL:    return TokenType::STAR;
-        case TokenType::SLASH_EQUAL:   return TokenType::SLASH;
-        case TokenType::PERCENT_EQUAL: return TokenType::PERCENT;
+TokenType CodeGen::compoundBaseOp(TokenType operatorType) {
+    switch (operatorType) {
+        case TokenType::PLUS_EQUAL:      return TokenType::PLUS;
+        case TokenType::MINUS_EQUAL:     return TokenType::MINUS;
+        case TokenType::STAR_EQUAL:      return TokenType::STAR;
+        case TokenType::SLASH_EQUAL:     return TokenType::SLASH;
+        case TokenType::PERCENT_EQUAL:   return TokenType::PERCENT;
         case TokenType::AMPERSAND_EQUAL: return TokenType::AMPERSAND;
-        case TokenType::PIPE_EQUAL:    return TokenType::PIPE;
-        case TokenType::CARET_EQUAL:   return TokenType::CARET;
-        default:                       return TokenType::PLUS;
+        case TokenType::PIPE_EQUAL:      return TokenType::PIPE;
+        case TokenType::CARET_EQUAL:     return TokenType::CARET;
+        default:                         return TokenType::PLUS;
     }
 }

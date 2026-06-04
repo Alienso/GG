@@ -36,13 +36,13 @@ struct IdentifierExpr {
 };
 
 struct UnaryExpr {
-    Token op;              // BANG, MINUS, TILDE, INCREMENT, DECREMENT (prefix)
+    Token operatorToken;   // BANG, MINUS, TILDE, INCREMENT, DECREMENT (prefix)
     std::unique_ptr<Expr> operand;
 };
 
 struct BinaryExpr {
     std::unique_ptr<Expr> left;
-    Token op;
+    Token operatorToken;
     std::unique_ptr<Expr> right;
 };
 
@@ -53,13 +53,13 @@ struct AssignExpr {
 
 struct CompoundAssignExpr {
     Token name;
-    Token op;              // PLUS_EQUAL, MINUS_EQUAL, STAR_EQUAL, etc.
+    Token operatorToken;   // PLUS_EQUAL, MINUS_EQUAL, STAR_EQUAL, etc.
     std::unique_ptr<Expr> value;
 };
 
 struct PostfixExpr {
     std::unique_ptr<Expr> operand;
-    Token op;              // INCREMENT, DECREMENT
+    Token operatorToken;   // INCREMENT, DECREMENT
 };
 
 struct CallExpr {
@@ -173,7 +173,7 @@ Stmt makeStmt(T&& node) {
 }
 
 // Box helpers: move an Expr/Stmt into a unique_ptr (for recursive node fields)
-inline std::unique_ptr<Expr> box(Expr e) { return std::make_unique<Expr>(std::move(e)); }
-inline std::unique_ptr<Stmt> box(Stmt s) { return std::make_unique<Stmt>(std::move(s)); }
+inline std::unique_ptr<Expr> box(Expr expression) { return std::make_unique<Expr>(std::move(expression)); }
+inline std::unique_ptr<Stmt> box(Stmt statement)  { return std::make_unique<Stmt>(std::move(statement)); }
 
 #endif //GG_AST_H

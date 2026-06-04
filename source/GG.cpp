@@ -9,7 +9,7 @@
 #include <fstream>
 #include <iostream>
 
-GG::GG(std::vector<std::string>& paths) : paths_(paths), lexer(paths) {
+GG::GG(std::vector<std::string>& inputPaths) : paths(inputPaths), lexer(inputPaths) {
 
 }
 
@@ -18,15 +18,15 @@ void GG::run() {
 
     namespace fs = std::filesystem;
     const fs::path buildDir = fs::current_path() / "build";
-    std::error_code ec;
-    fs::create_directories(buildDir, ec);
-    if (ec) {
-        std::cerr << "Error: cannot create build directory: " << ec.message() << "\n";
+    std::error_code errorCode;
+    fs::create_directories(buildDir, errorCode);
+    if (errorCode) {
+        std::cerr << "Error: cannot create build directory: " << errorCode.message() << "\n";
         return;
     }
 
-    for (size_t fi = 0; fi < lexer.tokens().size(); ++fi) {
-        const std::string stem    = fs::path(paths_[fi]).stem().string();
+    for (size_t fileIndex = 0; fileIndex < lexer.tokens().size(); ++fileIndex) {
+        const std::string stem    = fs::path(paths[fileIndex]).stem().string();
         const fs::path    astPath = buildDir / (stem + ".ast");
         const fs::path    irPath  = buildDir / (stem + ".ll");
 
@@ -36,14 +36,14 @@ void GG::run() {
         if (!astFile) { std::cerr << "Error: cannot open " << astPath << " for writing\n"; continue; }
         if (!irFile)  { std::cerr << "Error: cannot open " << irPath  << " for writing\n"; continue; }
 
-        Program ast = parser.parse(lexer.tokens()[fi]);
+        Program ast = parser.parse(lexer.tokens()[fileIndex]);
 
         AstPrinter astPrinter;
         astPrinter.print(ast, astFile);
 
         SemanticResult result = semanticAnalyzer.analyze(ast);
         if (!result.hadError) {
-            IRModule ir = codeGen.generate(ast, result.typeMap);
+            IRModule ir = codeGenerator.generate(ast, result.typeMap);
             IRPrinter irPrinter;
             irPrinter.print(ir, irFile);
         }

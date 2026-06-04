@@ -24,10 +24,10 @@ public:
     SemanticResult analyze(const Program& program);  // resets all state per call
 
 private:
-    SymbolTable         symbolTable_;
-    ExprTypeMap         typeMap_;
-    bool                hadError_          = false;
-    std::optional<Type> currentReturnType_; // nullopt = top-level (not inside a function)
+    SymbolTable         symbolTable;
+    ExprTypeMap         typeMap;
+    bool                hadError          = false;
+    std::optional<Type> currentReturnType; // nullopt = top-level (not inside a function)
 
     // Pass 1: hoist top-level function signatures into the global scope
     void collectFunctions(const Program& program);
@@ -35,25 +35,25 @@ private:
     // Statement analysis
     void analyzeStmt(const Stmt& stmt);
     void analyzeBlock(const BlockStmt& block);
-    void analyzeIf(const IfStmt& s);
-    void analyzeWhile(const WhileStmt& s);
-    void analyzeFor(const ForStmt& s);
-    void analyzeReturn(const ReturnStmt& s);
-    void analyzeFunctionDecl(const FunctionDeclStmt& s);
+    void analyzeIf(const IfStmt& ifStmt);
+    void analyzeWhile(const WhileStmt& whileStmt);
+    void analyzeFor(const ForStmt& forStmt);
+    void analyzeReturn(const ReturnStmt& returnStmt);
+    void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
 
-    // Expression analysis — returns resolved Type and records it in typeMap_.
+    // Expression analysis — returns resolved Type and records it in typeMap.
     // Not [[nodiscard]] because it is intentionally called for side effects
     // in error-recovery paths (e.g. analysing arguments after a type error).
     Type analyzeExpr(const Expr& expr);
-    [[nodiscard]] Type analyzeLiteral(const LiteralExpr& e);
-    [[nodiscard]] Type analyzeIdentifier(const IdentifierExpr& e);
-    [[nodiscard]] Type analyzeUnary(const UnaryExpr& e);
-    [[nodiscard]] Type analyzeBinary(const BinaryExpr& e);
-    [[nodiscard]] Type analyzeAssign(const AssignExpr& e);
-    [[nodiscard]] Type analyzeCompoundAssign(const CompoundAssignExpr& e);
-    [[nodiscard]] Type analyzePostfix(const PostfixExpr& e);
-    [[nodiscard]] Type analyzeCall(const CallExpr& e);
-    [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& e);
+    [[nodiscard]] Type analyzeLiteral(const LiteralExpr& literal);
+    [[nodiscard]] Type analyzeIdentifier(const IdentifierExpr& identifier);
+    [[nodiscard]] Type analyzeUnary(const UnaryExpr& unary);
+    [[nodiscard]] Type analyzeBinary(const BinaryExpr& binary);
+    [[nodiscard]] Type analyzeAssign(const AssignExpr& assign);
+    [[nodiscard]] Type analyzeCompoundAssign(const CompoundAssignExpr& compoundAssign);
+    [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);
+    [[nodiscard]] Type analyzeCall(const CallExpr& call);
+    [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& varDecl);
 
     // Helpers
     void          enterScope();
@@ -61,7 +61,7 @@ private:
     const Symbol* lookupSymbol(const Token& nameToken);  // emits error if missing
     void          error(const Token& token, const std::string& message);
     void          warn(const Token& token, const std::string& message);
-    void          recordType(const Expr& expr, Type t);
+    void          recordType(const Expr& expr, Type type);
     void          checkCast(Type from, Type to, const Token& site,
                             const std::string& context);
 };

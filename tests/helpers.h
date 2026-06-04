@@ -2,7 +2,8 @@
 // Shared test utilities — lex/parse/analyse from a source string.
 //
 
-#pragma once
+#ifndef GG_HELPERS_H
+#define GG_HELPERS_H
 
 #include "../source/lexer/Lexer.h"
 #include "../source/parser/Parser.h"
@@ -22,15 +23,15 @@
 // Restores automatically (even on test failure / exception).
 
 struct StderrCapture {
-    std::ostringstream buf;
+    std::ostringstream buffer;
     std::streambuf*    old;
 
-    StderrCapture()  : old(std::cerr.rdbuf(buf.rdbuf())) {}
+    StderrCapture()  : old(std::cerr.rdbuf(buffer.rdbuf())) {}
     ~StderrCapture() { std::cerr.rdbuf(old); }
 
-    std::string str() const { return buf.str(); }
+    std::string str() const { return buffer.str(); }
     bool        contains(const std::string& substr) const {
-        return buf.str().find(substr) != std::string::npos;
+        return buffer.str().find(substr) != std::string::npos;
     }
 };
 
@@ -71,26 +72,28 @@ inline SemanticResult analyzeString(const std::string& source) {
 inline std::string codegenString(const std::string& source) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
-    SemanticResult sem = analyzer.analyze(ast);
-    CodeGen cg;
-    IRModule ir = cg.generate(ast, sem.typeMap);
-    std::ostringstream oss;
+    SemanticResult semanticResult = analyzer.analyze(ast);
+    CodeGen codeGenerator;
+    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap);
+    std::ostringstream output;
     IRPrinter printer;
-    printer.print(ir, oss);
-    return oss.str();
+    printer.print(ir, output);
+    return output.str();
 }
 
 // ---- AST unwrap helpers ----
 // These call REQUIRE so a wrong-variant failure shows up cleanly.
 
 template<typename T>
-const T& asStmt(const Stmt& s) {
-    REQUIRE(std::holds_alternative<T>(*s.node));
-    return std::get<T>(*s.node);
+const T& asStmt(const Stmt& stmt) {
+    REQUIRE(std::holds_alternative<T>(*stmt.node));
+    return std::get<T>(*stmt.node);
 }
 
 template<typename T>
-const T& asExpr(const Expr& e) {
-    REQUIRE(std::holds_alternative<T>(*e.node));
-    return std::get<T>(*e.node);
+const T& asExpr(const Expr& expr) {
+    REQUIRE(std::holds_alternative<T>(*expr.node));
+    return std::get<T>(*expr.node);
 }
+
+#endif //GG_HELPERS_H

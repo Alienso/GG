@@ -20,7 +20,7 @@ public:
 class Parser {
 public:
     Parser();
-    [[nodiscard]] Program parse(const std::vector<Token>& tokens_);
+    [[nodiscard]] Program parse(const std::vector<Token>& inputTokens);
 
 private:
     std::vector<Token> tokens;

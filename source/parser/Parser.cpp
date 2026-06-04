@@ -7,8 +7,8 @@
 
 Parser::Parser() {}
 
-Program Parser::parse(const std::vector<Token>& tokens_) {
-    tokens  = std::vector<Token>(tokens_);
+Program Parser::parse(const std::vector<Token>& inputTokens) {
+    tokens  = std::vector<Token>(inputTokens);
     current = 0;
 
     Program program;
@@ -69,9 +69,8 @@ const Token& Parser::consume(TokenType type, const std::string& msg) {
 // ============================================================
 
 ParseError Parser::error(const Token& token, const std::string& msg) {
-    std::string full = "[line " + std::to_string(token.line) + "] Error: " + msg;
-    std::cerr << full << '\n';
-    return ParseError(full);
+    std::cerr << "[line " << token.line << "] Error: " << msg << '\n';
+    return ParseError("[line " + std::to_string(token.line) + "] Error: " + msg);
 }
 
 void Parser::synchronize() {
@@ -83,10 +82,19 @@ void Parser::synchronize() {
             case TokenType::WHILE:
             case TokenType::FOR:
             case TokenType::RETURN:
-            case TokenType::I8:  case TokenType::I16: case TokenType::I32: case TokenType::I64:
-            case TokenType::U8:  case TokenType::U16: case TokenType::U32: case TokenType::U64:
-            case TokenType::F32: case TokenType::F64:
-            case TokenType::BOOL: case TokenType::CHAR_TYPE: case TokenType::STRING_TYPE:
+            case TokenType::I8:
+            case TokenType::I16:
+            case TokenType::I32:
+            case TokenType::I64:
+            case TokenType::U8:
+            case TokenType::U16:
+            case TokenType::U32:
+            case TokenType::U64:
+            case TokenType::F32:
+            case TokenType::F64:
+            case TokenType::BOOL:
+            case TokenType::CHAR_TYPE:
+            case TokenType::STRING_TYPE:
                 return;
             default:
                 break;
@@ -101,10 +109,19 @@ void Parser::synchronize() {
 
 bool Parser::isTypeName() const {
     switch (peek().type) {
-        case TokenType::I8:  case TokenType::I16: case TokenType::I32: case TokenType::I64:
-        case TokenType::U8:  case TokenType::U16: case TokenType::U32: case TokenType::U64:
-        case TokenType::F32: case TokenType::F64:
-        case TokenType::BOOL: case TokenType::CHAR_TYPE: case TokenType::STRING_TYPE:
+        case TokenType::I8:
+        case TokenType::I16:
+        case TokenType::I32:
+        case TokenType::I64:
+        case TokenType::U8:
+        case TokenType::U16:
+        case TokenType::U32:
+        case TokenType::U64:
+        case TokenType::F32:
+        case TokenType::F64:
+        case TokenType::BOOL:
+        case TokenType::CHAR_TYPE:
+        case TokenType::STRING_TYPE:
             return true;
         default:
             return false;
@@ -137,9 +154,9 @@ Stmt Parser::parseFunctionDecl(Token returnType, Token name) {
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
             if (!isTypeName()) throw error(peek(), "expected parameter type");
-            Token pType = advance();
-            Token pName = consume(TokenType::IDENTIFIER, "expected parameter name");
-            params.push_back(ParamDecl{ pType, pName });
+            Token paramType = advance();
+            Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
+            params.push_back(ParamDecl{ paramType, paramName });
         } while (match({ TokenType::COMMA }));
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
@@ -185,9 +202,8 @@ Stmt Parser::parseIfStmt() {
     Stmt thenBranch = parseStatement();   // block or single statement
 
     std::unique_ptr<Stmt> elseBranch = nullptr;
-    if (match({ TokenType::ELSE })) {
+    if (match({ TokenType::ELSE }))
         elseBranch = box(parseStatement());
-    }
 
     return makeStmt(IfStmt{
         std::move(condition),
@@ -244,9 +260,9 @@ Stmt Parser::parseReturnStmt() {
 }
 
 Stmt Parser::parseExprStmt() {
-    Expr expr = parseExpression();
+    Expr expression = parseExpression();
     consume(TokenType::SEMICOLON, "expected ';' after expression");
-    return makeStmt(ExprStmt{ std::move(expr) });
+    return makeStmt(ExprStmt{ std::move(expression) });
 }
 
 // ============================================================
@@ -268,22 +284,22 @@ Expr Parser::parseExpression() {
 Expr Parser::parseAssignment() {
     // Assignment: IDENTIFIER ( = | += | -= | ... ) assignment
     if (check(TokenType::IDENTIFIER)) {
-        TokenType next = peekNext().type;
-        bool isAssignOp =
-            next == TokenType::EQUAL           ||
-            next == TokenType::PLUS_EQUAL      || next == TokenType::MINUS_EQUAL      ||
-            next == TokenType::STAR_EQUAL      || next == TokenType::SLASH_EQUAL      ||
-            next == TokenType::PERCENT_EQUAL   || next == TokenType::CARET_EQUAL      ||
-            next == TokenType::AMPERSAND_EQUAL || next == TokenType::PIPE_EQUAL;
+        TokenType nextTokenType = peekNext().type;
+        bool isAssignmentOperator =
+            nextTokenType == TokenType::EQUAL           ||
+            nextTokenType == TokenType::PLUS_EQUAL      || nextTokenType == TokenType::MINUS_EQUAL      ||
+            nextTokenType == TokenType::STAR_EQUAL      || nextTokenType == TokenType::SLASH_EQUAL      ||
+            nextTokenType == TokenType::PERCENT_EQUAL   || nextTokenType == TokenType::CARET_EQUAL      ||
+            nextTokenType == TokenType::AMPERSAND_EQUAL || nextTokenType == TokenType::PIPE_EQUAL;
 
-        if (isAssignOp) {
-            Token name = advance();
-            Token op   = advance();
+        if (isAssignmentOperator) {
+            Token name          = advance();
+            Token operatorToken = advance();
             Expr value = parseAssignment();    // right-associative
-            if (op.type == TokenType::EQUAL)
+            if (operatorToken.type == TokenType::EQUAL)
                 return makeExpr(AssignExpr{ name, box(std::move(value)) });
             else
-                return makeExpr(CompoundAssignExpr{ name, op, box(std::move(value)) });
+                return makeExpr(CompoundAssignExpr{ name, operatorToken, box(std::move(value)) });
         }
     }
     return parseLogicalOr();
@@ -292,8 +308,8 @@ Expr Parser::parseAssignment() {
 Expr Parser::parseLogicalOr() {
     Expr left = parseLogicalAnd();
     while (match({ TokenType::OR })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseLogicalAnd()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseLogicalAnd()) });
     }
     return left;
 }
@@ -301,8 +317,8 @@ Expr Parser::parseLogicalOr() {
 Expr Parser::parseLogicalAnd() {
     Expr left = parseBitwiseOr();
     while (match({ TokenType::AND })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseBitwiseOr()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseBitwiseOr()) });
     }
     return left;
 }
@@ -310,8 +326,8 @@ Expr Parser::parseLogicalAnd() {
 Expr Parser::parseBitwiseOr() {
     Expr left = parseBitwiseXor();
     while (match({ TokenType::PIPE })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseBitwiseXor()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseBitwiseXor()) });
     }
     return left;
 }
@@ -319,8 +335,8 @@ Expr Parser::parseBitwiseOr() {
 Expr Parser::parseBitwiseXor() {
     Expr left = parseBitwiseAnd();
     while (match({ TokenType::CARET })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseBitwiseAnd()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseBitwiseAnd()) });
     }
     return left;
 }
@@ -328,8 +344,8 @@ Expr Parser::parseBitwiseXor() {
 Expr Parser::parseBitwiseAnd() {
     Expr left = parseEquality();
     while (match({ TokenType::AMPERSAND })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseEquality()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseEquality()) });
     }
     return left;
 }
@@ -337,8 +353,8 @@ Expr Parser::parseBitwiseAnd() {
 Expr Parser::parseEquality() {
     Expr left = parseComparison();
     while (match({ TokenType::EQUAL_EQUAL, TokenType::BANG_EQUAL })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseComparison()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseComparison()) });
     }
     return left;
 }
@@ -347,8 +363,8 @@ Expr Parser::parseComparison() {
     Expr left = parseShift();
     while (match({ TokenType::LESS, TokenType::LESS_EQUAL,
                    TokenType::GREATER, TokenType::GREATER_EQUAL })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseShift()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseShift()) });
     }
     return left;
 }
@@ -356,8 +372,8 @@ Expr Parser::parseComparison() {
 Expr Parser::parseShift() {
     Expr left = parseAddSub();
     while (match({ TokenType::SHIFT_LEFT, TokenType::SHIFT_RIGHT })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseAddSub()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseAddSub()) });
     }
     return left;
 }
@@ -365,8 +381,8 @@ Expr Parser::parseShift() {
 Expr Parser::parseAddSub() {
     Expr left = parseMulDiv();
     while (match({ TokenType::PLUS, TokenType::MINUS })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseMulDiv()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseMulDiv()) });
     }
     return left;
 }
@@ -374,8 +390,8 @@ Expr Parser::parseAddSub() {
 Expr Parser::parseMulDiv() {
     Expr left = parseUnary();
     while (match({ TokenType::STAR, TokenType::SLASH, TokenType::PERCENT })) {
-        Token op = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), op, box(parseUnary()) });
+        Token operatorToken = previous();
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseUnary()) });
     }
     return left;
 }
@@ -383,19 +399,19 @@ Expr Parser::parseMulDiv() {
 Expr Parser::parseUnary() {
     if (match({ TokenType::BANG, TokenType::MINUS, TokenType::TILDE,
                 TokenType::INCREMENT, TokenType::DECREMENT })) {
-        Token op = previous();
-        return makeExpr(UnaryExpr{ op, box(parseUnary()) });
+        Token operatorToken = previous();
+        return makeExpr(UnaryExpr{ operatorToken, box(parseUnary()) });
     }
     return parsePostfix();
 }
 
 Expr Parser::parsePostfix() {
-    Expr expr = parsePrimary();
+    Expr expression = parsePrimary();
     while (match({ TokenType::INCREMENT, TokenType::DECREMENT })) {
-        Token op = previous();
-        expr = makeExpr(PostfixExpr{ box(std::move(expr)), op });
+        Token operatorToken = previous();
+        expression = makeExpr(PostfixExpr{ box(std::move(expression)), operatorToken });
     }
-    return expr;
+    return expression;
 }
 
 Expr Parser::parsePrimary() {

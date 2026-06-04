@@ -81,6 +81,9 @@ CastResult canImplicitlyCast(Type from, Type to) {
         if (bitWidth(t) > bitWidth(f))       return CastResult::Silent;
     }
 
+    // Signed → unsigned (warn — value may be negative at runtime)
+    if (isSignedInt(f) && isUnsignedInt(t)) return CastResult::Warn;
+
     // Unsigned → signed
     if (isUnsignedInt(f) && isSignedInt(t)) {
         int fw = bitWidth(f);

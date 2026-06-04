@@ -7,13 +7,13 @@
 #include <string>
 Lexer::Lexer(std::vector<std::string> &paths){
 
-    inputFiles.reserve(paths.size());
-    tokensForFiles.resize(paths.size());
+    inputFiles_.reserve(paths.size());
+    tokensForFiles_.resize(paths.size());
 
     for (const auto& path : paths){
-        inputFiles.emplace_back(path);
+        inputFiles_.emplace_back(path);
 
-        std::ifstream& newFile = inputFiles[inputFiles.size() - 1];
+        std::ifstream& newFile = inputFiles_[inputFiles_.size() - 1];
         if (!newFile.is_open()) {
             std::cout << "Could not open file: " << path << '\n';
             exit(1);
@@ -22,8 +22,8 @@ Lexer::Lexer(std::vector<std::string> &paths){
 }
 
 void Lexer::lex() {
-    for (size_t i = 0; i < inputFiles.size(); i++) {
-        processFile(inputFiles[i], tokensForFiles[i]);
+    for (size_t i = 0; i < inputFiles_.size(); i++) {
+        processFile(inputFiles_[i], tokensForFiles_[i]);
     }
 }
 

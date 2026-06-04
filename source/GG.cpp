@@ -16,7 +16,6 @@ GG::GG(std::vector<std::string>& paths) : paths_(paths), lexer(paths) {
 void GG::run() {
     lexer.lex();
 
-    // Create the build directory in the current working directory once.
     namespace fs = std::filesystem;
     const fs::path buildDir = fs::current_path() / "build";
     std::error_code ec;
@@ -26,24 +25,19 @@ void GG::run() {
         return;
     }
 
-    for (size_t fi = 0; fi < lexer.tokensForFiles.size(); ++fi) {
-        const auto& fileTokens = lexer.tokensForFiles[fi];
+    for (size_t fi = 0; fi < lexer.tokens().size(); ++fi) {
+        const std::string stem    = fs::path(paths_[fi]).stem().string();
+        const fs::path    astPath = buildDir / (stem + ".ast");
+        const fs::path    irPath  = buildDir / (stem + ".ll");
 
-        const std::string stem = fs::path(paths_[fi]).stem().string();
-        std::ofstream astFile(buildDir / (stem + ".ast"));
-        std::ofstream irFile (buildDir / (stem + ".ll"));
+        std::ofstream astFile(astPath);
+        std::ofstream irFile(irPath);
 
-        if (!astFile) {
-            std::cerr << "Error: cannot open " << (buildDir / (stem + ".ast")).string() << " for writing\n";
-            continue;
-        }
+        if (!astFile) { std::cerr << "Error: cannot open " << astPath << " for writing\n"; continue; }
+        if (!irFile)  { std::cerr << "Error: cannot open " << irPath  << " for writing\n"; continue; }
 
-        if (!irFile) {
-            std::cerr << "Error: cannot open " << (buildDir / (stem + ".ll")).string() << " for writing\n";
-            continue;
-        }
+        Program ast = parser.parse(lexer.tokens()[fi]);
 
-        Program ast = parser.parse(fileTokens);
         AstPrinter astPrinter;
         astPrinter.print(ast, astFile);
 

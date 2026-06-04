@@ -50,7 +50,7 @@ inline std::vector<Token> lexString(const std::string& source) {
     std::vector<std::string> paths{ path };
     Lexer lexer(paths);
     lexer.lex();
-    return lexer.tokensForFiles[0];
+    return lexer.tokens()[0];
 }
 
 // Lex + parse a source string and return the Program AST.

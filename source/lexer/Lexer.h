@@ -15,10 +15,12 @@ public:
 
     void lex();
 
-    std::vector<std::ifstream> inputFiles{};
-    std::vector<std::vector<Token>> tokensForFiles{};
+    [[nodiscard]] const std::vector<std::vector<Token>>& tokens() const { return tokensForFiles_; }
 
 private:
+    std::vector<std::ifstream>       inputFiles_;
+    std::vector<std::vector<Token>>  tokensForFiles_;
+
     static void processFile(std::ifstream &file, std::vector<Token>& tokens);
 };
 

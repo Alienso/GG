@@ -7,6 +7,7 @@
 
 #include "lexer/Lexer.h"
 #include "parser/Parser.h"
+#include "semantic/SemanticAnalyzer.h"
 
 #include <vector>
 #include <string>
@@ -17,8 +18,9 @@ public:
     explicit GG(std::vector<std::string> &paths);
     void run();
 private:
-    Lexer  lexer;
+    Lexer lexer;
     Parser parser;
+    SemanticAnalyzer semanticAnalyzer;
 };
 
 

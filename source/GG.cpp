@@ -16,5 +16,9 @@ void GG::run() {
     for (const auto& fileTokens : lexer.tokensForFiles) {
         Program ast = parser.parse(fileTokens);
         printer.print(ast);
+        SemanticResult result = semanticAnalyzer.analyze(ast);
+        if (!result.hadError) {
+            // codegen will receive ast + result.typeMap
+        }
     }
 }

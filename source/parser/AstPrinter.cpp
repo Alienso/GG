@@ -3,13 +3,14 @@
 //
 
 #include "AstPrinter.h"
-#include <iostream>
 
 void AstPrinter::out(const std::string& text) {
-    std::cout << std::string(indent_ * 2, ' ') << text << '\n';
+    *stream_ << std::string(indent_ * 2, ' ') << text << '\n';
 }
 
-void AstPrinter::print(const Program& program) {
+void AstPrinter::print(const Program& program, std::ostream& stream) {
+    stream_  = &stream;
+    indent_  = 0;
     out("Program");
     indent_++;
     for (const Stmt& stmt : program.declarations) {

@@ -6,14 +6,16 @@
 #define GG_ASTPRINTER_H
 
 #include "Ast.h"
+#include <ostream>
 #include <string>
 
 class AstPrinter {
 public:
-    void print(const Program& program);
+    void print(const Program& program, std::ostream& stream);
 
 private:
-    int indent_ = 0;
+    int           indent_  = 0;
+    std::ostream* stream_  = nullptr;
 
     void printExpr(const Expr& expr);
     void printStmt(const Stmt& stmt);

@@ -13,6 +13,9 @@ set(GG_SOURCES
         source/semantic/Type.h        source/semantic/Type.cpp
         source/semantic/SymbolTable.h  source/semantic/SymbolTable.cpp
         source/semantic/SemanticAnalyzer.h  source/semantic/SemanticAnalyzer.cpp
+        source/codegen/IR.h
+        source/codegen/CodeGen.h      source/codegen/CodeGen.cpp
+        source/codegen/IRPrinter.h    source/codegen/IRPrinter.cpp
 )
 
 # ---- Main executable ----
@@ -37,6 +40,7 @@ add_executable(GG_tests
         tests/lexer_tests.cpp
         tests/parser_tests.cpp
         tests/semantic_tests.cpp
+        tests/codegen_tests.cpp
         ${GG_SOURCES}
 )
 target_link_libraries(GG_tests PRIVATE Catch2::Catch2WithMain)

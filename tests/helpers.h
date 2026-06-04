@@ -7,6 +7,8 @@
 #include "../source/lexer/Lexer.h"
 #include "../source/parser/Parser.h"
 #include "../source/semantic/SemanticAnalyzer.h"
+#include "../source/codegen/CodeGen.h"
+#include "../source/codegen/IRPrinter.h"
 
 #include <filesystem>
 #include <fstream>
@@ -63,6 +65,19 @@ inline SemanticResult analyzeString(const std::string& source) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
     return analyzer.analyze(ast);
+}
+
+// Lex + parse + analyse + codegen a source string and return the IR text.
+inline std::string codegenString(const std::string& source) {
+    Program ast = parseString(source);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(ast);
+    CodeGen cg;
+    IRModule ir = cg.generate(ast, sem.typeMap);
+    std::ostringstream oss;
+    IRPrinter printer;
+    printer.print(ir, oss);
+    return oss.str();
 }
 
 // ---- AST unwrap helpers ----

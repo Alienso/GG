@@ -34,6 +34,11 @@ private:
     // varName → declared Type (needed to emit correct load/store sizes)
     std::unordered_map<std::string, Type>        varTypeMap;
 
+    // Innermost loop exit label (for break) and re-entry label (for continue).
+    // Pushed on loop entry, popped on loop exit — supports arbitrary nesting.
+    std::vector<std::string> breakLabelStack;
+    std::vector<std::string> continueLabelStack;
+
     // ---- Function codegen ----
     void genFunction(const FunctionDeclStmt& function);
 
@@ -44,6 +49,8 @@ private:
     void genWhile(const WhileStmt& whileStmt);
     void genFor(const ForStmt& forStmt);
     void genReturn(const ReturnStmt& returnStmt);
+    void genBreak(const BreakStmt& breakStmt);
+    void genContinue(const ContinueStmt& continueStmt);
 
     // ---- Expression codegen — return SSA value string ("%t3", "42", …) ----
     std::string genExpr(const Expr& expr);

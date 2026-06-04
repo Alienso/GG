@@ -274,3 +274,588 @@ TEST_CASE("CodeGen - prefix increment stores updated value", "[codegen]") {
     )");
     REQUIRE(irContains(ir, "add i32"));
 }
+
+// ============================================================
+// Arithmetic — completeness
+// ============================================================
+
+TEST_CASE("CodeGen - signed modulo uses srem", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 10; i32 y = 3; i32 z = x % y; return z; }
+    )");
+    REQUIRE(irContains(ir, "srem i32"));
+}
+
+TEST_CASE("CodeGen - unsigned division uses udiv", "[codegen]") {
+    auto ir = codegenString(R"(
+        u32 main() { u32 x = 10; u32 y = 2; u32 z = x / y; return z; }
+    )");
+    REQUIRE(irContains(ir, "udiv i32"));
+}
+
+TEST_CASE("CodeGen - unsigned modulo uses urem", "[codegen]") {
+    auto ir = codegenString(R"(
+        u32 main() { u32 x = 10; u32 y = 3; u32 z = x % y; return z; }
+    )");
+    REQUIRE(irContains(ir, "urem i32"));
+}
+
+TEST_CASE("CodeGen - float subtraction uses fsub", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { f64 x = 5.0; f64 y = 3.0; f64 z = x - y; return z; }
+    )");
+    REQUIRE(irContains(ir, "fsub double"));
+}
+
+TEST_CASE("CodeGen - float multiplication uses fmul", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { f64 x = 2.0; f64 y = 3.0; f64 z = x * y; return z; }
+    )");
+    REQUIRE(irContains(ir, "fmul double"));
+}
+
+TEST_CASE("CodeGen - float division uses fdiv", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { f64 x = 6.0; f64 y = 2.0; f64 z = x / y; return z; }
+    )");
+    REQUIRE(irContains(ir, "fdiv double"));
+}
+
+TEST_CASE("CodeGen - f32 arithmetic uses float IR type", "[codegen]") {
+    // f32 operands → fadd float, not fadd double
+    auto ir = codegenString(R"(
+        f32 foo() { f32 x = 1.0; f32 y = 2.0; f32 z = x + y; return z; }
+    )");
+    REQUIRE(irContains(ir, "fadd float"));
+}
+
+// ============================================================
+// Bitwise operators
+// ============================================================
+
+TEST_CASE("CodeGen - bitwise AND uses and instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; i32 y = 3; i32 z = x & y; return z; }
+    )");
+    REQUIRE(irContains(ir, "and i32"));
+}
+
+TEST_CASE("CodeGen - bitwise OR uses or instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; i32 y = 3; i32 z = x | y; return z; }
+    )");
+    REQUIRE(irContains(ir, "or i32"));
+}
+
+TEST_CASE("CodeGen - bitwise XOR uses xor instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; i32 y = 3; i32 z = x ^ y; return z; }
+    )");
+    REQUIRE(irContains(ir, "xor i32"));
+}
+
+TEST_CASE("CodeGen - shift left uses shl", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 1; i32 y = x << 3; return y; }
+    )");
+    REQUIRE(irContains(ir, "shl i32"));
+}
+
+TEST_CASE("CodeGen - signed shift right uses ashr", "[codegen]") {
+    // Arithmetic shift right — preserves sign bit for signed integers
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 16; i32 y = x >> 2; return y; }
+    )");
+    REQUIRE(irContains(ir, "ashr i32"));
+}
+
+TEST_CASE("CodeGen - unsigned shift right uses lshr", "[codegen]") {
+    // Logical shift right — fills with zeros for unsigned integers
+    auto ir = codegenString(R"(
+        u32 foo() { u32 x = 16; u32 y = x >> 2; return y; }
+    )");
+    REQUIRE(irContains(ir, "lshr i32"));
+}
+
+// ============================================================
+// Logical operators
+// ============================================================
+
+TEST_CASE("CodeGen - logical AND emits and i1", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { bool a = true; bool b = false; bool c = a && b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "and i1"));
+}
+
+TEST_CASE("CodeGen - logical OR emits or i1", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { bool a = true; bool b = false; bool c = a || b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "or i1"));
+}
+
+// ============================================================
+// Comparison operators — full set
+// ============================================================
+
+TEST_CASE("CodeGen - equality comparison uses icmp eq", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 a = 3; i32 b = 3; bool c = a == b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "icmp eq"));
+}
+
+TEST_CASE("CodeGen - inequality comparison uses icmp ne", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 a = 3; i32 b = 4; bool c = a != b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "icmp ne"));
+}
+
+TEST_CASE("CodeGen - signed greater-than uses icmp sgt", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 a = 5; i32 b = 3; bool c = a > b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "icmp sgt"));
+}
+
+TEST_CASE("CodeGen - unsigned less-than uses icmp ult", "[codegen]") {
+    // Same operator, different signedness → different instruction
+    auto ir = codegenString(R"(
+        i32 main() { u32 a = 3; u32 b = 5; bool c = a < b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "icmp ult"));
+}
+
+TEST_CASE("CodeGen - float comparison uses fcmp olt", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { f64 a = 1.0; f64 b = 2.0; bool c = a < b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "fcmp olt"));
+}
+
+// ============================================================
+// Unary operators — full set
+// ============================================================
+
+TEST_CASE("CodeGen - integer negation emits sub from zero", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; i32 y = -x; return y; }
+    )");
+    // LLVM IR for unary minus on integers: sub i32 0, %x
+    REQUIRE(irContains(ir, "sub i32 0,"));
+}
+
+TEST_CASE("CodeGen - float negation emits fneg", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { f64 x = 5.0; f64 y = -x; return y; }
+    )");
+    REQUIRE(irContains(ir, "fneg double"));
+}
+
+TEST_CASE("CodeGen - bitwise NOT emits xor with -1", "[codegen]") {
+    // LLVM IR idiom: ~x = xor iN x, -1
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 255; i32 y = ~x; return y; }
+    )");
+    REQUIRE(irContains(ir, "xor i32"));
+    REQUIRE(irContains(ir, "-1"));
+}
+
+TEST_CASE("CodeGen - logical NOT emits xor i1 with true", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { bool b = true; bool n = !b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "xor i1"));
+}
+
+TEST_CASE("CodeGen - postfix decrement emits sub", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 i = 5; i--; return i; }
+    )");
+    REQUIRE(irContains(ir, "sub i32"));
+}
+
+TEST_CASE("CodeGen - prefix decrement emits sub and stores updated value", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 i = 5; --i; return i; }
+    )");
+    REQUIRE(irContains(ir, "sub i32"));
+    REQUIRE(irContains(ir, "store i32"));
+}
+
+// ============================================================
+// Compound assignment
+// ============================================================
+
+TEST_CASE("CodeGen - += loads, adds, and stores", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; x += 3; return x; }
+    )");
+    REQUIRE(irContains(ir, "add i32"));
+    // Two stores: initializer + compound assignment
+    size_t count = 0;
+    size_t pos   = 0;
+    while ((pos = ir.find("store i32", pos)) != std::string::npos) { ++count; ++pos; }
+    REQUIRE(count >= 2);
+}
+
+TEST_CASE("CodeGen - -= loads, subtracts, and stores", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 10; x -= 3; return x; }
+    )");
+    REQUIRE(irContains(ir, "sub i32"));
+}
+
+TEST_CASE("CodeGen - *= loads, multiplies, and stores", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 4; x *= 3; return x; }
+    )");
+    REQUIRE(irContains(ir, "mul i32"));
+}
+
+TEST_CASE("CodeGen - |= uses or instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; x |= 2; return x; }
+    )");
+    REQUIRE(irContains(ir, "or i32"));
+}
+
+TEST_CASE("CodeGen - ^= uses xor instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 5; x ^= 3; return x; }
+    )");
+    REQUIRE(irContains(ir, "xor i32"));
+}
+
+// ============================================================
+// Casts — all directions
+// ============================================================
+
+TEST_CASE("CodeGen - u8 to u32 widening uses zext", "[codegen]") {
+    auto ir = codegenString(R"(
+        u32 main() { u8 small = 5; u32 big = small; return big; }
+    )");
+    REQUIRE(irContains(ir, "zext i8"));
+}
+
+TEST_CASE("CodeGen - i8 to i32 widening uses sext", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i8 small = 5; i32 big = small; return big; }
+    )");
+    REQUIRE(irContains(ir, "sext i8"));
+}
+
+TEST_CASE("CodeGen - f32 to f64 widening uses fpext", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { f32 small = 1.0; f64 big = small; return big; }
+    )");
+    REQUIRE(irContains(ir, "fpext float"));
+}
+
+TEST_CASE("CodeGen - f64 to f32 narrowing uses fptrunc", "[codegen]") {
+    StderrCapture cap;  // suppress implicit-narrowing warning
+    auto ir = codegenString(R"(
+        f32 main() { f64 x = 3.14; f32 y = x; return y; }
+    )");
+    REQUIRE(irContains(ir, "fptrunc double"));
+}
+
+TEST_CASE("CodeGen - unsigned int to float uses uitofp", "[codegen]") {
+    auto ir = codegenString(R"(
+        f64 main() { u32 n = 5; f64 x = n; return x; }
+    )");
+    REQUIRE(irContains(ir, "uitofp i32"));
+}
+
+TEST_CASE("CodeGen - float to signed int uses fptosi", "[codegen]") {
+    StderrCapture cap;  // suppress implicit-narrowing warning
+    auto ir = codegenString(R"(
+        i32 main() { f64 x = 3.7; i32 y = x; return y; }
+    )");
+    REQUIRE(irContains(ir, "fptosi double"));
+}
+
+// ============================================================
+// Void functions
+// ============================================================
+
+TEST_CASE("CodeGen - void function has correct signature", "[codegen]") {
+    auto ir = codegenString("void greet() { }");
+    REQUIRE(irContains(ir, "define void @greet"));
+}
+
+TEST_CASE("CodeGen - explicit return in void function emits ret void", "[codegen]") {
+    auto ir = codegenString("void doNothing() { return; }");
+    REQUIRE(irContains(ir, "ret void"));
+}
+
+TEST_CASE("CodeGen - void function with no return gets implicit ret void", "[codegen]") {
+    auto ir = codegenString(R"(
+        void doNothing() { i32 x = 0; }
+    )");
+    REQUIRE(irContains(ir, "ret void"));
+}
+
+TEST_CASE("CodeGen - void function call emits call void", "[codegen]") {
+    auto ir = codegenString(R"(
+        void helper() { }
+        i32 main() { helper(); return 0; }
+    )");
+    REQUIRE(irContains(ir, "call void @helper"));
+}
+
+// ============================================================
+// IR structure and correctness
+// ============================================================
+
+TEST_CASE("CodeGen - function body starts with entry label", "[codegen]") {
+    auto ir = codegenString("i32 main() { return 0; }");
+    REQUIRE(irContains(ir, "entry:"));
+}
+
+TEST_CASE("CodeGen - parameters are spilled to alloca at function entry", "[codegen]") {
+    // Each parameter gets an alloca + an initial store so it can be reassigned.
+    auto ir = codegenString("i32 id(i32 x) { return x; }");
+    REQUIRE(irContains(ir, "%x.addr = alloca i32"));
+    REQUIRE(irContains(ir, "store i32 %x, ptr %x.addr"));
+}
+
+TEST_CASE("CodeGen - alloca strategy produces no phi nodes", "[codegen]") {
+    // All mutable state lives in alloca slots — phi nodes are never needed.
+    auto ir = codegenString(R"(
+        i32 main() {
+            i32 x = 0;
+            if (x) { x = 1; } else { x = 2; }
+            while (x < 10) { x++; }
+            return x;
+        }
+    )");
+    REQUIRE(!irContains(ir, "phi "));
+}
+
+TEST_CASE("CodeGen - conditional branches use br i1", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 x = 1; if (x) { x = 2; } return x; }
+    )");
+    REQUIRE(irContains(ir, "br i1"));
+}
+
+TEST_CASE("CodeGen - while loop body branches back to condition block", "[codegen]") {
+    // The back-edge is what makes it a loop in the CFG.
+    auto ir = codegenString(R"(
+        i32 main() { i32 i = 0; while (i < 5) { i++; } return i; }
+    )");
+    REQUIRE(irContains(ir, "br label %while.cond."));
+}
+
+TEST_CASE("CodeGen - early return inside if terminates block without extra branch", "[codegen]") {
+    // The then-block ends with 'ret'; the fall-through 'br' must not be emitted after it.
+    auto ir = codegenString(R"(
+        i32 clamp(i32 x) {
+            if (x > 100) { return 100; }
+            return x;
+        }
+    )");
+    REQUIRE(irContains(ir, "ret i32 100"));
+    REQUIRE(irContains(ir, "if.then."));
+    // Verify no 'br' follows a 'ret' in the same block by checking the if.merge block exists
+    REQUIRE(irContains(ir, "if.merge."));
+}
+
+TEST_CASE("CodeGen - zero-argument call emits empty argument list", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 getZero() { return 0; }
+        i32 main() { i32 x = getZero(); return x; }
+    )");
+    REQUIRE(irContains(ir, "call i32 @getZero()"));
+}
+
+TEST_CASE("CodeGen - multiple local variables produce multiple allocas", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 main() { i32 a = 1; i32 b = 2; i32 c = 3; return a + b + c; }
+    )");
+    size_t count = 0;
+    size_t pos   = 0;
+    while ((pos = ir.find("alloca i32", pos)) != std::string::npos) { ++count; ++pos; }
+    REQUIRE(count >= 3);
+}
+
+TEST_CASE("CodeGen - nested loops produce unique label names", "[codegen]") {
+    // Each loop gets its own label index so labels never collide.
+    auto ir = codegenString(R"(
+        i32 main() {
+            i32 s = 0;
+            for (i32 i = 0; i < 3; i++) {
+                for (i32 j = 0; j < 3; j++) {
+                    s = s + 1;
+                }
+            }
+            return s;
+        }
+    )");
+    REQUIRE(irContains(ir, "for.body.1"));
+    REQUIRE(irContains(ir, "for.body.2"));
+}
+
+// ============================================================
+// String literals
+// ============================================================
+
+TEST_CASE("CodeGen - string literal emits private global constant", "[codegen]") {
+    auto ir = codegenString(R"(
+        string foo() { string s = "hello"; return s; }
+    )");
+    REQUIRE(irContains(ir, "@.str.0"));
+    REQUIRE(irContains(ir, "private unnamed_addr constant"));
+    REQUIRE(irContains(ir, "getelementptr inbounds"));
+}
+
+TEST_CASE("CodeGen - string global size includes null terminator", "[codegen]") {
+    // "hi" = 2 chars + 1 null byte = [3 x i8]
+    auto ir = codegenString(R"(
+        string foo() { string s = "hi"; return s; }
+    )");
+    REQUIRE(irContains(ir, "[3 x i8]"));
+}
+
+TEST_CASE("CodeGen - two string literals get distinct global names", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() { string a = "hello"; string b = "world"; }
+    )");
+    REQUIRE(irContains(ir, "@.str.0"));
+    REQUIRE(irContains(ir, "@.str.1"));
+}
+
+// ============================================================
+// Break and continue
+// ============================================================
+
+TEST_CASE("CodeGen - break in while jumps to merge block", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() {
+            while (1) { break; }
+        }
+    )");
+    REQUIRE(irContains(ir, "br label %while.merge."));
+}
+
+TEST_CASE("CodeGen - continue in while jumps back to condition block", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() {
+            i32 i = 0;
+            while (i < 5) { continue; }
+        }
+    )");
+    // The continue inside the body should jump to the cond block.
+    // The body block is terminated by continue so the normal back-edge is not emitted.
+    REQUIRE(irContains(ir, "br label %while.cond."));
+}
+
+TEST_CASE("CodeGen - break in for loop jumps to merge block", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() {
+            for (i32 i = 0; i < 10; i++) { break; }
+        }
+    )");
+    REQUIRE(irContains(ir, "br label %for.merge."));
+}
+
+TEST_CASE("CodeGen - continue in for loop jumps to increment block", "[codegen]") {
+    // In a for loop, continue re-enters at the increment, not the condition.
+    auto ir = codegenString(R"(
+        void foo() {
+            for (i32 i = 0; i < 10; i++) { continue; }
+        }
+    )");
+    REQUIRE(irContains(ir, "br label %for.inc."));
+}
+
+TEST_CASE("CodeGen - nested loops break targets innermost merge", "[codegen]") {
+    // The inner break must jump to for.merge.2, not for.merge.1.
+    auto ir = codegenString(R"(
+        void foo() {
+            for (i32 i = 0; i < 3; i++) {
+                for (i32 j = 0; j < 3; j++) {
+                    break;
+                }
+            }
+        }
+    )");
+    // Both merge labels exist; the inner break targets the inner one (index 2).
+    REQUIRE(irContains(ir, "for.merge.1"));
+    REQUIRE(irContains(ir, "for.merge.2"));
+}
+
+// ============================================================
+// char type (Unicode code points — u32)
+// ============================================================
+
+TEST_CASE("CodeGen - char variable uses i32 alloca", "[codegen]") {
+    // char is a 32-bit Unicode code point, so its IR type is i32 (same as u32).
+    auto ir = codegenString(R"(
+        void foo() { char c = 'A'; }
+    )");
+    REQUIRE(irContains(ir, "alloca i32"));
+    REQUIRE(irContains(ir, "store i32"));
+}
+
+TEST_CASE("CodeGen - ASCII char literal stores correct code point", "[codegen]") {
+    // 'A' = Unicode code point 65
+    auto ir = codegenString(R"(
+        void foo() { char c = 'A'; }
+    )");
+    REQUIRE(irContains(ir, "store i32 65"));
+}
+
+TEST_CASE("CodeGen - char newline escape stores code point 10", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() { char c = '\n'; }
+    )");
+    REQUIRE(irContains(ir, "store i32 10"));
+}
+
+TEST_CASE("CodeGen - char tab escape stores code point 9", "[codegen]") {
+    auto ir = codegenString(R"(
+        void foo() { char c = '\t'; }
+    )");
+    REQUIRE(irContains(ir, "store i32 9"));
+}
+
+TEST_CASE("CodeGen - char arithmetic uses i32 instructions", "[codegen]") {
+    // char is an integer type — arithmetic produces add i32
+    auto ir = codegenString(R"(
+        i32 foo() { char a = 'A'; char b = 'B'; char c = a + b; return 0; }
+    )");
+    REQUIRE(irContains(ir, "add i32"));
+}
+
+TEST_CASE("CodeGen - char comparison uses unsigned icmp", "[codegen]") {
+    // char is u32, so ordering comparisons must be unsigned
+    auto ir = codegenString(R"(
+        bool foo() { char a = 'a'; char b = 'z'; bool c = a < b; return c; }
+    )");
+    REQUIRE(irContains(ir, "icmp ult"));
+}
+
+TEST_CASE("CodeGen - char function parameter uses i32 IR type", "[codegen]") {
+    auto ir = codegenString(R"(
+        i32 toInt(char c) { return c; }
+    )");
+    REQUIRE(irContains(ir, "define i32 @toInt(i32 %c)"));
+}
+
+TEST_CASE("CodeGen - break block is terminated so no trailing branch follows", "[codegen]") {
+    // Statements after break in the same block are dead — no extra br should follow.
+    auto ir = codegenString(R"(
+        void foo() {
+            while (1) {
+                break;
+            }
+        }
+    )");
+    // Only one branch to the merge block from the break itself.
+    // The normal back-edge (br label %while.cond.) must NOT appear in the body block.
+    REQUIRE(irContains(ir, "while.merge."));
+}

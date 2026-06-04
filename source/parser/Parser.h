@@ -53,6 +53,8 @@ private:
     [[nodiscard]] Stmt      parseWhileStmt();
     [[nodiscard]] Stmt      parseForStmt();
     [[nodiscard]] Stmt      parseReturnStmt();
+    [[nodiscard]] Stmt      parseBreakStmt();
+    [[nodiscard]] Stmt      parseContinueStmt();
     [[nodiscard]] Stmt      parseExprStmt();
 
     // ---- Expression parsers (low to high precedence) ----

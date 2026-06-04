@@ -159,6 +159,14 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             indent--;
         },
 
+        [&](const BreakStmt&) {
+            out("Break");
+        },
+
+        [&](const ContinueStmt&) {
+            out("Continue");
+        },
+
         [&](const ReturnStmt& returnStmt) {
             out("Return");
             if (returnStmt.value) {

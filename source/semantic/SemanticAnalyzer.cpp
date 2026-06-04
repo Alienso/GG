@@ -26,6 +26,39 @@ static const Token& firstToken(const Expr& expr) {
 }
 
 // ============================================================
+// Internal helper — control-flow return analysis
+// Returns true when every execution path through `stmt` ends in a return.
+// Conservative: loops are treated as "may not execute" so a lone
+// while-loop body is not considered a guaranteed return path.
+// ============================================================
+
+static bool alwaysReturns(const Stmt& stmt);
+
+static bool alwaysReturns(const BlockStmt& block) {
+    for (const auto& stmtPtr : block.body)
+        if (alwaysReturns(*stmtPtr)) return true;
+    return false;
+}
+
+static bool alwaysReturns(const Stmt& stmt) {
+    return std::visit(overloaded{
+        [](const ReturnStmt&)          { return true; },
+        [](const BlockStmt& block)     { return alwaysReturns(block); },
+        [](const IfStmt& ifStmt)       {
+            return ifStmt.elseBranch != nullptr
+                   && alwaysReturns(*ifStmt.thenBranch)
+                   && alwaysReturns(*ifStmt.elseBranch);
+        },
+        [](const WhileStmt&)           { return false; },  // may not execute
+        [](const ForStmt&)             { return false; },  // may not execute
+        [](const BreakStmt&)           { return false; },
+        [](const ContinueStmt&)        { return false; },
+        [](const ExprStmt&)            { return false; },
+        [](const FunctionDeclStmt&)    { return false; },
+    }, *stmt.node);
+}
+
+// ============================================================
 // Public entry point
 // ============================================================
 
@@ -34,6 +67,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
     typeMap.clear();
     hadError          = false;
     currentReturnType = std::nullopt;
+    loopDepth         = 0;
 
     symbolTable.enterScope();   // global scope
 
@@ -87,8 +121,10 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const IfStmt& ifStmt)                  { analyzeIf(ifStmt); },
         [&](const WhileStmt& whileStmt)            { analyzeWhile(whileStmt); },
         [&](const ForStmt& forStmt)                { analyzeFor(forStmt); },
-        [&](const ReturnStmt& returnStmt)          { analyzeReturn(returnStmt); },
-        [&](const FunctionDeclStmt& functionDecl)  { analyzeFunctionDecl(functionDecl); },
+        [&](const ReturnStmt& returnStmt)            { analyzeReturn(returnStmt); },
+        [&](const BreakStmt& breakStmt)             { analyzeBreak(breakStmt); },
+        [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },
+        [&](const FunctionDeclStmt& functionDecl)   { analyzeFunctionDecl(functionDecl); },
     }, *stmt.node);
 }
 
@@ -114,7 +150,9 @@ void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
         error(firstToken(whileStmt.condition),
               "while condition must be bool-compatible, got " + typeName(conditionType));
     }
+    loopDepth++;
     analyzeStmt(*whileStmt.body);
+    loopDepth--;
 }
 
 void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
@@ -132,7 +170,9 @@ void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
 
     if (forStmt.increment) analyzeExpr(*forStmt.increment);
 
+    loopDepth++;
     analyzeStmt(*forStmt.body);
+    loopDepth--;
 
     exitScope();
 }
@@ -158,14 +198,21 @@ void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
 void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl) {
     // Signature is already registered in the global scope by collectFunctions.
     std::optional<Type> savedReturnType = currentReturnType;
+    int                 savedLoopDepth  = loopDepth;
     currentReturnType = typeFromToken(functionDecl.returnType.type);
+    loopDepth         = 0;  // loops in the outer scope do not extend into this function
 
     enterScope();  // function scope — parameters live here
 
     for (const ParamDecl& param : functionDecl.params) {
+        Type paramType = typeFromToken(param.typeName.type);
+        if (paramType.kind == TypeKind::Void) {
+            error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+            paramType = Type{TypeKind::Error};  // suppress cascading errors in the body
+        }
         Symbol sym{
             Symbol::Kind::Variable,
-            typeFromToken(param.typeName.type),
+            paramType,
             param.name,
             {}
         };
@@ -177,9 +224,16 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     // opening a second scope on top of the function scope.
     for (const auto& statement : functionDecl.body.body) analyzeStmt(*statement);
 
+    // Warn when a non-void function may fall off the end without returning.
+    // This is conservative: loops are never treated as guaranteed returns.
+    if (currentReturnType->kind != TypeKind::Void && !alwaysReturns(functionDecl.body))
+        warn(functionDecl.name, "function '" + functionDecl.name.lexeme
+             + "' does not always return a value");
+
     exitScope();
 
     currentReturnType = savedReturnType;
+    loopDepth         = savedLoopDepth;
 }
 
 // ============================================================
@@ -488,6 +542,12 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     Type declaredType = typeFromToken(varDecl.typeName.type);
 
+    if (declaredType.kind == TypeKind::Void) {
+        error(varDecl.typeName, "variable '" + varDecl.name.lexeme + "' cannot have type 'void'");
+        if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
+        return Type{TypeKind::Error};
+    }
+
     // Redeclaration in the same scope?
     const Symbol* existing = symbolTable.lookupCurrentScope(varDecl.name.lexeme);
     if (existing) {
@@ -517,6 +577,16 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
 // ============================================================
 // Helpers
 // ============================================================
+
+void SemanticAnalyzer::analyzeBreak(const BreakStmt& breakStmt) {
+    if (loopDepth == 0)
+        error(breakStmt.keyword, "'break' used outside of a loop");
+}
+
+void SemanticAnalyzer::analyzeContinue(const ContinueStmt& continueStmt) {
+    if (loopDepth == 0)
+        error(continueStmt.keyword, "'continue' used outside of a loop");
+}
 
 void SemanticAnalyzer::enterScope() { symbolTable.enterScope(); }
 void SemanticAnalyzer::exitScope()  { symbolTable.exitScope(); }

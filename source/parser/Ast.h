@@ -120,6 +120,14 @@ struct ForStmt {
     std::unique_ptr<Stmt> body;
 };
 
+struct BreakStmt {
+    Token keyword;
+};
+
+struct ContinueStmt {
+    Token keyword;
+};
+
 struct ReturnStmt {
     Token keyword;
     std::optional<Expr> value;
@@ -146,6 +154,8 @@ struct Stmt {
         IfStmt,
         WhileStmt,
         ForStmt,
+        BreakStmt,
+        ContinueStmt,
         ReturnStmt,
         FunctionDeclStmt
     >;

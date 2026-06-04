@@ -82,6 +82,8 @@ void Parser::synchronize() {
             case TokenType::WHILE:
             case TokenType::FOR:
             case TokenType::RETURN:
+            case TokenType::BREAK:
+            case TokenType::CONTINUE:
             case TokenType::I8:
             case TokenType::I16:
             case TokenType::I32:
@@ -174,6 +176,8 @@ Stmt Parser::parseStatement() {
     if (match({ TokenType::WHILE  }))   return parseWhileStmt();
     if (match({ TokenType::FOR    }))   return parseForStmt();
     if (match({ TokenType::RETURN }))   return parseReturnStmt();
+    if (match({ TokenType::BREAK }))    return parseBreakStmt();
+    if (match({ TokenType::CONTINUE })) return parseContinueStmt();
     return parseExprStmt();
 }
 
@@ -259,6 +263,18 @@ Stmt Parser::parseReturnStmt() {
     if (!check(TokenType::SEMICOLON)) value = parseExpression();
     consume(TokenType::SEMICOLON, "expected ';' after return value");
     return makeStmt(ReturnStmt{ keyword, std::move(value) });
+}
+
+Stmt Parser::parseBreakStmt() {
+    Token keyword = previous();
+    consume(TokenType::SEMICOLON, "expected ';' after 'break'");
+    return makeStmt(BreakStmt{ keyword });
+}
+
+Stmt Parser::parseContinueStmt() {
+    Token keyword = previous();
+    consume(TokenType::SEMICOLON, "expected ';' after 'continue'");
+    return makeStmt(ContinueStmt{ keyword });
 }
 
 Stmt Parser::parseExprStmt() {

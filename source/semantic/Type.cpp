@@ -14,8 +14,9 @@ bool isSignedInt(TypeKind k) {
 }
 
 bool isUnsignedInt(TypeKind k) {
-    return k == TypeKind::U8  || k == TypeKind::U16 ||
-           k == TypeKind::U32 || k == TypeKind::U64;
+    return k == TypeKind::U8   || k == TypeKind::U16  ||
+           k == TypeKind::U32  || k == TypeKind::U64  ||
+           k == TypeKind::Char;
 }
 
 bool isInteger(TypeKind k) { return isSignedInt(k) || isUnsignedInt(k); }
@@ -38,13 +39,14 @@ bool isError(Type t) { return t.kind == TypeKind::Error; }
 
 static int bitWidth(TypeKind k) {
     switch (k) {
-        case TypeKind::I8:  case TypeKind::U8:  return 8;
-        case TypeKind::I16: case TypeKind::U16: return 16;
-        case TypeKind::I32: case TypeKind::U32: return 32;
-        case TypeKind::I64: case TypeKind::U64: return 64;
-        case TypeKind::F32: return 32;
-        case TypeKind::F64: return 64;
-        default:            return 0;
+        case TypeKind::I8:  case TypeKind::U8:               return 8;
+        case TypeKind::I16: case TypeKind::U16:              return 16;
+        case TypeKind::I32: case TypeKind::U32:
+        case TypeKind::Char:                                  return 32; // char = u32
+        case TypeKind::I64: case TypeKind::U64:              return 64;
+        case TypeKind::F32:                                   return 32;
+        case TypeKind::F64:                                   return 64;
+        default:                                              return 0;
     }
 }
 
@@ -56,8 +58,11 @@ CastResult canImplicitlyCast(Type from, Type to) {
     if (from == to)                          return CastResult::Silent;  // identity
     if (isError(from) || isError(to))        return CastResult::None;
 
-    TypeKind f = from.kind;
-    TypeKind t = to.kind;
+    // char and u32 share the same underlying representation (char = Unicode code point)
+    TypeKind f = from.kind, t = to.kind;
+    if ((f == TypeKind::Char && t == TypeKind::U32) ||
+        (f == TypeKind::U32  && t == TypeKind::Char))
+        return CastResult::Silent;
 
     // Any integer → float (silent widening)
     if (isInteger(f) && isFloat(t))          return CastResult::Silent;

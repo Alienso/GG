@@ -31,7 +31,9 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"void",   TokenType::VOID},
 
     // Keywords
-    {"return", TokenType::RETURN},
+    {"return",   TokenType::RETURN},
+    {"break",    TokenType::BREAK},
+    {"continue", TokenType::CONTINUE},
     {"if",     TokenType::IF},
     {"else",   TokenType::ELSE},
     {"for",    TokenType::FOR},

@@ -6,6 +6,7 @@
 #include "../semantic/Type.h"
 
 #include <cassert>
+#include <cstdint>
 #include <sstream>
 
 // ============================================================
@@ -34,6 +35,8 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     labelCounter        = 0;
     allocaMap.clear();
     varTypeMap.clear();
+    breakLabelStack.clear();
+    continueLabelStack.clear();
 
     // Return type
     currentReturnType        = typeFromToken(function.returnType.type);
@@ -102,8 +105,10 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const IfStmt& ifStmt)          { genIf(ifStmt); },
         [&](const WhileStmt& whileStmt)    { genWhile(whileStmt); },
         [&](const ForStmt& forStmt)        { genFor(forStmt); },
-        [&](const ReturnStmt& returnStmt)  { genReturn(returnStmt); },
-        [&](const FunctionDeclStmt&)       { /* nested functions not supported */ },
+        [&](const ReturnStmt& returnStmt)    { genReturn(returnStmt); },
+        [&](const BreakStmt& breakStmt)     { genBreak(breakStmt); },
+        [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },
+        [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
     }, *stmt.node);
 }
 
@@ -167,7 +172,11 @@ void CodeGen::genWhile(const WhileStmt& whileStmt) {
     emitCondBr(conditionBool, bodyLabel, mergeLabel);
 
     switchBlock(bodyLabel);
+    breakLabelStack.push_back(mergeLabel);
+    continueLabelStack.push_back(condLabel);
     genStmt(*whileStmt.body);
+    breakLabelStack.pop_back();
+    continueLabelStack.pop_back();
     if (!currentBasicBlock->terminated) emitBr(condLabel);
 
     switchBlock(mergeLabel);
@@ -199,7 +208,11 @@ void CodeGen::genFor(const ForStmt& forStmt) {
     }
 
     switchBlock(bodyLabel);
+    breakLabelStack.push_back(mergeLabel);
+    continueLabelStack.push_back(incLabel);
     genStmt(*forStmt.body);
+    breakLabelStack.pop_back();
+    continueLabelStack.pop_back();
     if (!currentBasicBlock->terminated) emitBr(incLabel);
 
     switchBlock(incLabel);
@@ -224,6 +237,16 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
         emit("ret void");
     }
     if (currentBasicBlock) currentBasicBlock->terminated = true;
+}
+
+void CodeGen::genBreak(const BreakStmt&) {
+    if (!breakLabelStack.empty())
+        emitBr(breakLabelStack.back());
+}
+
+void CodeGen::genContinue(const ContinueStmt&) {
+    if (!continueLabelStack.empty())
+        emitBr(continueLabelStack.back());
 }
 
 // ============================================================
@@ -266,22 +289,52 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, Type resolvedType) {
 
         case TokenType::CHAR: {
             // The lexer stores the char lexeme WITHOUT the surrounding single quotes.
-            // e.g., 'A' → lexeme "A", '\n' → lexeme "\n" (backslash + n).
-            if (!lexeme.empty()) {
-                if (lexeme[0] == '\\' && lexeme.size() >= 2) {
-                    // Escape sequence
-                    switch (lexeme[1]) {
-                        case 'n':  return "10";
-                        case 't':  return "9";
-                        case '\\': return "92";
-                        case '\'': return "39";
-                        case '0':  return "0";
-                        default:   return std::to_string(static_cast<int>((unsigned char)lexeme[1]));
-                    }
+            // char is a 32-bit Unicode code point (u32).
+            if (lexeme.empty()) return "0";
+
+            // ---- Escape sequences ----
+            if (lexeme[0] == '\\' && lexeme.size() >= 2) {
+                switch (lexeme[1]) {
+                    case 'n':  return "10";
+                    case 't':  return "9";
+                    case 'r':  return "13";
+                    case '\\': return "92";
+                    case '\'': return "39";
+                    case '"':  return "34";
+                    case '0':  return "0";
+                    default:   return std::to_string(static_cast<uint32_t>(
+                                    static_cast<unsigned char>(lexeme[1])));
                 }
-                return std::to_string(static_cast<int>((unsigned char)lexeme[0]));
             }
-            return "0";
+
+            // ---- UTF-8 → Unicode code point decoding ----
+            const auto* bytes = reinterpret_cast<const unsigned char*>(lexeme.data());
+            const size_t  len = lexeme.size();
+            uint32_t cp = 0;
+
+            if (len >= 1 && (bytes[0] & 0x80) == 0x00) {
+                // 1-byte: 0xxxxxxx
+                cp = bytes[0];
+            } else if (len >= 2 && (bytes[0] & 0xE0) == 0xC0) {
+                // 2-byte: 110xxxxx 10xxxxxx
+                cp = static_cast<uint32_t>((bytes[0] & 0x1F) << 6)
+                   | static_cast<uint32_t>( bytes[1] & 0x3F);
+            } else if (len >= 3 && (bytes[0] & 0xF0) == 0xE0) {
+                // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+                cp = static_cast<uint32_t>((bytes[0] & 0x0F) << 12)
+                   | static_cast<uint32_t>((bytes[1] & 0x3F) <<  6)
+                   | static_cast<uint32_t>( bytes[2] & 0x3F);
+            } else if (len >= 4 && (bytes[0] & 0xF8) == 0xF0) {
+                // 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+                cp = static_cast<uint32_t>((bytes[0] & 0x07) << 18)
+                   | static_cast<uint32_t>((bytes[1] & 0x3F) << 12)
+                   | static_cast<uint32_t>((bytes[2] & 0x3F) <<  6)
+                   | static_cast<uint32_t>( bytes[3] & 0x3F);
+            } else {
+                cp = bytes[0];  // invalid UTF-8 — use first byte as-is
+            }
+
+            return std::to_string(cp);
         }
 
         case TokenType::STRING: {
@@ -652,13 +705,13 @@ std::string CodeGen::emitCast(const std::string& value, Type from, Type to) {
         switch (kind) {
             case TypeKind::I8:
             case TypeKind::U8:
-            case TypeKind::Char:
                 return 8;
             case TypeKind::I16:
             case TypeKind::U16:
                 return 16;
             case TypeKind::I32:
             case TypeKind::U32:
+            case TypeKind::Char:
                 return 32;
             case TypeKind::I64:
             case TypeKind::U64:

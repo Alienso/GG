@@ -142,3 +142,44 @@ TEST_CASE("Parser - assignment expression", "[parser]") {
     const auto& val = asExpr<LiteralExpr>(*asgn.value);
     REQUIRE(val.token.lexeme == "5");
 }
+
+// ============================================================
+// Break and continue
+// ============================================================
+
+TEST_CASE("Parser - break statement inside while loop", "[parser]") {
+    Program program = parseString("void foo() { while (1) { break; } }");
+    const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
+    const auto& loop     = asStmt<WhileStmt>(*function.body.body[0]);
+    const auto& body     = asStmt<BlockStmt>(*loop.body);
+    const auto& brk      = asStmt<BreakStmt>(*body.body[0]);
+    REQUIRE(brk.keyword.type == TokenType::BREAK);
+}
+
+TEST_CASE("Parser - continue statement inside for loop", "[parser]") {
+    Program program = parseString("void foo() { for (;;) { continue; } }");
+    const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
+    const auto& loop     = asStmt<ForStmt>(*function.body.body[0]);
+    const auto& body     = asStmt<BlockStmt>(*loop.body);
+    const auto& cont     = asStmt<ContinueStmt>(*body.body[0]);
+    REQUIRE(cont.keyword.type == TokenType::CONTINUE);
+}
+
+TEST_CASE("Parser - break and continue preserve surrounding statements", "[parser]") {
+    Program program = parseString(R"(
+        void foo() {
+            while (1) {
+                i32 x = 0;
+                break;
+                i32 y = 1;
+            }
+        }
+    )");
+    const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
+    const auto& loop     = asStmt<WhileStmt>(*function.body.body[0]);
+    const auto& body     = asStmt<BlockStmt>(*loop.body);
+    REQUIRE(body.body.size() == 3);
+    asStmt<ExprStmt>(*body.body[0]);    // i32 x = 0
+    asStmt<BreakStmt>(*body.body[1]);   // break
+    asStmt<ExprStmt>(*body.body[2]);    // i32 y = 1
+}

@@ -28,6 +28,7 @@ private:
     ExprTypeMap         typeMap;
     bool                hadError          = false;
     std::optional<Type> currentReturnType; // nullopt = top-level (not inside a function)
+    int                 loopDepth         = 0;  // > 0 while inside a while/for loop
 
     // Pass 1: hoist top-level function signatures into the global scope
     void collectFunctions(const Program& program);
@@ -39,6 +40,8 @@ private:
     void analyzeWhile(const WhileStmt& whileStmt);
     void analyzeFor(const ForStmt& forStmt);
     void analyzeReturn(const ReturnStmt& returnStmt);
+    void analyzeBreak(const BreakStmt& breakStmt);
+    void analyzeContinue(const ContinueStmt& continueStmt);
     void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
 
     // Expression analysis — returns resolved Type and records it in typeMap.

@@ -84,6 +84,7 @@ void Parser::synchronize() {
             case TokenType::RETURN:
             case TokenType::BREAK:
             case TokenType::CONTINUE:
+            case TokenType::EXTERN:
             case TokenType::I8:
             case TokenType::I16:
             case TokenType::I32:
@@ -137,6 +138,12 @@ bool Parser::isTypeName() const {
 // ============================================================
 
 Stmt Parser::parseDeclaration() {
+    // extern returnType name( params );
+    if (match({ TokenType::EXTERN })) {
+        Token keyword = previous();
+        return parseExternFuncDecl(keyword);
+    }
+
     // Function decl: typeName IDENTIFIER ( ...
     // Variable decl at top level falls through to parseStatement → parseExprStmt
     // since VarDecl is an expression.
@@ -149,6 +156,28 @@ Stmt Parser::parseDeclaration() {
         return parseFunctionDecl(returnType, name);
     }
     return parseStatement();
+}
+
+Stmt Parser::parseExternFuncDecl(Token keyword) {
+    if (!isTypeName())
+        throw error(peek(), "expected return type after 'extern'");
+    Token returnType = advance();
+    Token name       = consume(TokenType::IDENTIFIER, "expected function name after return type");
+
+    consume(TokenType::LEFT_PAREN, "expected '(' after function name");
+    std::vector<ParamDecl> params;
+    if (!check(TokenType::RIGHT_PAREN)) {
+        do {
+            if (!isTypeName()) throw error(peek(), "expected parameter type");
+            Token paramType = advance();
+            Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
+            params.push_back(ParamDecl{ paramType, paramName });
+        } while (match({ TokenType::COMMA }));
+    }
+    consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
+    consume(TokenType::SEMICOLON,   "expected ';' after extern declaration");
+
+    return makeStmt(ExternFuncDeclStmt{ keyword, returnType, name, std::move(params) });
 }
 
 Stmt Parser::parseFunctionDecl(Token returnType, Token name) {

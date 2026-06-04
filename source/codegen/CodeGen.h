@@ -7,6 +7,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include "IR.h"
 #include "../parser/Ast.h"
 #include "../semantic/SemanticAnalyzer.h"
@@ -34,13 +35,19 @@ private:
     // varName → declared Type (needed to emit correct load/store sizes)
     std::unordered_map<std::string, Type>        varTypeMap;
 
+    // All alloca pointer names ever created in the current function.
+    // Persists across scope save/restore so re-used variable names (e.g.
+    // two for-loops both declaring 'i') always get distinct LLVM names.
+    std::unordered_set<std::string>              usedAllocaNames;
+
     // Innermost loop exit label (for break) and re-entry label (for continue).
     // Pushed on loop entry, popped on loop exit — supports arbitrary nesting.
     std::vector<std::string> breakLabelStack;
     std::vector<std::string> continueLabelStack;
 
-    // ---- Function codegen ----
+    // ---- Function / extern codegen ----
     void genFunction(const FunctionDeclStmt& function);
+    void genExternDecl(const ExternFuncDeclStmt& ext);
 
     // ---- Statement codegen ----
     void genStmt(const Stmt& stmt);

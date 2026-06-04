@@ -5,6 +5,14 @@
 #include "IRPrinter.h"
 
 void IRPrinter::print(const IRModule& module, std::ostream& out) {
+    // Module-level metadata required by LLVM tools
+    out << "target triple = \"x86_64-w64-windows-gnu\"\n\n";
+
+    // External function declarations
+    for (const auto& decl : module.declares)
+        out << decl << "\n";
+    if (!module.declares.empty()) out << "\n";
+
     // Global string constants
     for (const auto& global : module.globals)
         out << global << "\n";

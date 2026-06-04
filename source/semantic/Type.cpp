@@ -108,6 +108,9 @@ CastResult canImplicitlyCast(Type from, Type to) {
 Type commonArithmeticType(Type a, Type b) {
     if (isError(a) || isError(b)) return Type{TypeKind::Error};
 
+    // Bool == Bool stays as Bool (i1 comparison in IR)
+    if (a.kind == TypeKind::Bool && b.kind == TypeKind::Bool) return Type{TypeKind::Bool};
+
     // Float dominates
     if (a.kind == TypeKind::F64 || b.kind == TypeKind::F64) return Type{TypeKind::F64};
     if (a.kind == TypeKind::F32 || b.kind == TypeKind::F32) return Type{TypeKind::F32};

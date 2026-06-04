@@ -190,6 +190,17 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             indent--;
         },
 
+        [&](const ExternFuncDeclStmt& ext) {
+            std::string params;
+            bool first = true;
+            for (const auto& param : ext.params) {
+                if (!first) params += ", ";
+                first = false;
+                params += param.typeName.lexeme + " " + param.name.lexeme;
+            }
+            out("ExternFuncDecl " + ext.returnType.lexeme + " '" + ext.name.lexeme + "' (" + params + ")");
+        },
+
     }, *stmt.node);
 }
 

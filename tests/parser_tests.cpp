@@ -183,3 +183,43 @@ TEST_CASE("Parser - break and continue preserve surrounding statements", "[parse
     asStmt<BreakStmt>(*body.body[1]);   // break
     asStmt<ExprStmt>(*body.body[2]);    // i32 y = 1
 }
+
+// ============================================================
+// Extern function declarations
+// ============================================================
+
+TEST_CASE("Parser - extern declaration no params", "[parser]") {
+    Program program = parseString("extern void exit(i32 code);");
+    REQUIRE(program.declarations.size() == 1);
+    const auto& ext = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
+    REQUIRE(ext.name.lexeme         == "exit");
+    REQUIRE(ext.returnType.type     == TokenType::VOID);
+    REQUIRE(ext.params.size()       == 1);
+    REQUIRE(ext.params[0].name.lexeme == "code");
+    REQUIRE(ext.params[0].typeName.type == TokenType::I32);
+}
+
+TEST_CASE("Parser - extern declaration multiple params", "[parser]") {
+    Program program = parseString("extern i32 add(i32 a, i32 b);");
+    const auto& ext = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
+    REQUIRE(ext.name.lexeme     == "add");
+    REQUIRE(ext.params.size()   == 2);
+    REQUIRE(ext.params[1].typeName.type == TokenType::I32);
+}
+
+TEST_CASE("Parser - extern declaration zero params", "[parser]") {
+    Program program = parseString("extern i64 getTime();");
+    const auto& ext = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
+    REQUIRE(ext.name.lexeme   == "getTime");
+    REQUIRE(ext.params.empty());
+}
+
+TEST_CASE("Parser - extern followed by regular function", "[parser]") {
+    Program program = parseString(R"(
+        extern void puts(i32 s);
+        void main() { }
+    )");
+    REQUIRE(program.declarations.size() == 2);
+    asStmt<ExternFuncDeclStmt>(program.declarations[0]);
+    asStmt<FunctionDeclStmt>(program.declarations[1]);
+}

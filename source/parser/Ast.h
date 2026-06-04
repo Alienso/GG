@@ -145,6 +145,13 @@ struct FunctionDeclStmt {
     BlockStmt body;
 };
 
+struct ExternFuncDeclStmt {
+    Token                  keyword;     // 'extern' token — used for error reporting
+    Token                  returnType;
+    Token                  name;
+    std::vector<ParamDecl> params;
+};
+
 // ---- Stmt wrapper ----
 
 struct Stmt {
@@ -157,7 +164,8 @@ struct Stmt {
         BreakStmt,
         ContinueStmt,
         ReturnStmt,
-        FunctionDeclStmt
+        FunctionDeclStmt,
+        ExternFuncDeclStmt
     >;
     std::unique_ptr<Variant> node;
 };

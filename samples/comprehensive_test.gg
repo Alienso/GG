@@ -1,0 +1,328 @@
+// comprehensive_test.gg
+// Tests as many language features as possible.
+// Returns 0 on success, or the number of the first failing test.
+//
+// Expected result: exit code 0
+
+// ============================================================
+// Helper functions
+// ============================================================
+
+i32 add(i32 a, i32 b) { return a + b; }
+i32 mul(i32 a, i32 b) { return a * b; }
+
+// Recursive factorial
+i32 factorial(i32 n) {
+    if (n <= 1) { return 1; }
+    return n * factorial(n - 1);
+}
+
+// Recursive Fibonacci
+i32 fib(i32 n) {
+    if (n <= 1) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+// For-loop sum of 1..n
+i32 sumTo(i32 n) {
+    i32 total = 0;
+    for (i32 i = 1; i <= n; i++) {
+        total = total + i;
+    }
+    return total;
+}
+
+// While-loop countdown — returns number of steps
+i32 countDown(i32 n) {
+    i32 steps = 0;
+    while (n > 0) {
+        steps++;
+        n--;
+    }
+    return steps;
+}
+
+i32 absVal(i32 n) {
+    if (n < 0) { return -n; }
+    return n;
+}
+
+i32 maxOf(i32 a, i32 b) {
+    if (a > b) { return a; }
+    return b;
+}
+
+i32 clamp(i32 val, i32 lo, i32 hi) {
+    if (val < lo) { return lo; }
+    if (val > hi) { return hi; }
+    return val;
+}
+
+// Mutual recursion — both functions visible via forward hoisting
+bool isEven(i32 n) { return n % 2 == 0; }
+bool isOdd(i32 n)  { return !isEven(n); }
+
+void voidHelper() { }   // void function — must compile, nothing to verify
+
+// ============================================================
+// Main
+// ============================================================
+
+i32 main() {
+
+    // ---- 1-7: Basic arithmetic ----------------------------------------
+
+    if (add(3, 4) != 7)         { return 1; }
+    if (10 - 3 != 7)            { return 2; }
+    if (mul(6, 7) != 42)        { return 3; }
+    if (20 / 4 != 5)            { return 4; }
+    if (10 % 3 != 1)            { return 5; }
+    if (-5 + 3 != -2)           { return 6; }
+    if (2 + 3 * 4 != 14)        { return 7; }  // operator precedence
+
+    // ---- 8-9: Recursion -----------------------------------------------
+
+    if (factorial(5) != 120)    { return 8; }
+    if (fib(10) != 55)          { return 9; }
+
+    // ---- 10-11: Loops -------------------------------------------------
+
+    if (sumTo(10) != 55)        { return 10; }  // 1+2+…+10
+    if (countDown(7) != 7)      { return 11; }
+
+    // ---- 12-13: Absolute value / unary minus --------------------------
+
+    if (absVal(-9) != 9)        { return 12; }
+    if (absVal(9)  != 9)        { return 13; }
+
+    // ---- 14-18: if/else and nested calls ------------------------------
+
+    if (maxOf(3, 7) != 7)       { return 14; }
+    if (maxOf(9, 2) != 9)       { return 15; }
+    if (clamp(-5, 0, 10) != 0)  { return 16; }
+    if (clamp(15, 0, 10) != 10) { return 17; }
+    if (clamp(5,  0, 10) != 5)  { return 18; }
+
+    // ---- 19-21: Boolean literals and operators ------------------------
+
+    bool t = true;
+    bool f = false;
+    if (!(t && t))  { return 19; }
+    if (!(f || t))  { return 20; }
+    if (!!f)        { return 21; }
+
+    // ---- 22-23: Mutual recursion / bool return ------------------------
+
+    if (!isEven(4)) { return 22; }
+    if (!isOdd(7))  { return 23; }
+
+    // ---- 24-28: Bitwise operators -------------------------------------
+
+    if ((5 & 3) != 1)  { return 24; }
+    if ((5 | 3) != 7)  { return 25; }
+    if ((5 ^ 3) != 6)  { return 26; }
+    if ((1 << 3) != 8) { return 27; }
+    if ((16 >> 2) != 4){ return 28; }
+
+    // Bitwise NOT: low byte of ~5 should be 0xFA = 250
+    i32 notFive = ~5;
+    if ((notFive & 255) != 250) { return 29; }
+
+    // ---- 30-37: Compound assignment ----------------------------------
+
+    i32 x = 10;
+    x += 5;   if (x != 15) { return 30; }
+    x -= 3;   if (x != 12) { return 31; }
+    x *= 2;   if (x != 24) { return 32; }
+    x /= 4;   if (x != 6)  { return 33; }
+    x %= 4;   if (x != 2)  { return 34; }
+
+    i32 bits = 4;
+    bits |= 2;  if (bits != 6) { return 35; }
+    bits &= 5;  if (bits != 4) { return 36; }
+    bits ^= 3;  if (bits != 7) { return 37; }
+
+    // ---- 38-43: Prefix and postfix ++/-- -----------------------------
+
+    i32 a = 5;
+    ++a;              if (a != 6)   { return 38; }
+    --a;              if (a != 5)   { return 39; }
+    i32 old = a++;    if (old != 5) { return 40; }
+                      if (a   != 6) { return 41; }
+    old = a--;        if (old != 6) { return 42; }
+                      if (a   != 5) { return 43; }
+
+    // ---- 44-45: Widening casts (i32 → i64) ---------------------------
+
+    i32 small = 1000000;
+    i64 big = small;
+    if (big != 1000000)           { return 44; }
+    i64 p = 1000000;
+    i64 q = 2000000;
+    if (p + q != 3000000)         { return 45; }
+
+    // ---- 46-48: Floating-point arithmetic and comparisons ------------
+
+    f64 pi  = 3.0;
+    f64 tau = pi * 2.0;
+    if (tau != 6.0)               { return 46; }
+    f64 lo = 1.5;
+    f64 hi2 = 2.5;
+    if (!(lo < hi2))              { return 47; }
+    f64 neg = -1.5;
+    if (neg >= 0.0)               { return 48; }
+
+    // ---- 49-50: Variable shadowing -----------------------------------
+
+    i32 shadow = 10;
+    {
+        i32 shadow = 20;
+        if (shadow != 20) { return 49; }
+    }
+    if (shadow != 10)             { return 50; }
+
+    // ---- 51: for loop with break -------------------------------------
+    // Find first i where i*i > 20  →  i=5 (25 > 20)
+
+    i32 found = -1;
+    for (i32 i = 0; i < 10; i++) {
+        if (i * i > 20) { found = i; break; }
+    }
+    if (found != 5)               { return 51; }
+
+    // ---- 52: for loop with continue (sum even numbers 0..9) ----------
+    // 0+2+4+6+8 = 20
+
+    i32 evenSum = 0;
+    for (i32 i = 0; i < 10; i++) {
+        if (i % 2 != 0) { continue; }
+        evenSum = evenSum + i;
+    }
+    if (evenSum != 20)            { return 52; }
+
+    // ---- 53: while with break ----------------------------------------
+
+    i32 wb = 0;
+    while (true) {
+        wb++;
+        if (wb >= 5) { break; }
+    }
+    if (wb != 5)                  { return 53; }
+
+    // ---- 54: while with continue (count odd numbers 1..9) ------------
+    // Odd numbers in 1..9: 1,3,5,7,9 → count = 5
+
+    i32 oddCount = 0;
+    i32 j = 0;
+    while (j < 10) {
+        j++;
+        if (j % 2 == 0) { continue; }
+        oddCount++;
+    }
+    if (oddCount != 5)            { return 54; }
+
+    // ---- 55: else-if chain -------------------------------------------
+
+    i32 grade = 75;
+    i32 letter = 0;
+    if      (grade >= 90) { letter = 4; }
+    else if (grade >= 80) { letter = 3; }
+    else if (grade >= 70) { letter = 2; }
+    else                  { letter = 1; }
+    if (letter != 2)              { return 55; }
+
+    // ---- 56: nested loops --------------------------------------------
+    // Count pairs (i,j) with i+j == 5, i in 0..5, j in 0..5 → 6 pairs
+
+    i32 pairCount = 0;
+    for (i32 i = 0; i <= 5; i++) {
+        for (i32 j = 0; j <= 5; j++) {
+            if (i + j == 5) { pairCount++; }
+        }
+    }
+    if (pairCount != 6)           { return 56; }
+
+    // ---- 57-59: char type (Unicode code points = u32) ----------------
+
+    char c = 'A';
+    if (c != 65)                  { return 57; }
+    char newline = '\n';
+    if (newline != 10)            { return 58; }
+    char tab = '\t';
+    if (tab != 9)                 { return 59; }
+
+    // ---- 60: u32 arithmetic ------------------------------------------
+
+    u32 ua = 100;
+    u32 ub = 200;
+    if (ua + ub != 300)           { return 60; }
+
+    // ---- 61: signed shift right is arithmetic (sign-extending) -------
+
+    i32 neg32 = -8;
+    if (neg32 >> 2 != -2)         { return 61; }
+
+    // ---- 62: unsigned shift right is logical (zero-filling) ----------
+
+    u32 u = 8;
+    if (u >> 1 != 4)              { return 62; }
+
+    // ---- 63-64: f32 arithmetic ----------------------------------------
+
+    f32 fa = 1.0;
+    f32 fb = 2.0;
+    f32 fc = fa + fb;
+    if (fc != 3.0)                { return 63; }
+    if (fa < fb == false)         { return 64; }
+
+    // ---- 65: call void function (just must not crash) ----------------
+
+    voidHelper();
+    if (false)                    { return 65; }  // unreachable; proves no crash
+
+    // ---- 66: large for-loop accumulation (stress test) ---------------
+    // Sum of squares 1..10 = 385
+
+    i32 sumSq = 0;
+    for (i32 i = 1; i <= 10; i++) {
+        sumSq += i * i;
+    }
+    if (sumSq != 385)             { return 66; }
+
+    // ---- 67: deeply nested if ----------------------------------------
+
+    i32 v = 42;
+    i32 result = 0;
+    if (v > 0) {
+        if (v > 10) {
+            if (v > 40) {
+                result = 3;
+            } else {
+                result = 2;
+            }
+        } else {
+            result = 1;
+        }
+    }
+    if (result != 3)              { return 67; }
+
+    // ---- 68: short-circuit logical (value correctness) ---------------
+
+    i32 always0 = 0;
+    bool sc = always0 != 0 && factorial(5) == 120;
+    if (sc)                       { return 68; }   // left is false → sc must be false
+
+    // ---- 69: multiple return paths in one function -------------------
+    // factorial uses both the base case and recursive return — already tested (8)
+    // Also verify clamp hits all three paths:
+    if (clamp(0,  0, 10) != 0)  { return 69; }   // lo boundary — hits path 1 (val < lo → no) then path 2 (val > hi → no) → fall through
+
+    // ---- 70: assignment is an expression (value of assignment) -------
+
+    i32 assigned = 0;
+    i32 assignee = (assigned = 99);
+    if (assignee != 99)           { return 70; }
+    if (assigned  != 99)          { return 71; }
+
+    return 0;   // all tests passed
+}

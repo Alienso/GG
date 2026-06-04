@@ -55,6 +55,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ContinueStmt&)        { return false; },
         [](const ExprStmt&)            { return false; },
         [](const FunctionDeclStmt&)    { return false; },
+        [](const ExternFuncDeclStmt&)  { return false; },
     }, *stmt.node);
 }
 
@@ -87,25 +88,47 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
 
 void SemanticAnalyzer::collectFunctions(const Program& program) {
     for (const Stmt& stmt : program.declarations) {
-        if (!std::holds_alternative<FunctionDeclStmt>(*stmt.node)) continue;
-        const auto& function = std::get<FunctionDeclStmt>(*stmt.node);
+        if (std::holds_alternative<FunctionDeclStmt>(*stmt.node)) {
+            const auto& function = std::get<FunctionDeclStmt>(*stmt.node);
 
-        std::vector<Type> paramTypes;
-        for (const ParamDecl& param : function.params)
-            paramTypes.push_back(typeFromToken(param.typeName.type));
+            std::vector<Type> paramTypes;
+            for (const ParamDecl& param : function.params)
+                paramTypes.push_back(typeFromToken(param.typeName.type));
 
-        Symbol sym{
-            Symbol::Kind::Function,
-            typeFromToken(function.returnType.type),
-            function.name,
-            std::move(paramTypes)
-        };
+            Symbol sym{
+                Symbol::Kind::Function,
+                typeFromToken(function.returnType.type),
+                function.name,
+                std::move(paramTypes)
+            };
 
-        if (!symbolTable.declare(function.name.lexeme, sym)) {
-            const Symbol* prev = symbolTable.lookupCurrentScope(function.name.lexeme);
-            error(function.name, "function '" + function.name.lexeme + "' already declared in this scope"
-                  + (prev ? " (previously declared at line "
-                           + std::to_string(prev->declarationToken.line) + ")" : ""));
+            if (!symbolTable.declare(function.name.lexeme, sym)) {
+                const Symbol* prev = symbolTable.lookupCurrentScope(function.name.lexeme);
+                error(function.name, "function '" + function.name.lexeme + "' already declared in this scope"
+                      + (prev ? " (previously declared at line "
+                               + std::to_string(prev->declarationToken.line) + ")" : ""));
+            }
+        }
+        else if (std::holds_alternative<ExternFuncDeclStmt>(*stmt.node)) {
+            const auto& ext = std::get<ExternFuncDeclStmt>(*stmt.node);
+
+            std::vector<Type> paramTypes;
+            for (const ParamDecl& param : ext.params)
+                paramTypes.push_back(typeFromToken(param.typeName.type));
+
+            Symbol sym{
+                Symbol::Kind::Function,
+                typeFromToken(ext.returnType.type),
+                ext.name,
+                std::move(paramTypes)
+            };
+
+            if (!symbolTable.declare(ext.name.lexeme, sym)) {
+                const Symbol* prev = symbolTable.lookupCurrentScope(ext.name.lexeme);
+                error(ext.name, "extern '" + ext.name.lexeme + "' already declared in this scope"
+                      + (prev ? " (previously declared at line "
+                               + std::to_string(prev->declarationToken.line) + ")" : ""));
+            }
         }
     }
 }
@@ -124,7 +147,8 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ReturnStmt& returnStmt)            { analyzeReturn(returnStmt); },
         [&](const BreakStmt& breakStmt)             { analyzeBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },
-        [&](const FunctionDeclStmt& functionDecl)   { analyzeFunctionDecl(functionDecl); },
+        [&](const FunctionDeclStmt& functionDecl)    { analyzeFunctionDecl(functionDecl); },
+        [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },
     }, *stmt.node);
 }
 
@@ -234,6 +258,16 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
 
     currentReturnType = savedReturnType;
     loopDepth         = savedLoopDepth;
+}
+
+void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& ext) {
+    // Signature was already registered in pass 1 (collectFunctions).
+    // Just validate that no parameter has type 'void'.
+    for (const ParamDecl& param : ext.params) {
+        Type paramType = typeFromToken(param.typeName.type);
+        if (paramType.kind == TypeKind::Void)
+            error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+    }
 }
 
 // ============================================================

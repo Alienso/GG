@@ -51,6 +51,7 @@ struct IRFunction {
 };
 
 struct IRModule {
+    std::vector<std::string> declares;   // declare <retType> @<name>(<params>) — extern functions
     std::vector<std::string> globals;    // @.str.N = private unnamed_addr constant …
     std::vector<IRFunction>  functions;
 };

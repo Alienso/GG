@@ -859,3 +859,42 @@ TEST_CASE("CodeGen - break block is terminated so no trailing branch follows", "
     // The normal back-edge (br label %while.cond.) must NOT appear in the body block.
     REQUIRE(irContains(ir, "while.merge."));
 }
+
+// ============================================================
+// Extern function declarations
+// ============================================================
+
+TEST_CASE("CodeGen - extern produces declare line", "[codegen]") {
+    auto ir = codegenString("extern void exit(i32 code);");
+    REQUIRE(irContains(ir, "declare void @exit(i32)"));
+}
+
+TEST_CASE("CodeGen - extern with no params produces empty param list", "[codegen]") {
+    auto ir = codegenString("extern i64 getTime();");
+    REQUIRE(irContains(ir, "declare i64 @getTime()"));
+}
+
+TEST_CASE("CodeGen - extern with multiple params", "[codegen]") {
+    auto ir = codegenString("extern i32 add(i32 a, i32 b);");
+    REQUIRE(irContains(ir, "declare i32 @add(i32, i32)"));
+}
+
+TEST_CASE("CodeGen - extern declare appears before define", "[codegen]") {
+    auto ir = codegenString(R"(
+        extern void exit(i32 code);
+        void main() { exit(0); }
+    )");
+    auto declarePos = ir.find("declare void @exit");
+    auto definePos  = ir.find("define void @main");
+    REQUIRE(declarePos != std::string::npos);
+    REQUIRE(definePos  != std::string::npos);
+    REQUIRE(declarePos < definePos);
+}
+
+TEST_CASE("CodeGen - extern call emits call instruction", "[codegen]") {
+    auto ir = codegenString(R"(
+        extern i32 add(i32 a, i32 b);
+        i32 main() { return add(1, 2); }
+    )");
+    REQUIRE(irContains(ir, "call i32 @add"));
+}

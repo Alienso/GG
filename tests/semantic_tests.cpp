@@ -385,3 +385,57 @@ TEST_CASE("Semantic - break at top level is an error", "[semantic]") {
     auto result = analyzeString("i32 foo() { break; return 0; }");
     REQUIRE(result.hadError);
 }
+
+// ============================================================
+// Extern function declarations
+// ============================================================
+
+TEST_CASE("Semantic - extern declaration is valid", "[semantic]") {
+    auto result = analyzeString("extern i32 printf(i8 fmt);");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - extern function can be called", "[semantic]") {
+    auto result = analyzeString(R"(
+        extern i32 add(i32 a, i32 b);
+        i32 main() { return add(1, 2); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Semantic - duplicate extern declaration is an error", "[semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        extern void exit(i32 code);
+        extern void exit(i32 code);
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Semantic - extern and function with same name is an error", "[semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        extern void foo();
+        void foo() { }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Semantic - extern call with wrong arg count is an error", "[semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        extern void exit(i32 code);
+        void main() { exit(1, 2); }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Semantic - extern call with wrong arg type is an error", "[semantic]") {
+    // Passing a string where i32 is expected — no implicit conversion exists.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        extern void exit(i32 code);
+        void main() { exit("hello"); }
+    )");
+    REQUIRE(result.hadError);
+}

@@ -1,0 +1,26 @@
+// Compute factorial recursively and use it in a for-loop sum.
+// Returns the result as the process exit code so it is observable
+// without any I/O support in the language yet.
+//
+//   factorial(5) = 120
+//   sum 1..5     =  15
+//   result       = 120 - 15 = 105
+
+i32 factorial(i32 n) {
+    if (n <= 1) { return 1; }
+    return n * factorial(n - 1);
+}
+
+i32 sumTo(i32 n) {
+    i32 total = 0;
+    for (i32 i = 1; i <= n; i++) {
+        total = total + i;
+    }
+    return total;
+}
+
+i32 main() {
+    i32 fact = factorial(5);   // 120
+    i32 sum  = sumTo(5);       // 15
+    return fact - sum;         // 105
+}

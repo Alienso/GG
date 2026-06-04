@@ -43,6 +43,7 @@ private:
     void analyzeBreak(const BreakStmt& breakStmt);
     void analyzeContinue(const ContinueStmt& continueStmt);
     void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
+    void analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl);
 
     // Expression analysis — returns resolved Type and records it in typeMap.
     // Not [[nodiscard]] because it is intentionally called for side effects

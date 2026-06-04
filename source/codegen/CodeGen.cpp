@@ -19,8 +19,11 @@ IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeM
     stringCounter = 0;
 
     for (const auto& decl : program.declarations) {
-        if (decl.node && std::holds_alternative<FunctionDeclStmt>(*decl.node))
+        if (!decl.node) continue;
+        if (std::holds_alternative<FunctionDeclStmt>(*decl.node))
             genFunction(std::get<FunctionDeclStmt>(*decl.node));
+        else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node))
+            genExternDecl(std::get<ExternFuncDeclStmt>(*decl.node));
     }
     return std::move(module);
 }
@@ -35,6 +38,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     labelCounter        = 0;
     allocaMap.clear();
     varTypeMap.clear();
+    usedAllocaNames.clear();
     breakLabelStack.clear();
     continueLabelStack.clear();
 
@@ -69,6 +73,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
         std::string irType     = irTypeName(paramType);
         std::string ptrName    = "%" + param.name.lexeme + ".addr";
         emitAlloca(ptrName, irType);
+        usedAllocaNames.insert(ptrName);
         allocaMap[param.name.lexeme]  = ptrName;
         varTypeMap[param.name.lexeme] = paramType;
         emitStore(irType, "%" + param.name.lexeme, ptrName);
@@ -94,6 +99,21 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     currentBasicBlock = nullptr;
 }
 
+void CodeGen::genExternDecl(const ExternFuncDeclStmt& ext) {
+    std::string returnIrType = irTypeName(typeFromToken(ext.returnType.type));
+
+    std::string paramStr;
+    bool first = true;
+    for (const auto& param : ext.params) {
+        if (!first) paramStr += ", ";
+        first = false;
+        paramStr += irTypeName(typeFromToken(param.typeName.type));
+    }
+
+    module.declares.push_back(
+        "declare " + returnIrType + " @" + ext.name.lexeme + "(" + paramStr + ")");
+}
+
 // ============================================================
 // Statement codegen
 // ============================================================
@@ -109,6 +129,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const BreakStmt& breakStmt)     { genBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },
         [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
+        [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
     }, *stmt.node);
 }
 
@@ -611,11 +632,17 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     std::string name         = varDecl.name.lexeme;
 
     // Build a unique alloca pointer name.
-    // If the variable shadows a name from an enclosing scope, append a counter
-    // so the alloca names remain unique within the function.
+    // We consult usedAllocaNames (which persists across scope save/restore) so
+    // that two variables with the same name in sibling scopes — e.g. two for-loops
+    // both declaring 'i' — always get distinct LLVM value names within the function.
     std::string ptrName = "%" + name + ".addr";
-    if (allocaMap.count(name))
-        ptrName = "%" + name + ".addr." + std::to_string(tempCounter++);
+    if (usedAllocaNames.count(ptrName)) {
+        int suffix = 1;
+        while (usedAllocaNames.count(ptrName + "." + std::to_string(suffix)))
+            ++suffix;
+        ptrName += "." + std::to_string(suffix);
+    }
+    usedAllocaNames.insert(ptrName);
 
     emitAlloca(ptrName, irType);
     allocaMap[name]  = ptrName;

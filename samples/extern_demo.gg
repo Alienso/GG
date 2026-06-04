@@ -1,0 +1,12 @@
+// Demonstrates extern declarations — call CRT's puts() and exit().
+// Compile with: .\compile.ps1 .\samples\extern_demo.gg -run
+//
+// 'string' maps to 'ptr' in LLVM IR, matching C's 'const char*'.
+
+extern i32 puts(string s);
+extern void exit(i32 code);
+
+void main() {
+    puts("Hello from GG with extern!");
+    exit(0);
+}

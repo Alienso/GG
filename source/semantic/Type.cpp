@@ -146,6 +146,7 @@ Type typeFromToken(TokenType tt) {
         case TokenType::BOOL:        return Type{TypeKind::Bool};
         case TokenType::CHAR_TYPE:   return Type{TypeKind::Char};
         case TokenType::STRING_TYPE: return Type{TypeKind::String};
+        case TokenType::VOID:        return Type{TypeKind::Void};
         default:                     return Type{TypeKind::Error};
     }
 }

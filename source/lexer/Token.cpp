@@ -28,6 +28,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"bool",   TokenType::BOOL},
     {"char",   TokenType::CHAR_TYPE},
     {"string", TokenType::STRING_TYPE},
+    {"void",   TokenType::VOID},
 
     // Keywords
     {"return", TokenType::RETURN},

@@ -95,6 +95,7 @@ void Parser::synchronize() {
             case TokenType::BOOL:
             case TokenType::CHAR_TYPE:
             case TokenType::STRING_TYPE:
+            case TokenType::VOID:
                 return;
             default:
                 break;
@@ -122,6 +123,7 @@ bool Parser::isTypeName() const {
         case TokenType::BOOL:
         case TokenType::CHAR_TYPE:
         case TokenType::STRING_TYPE:
+        case TokenType::VOID:
             return true;
         default:
             return false;

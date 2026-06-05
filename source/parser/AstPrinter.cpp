@@ -76,10 +76,34 @@ void AstPrinter::printExpr(const Expr& expr) {
         },
 
         [&](const VarDeclExpr& varDecl) {
-            out("VarDecl " + varDecl.typeName.lexeme + " '" + varDecl.name.lexeme + "'");
+            std::string typeStr = varDecl.arraySize > 0
+                ? varDecl.typeName.lexeme + "[" + std::to_string(varDecl.arraySize) + "]"
+                : varDecl.typeName.lexeme;
+            out("VarDecl " + typeStr + " '" + varDecl.name.lexeme + "'");
             indent++;
             if (varDecl.initializer) printExpr(*varDecl.initializer);
             else                     out("(no initializer)");
+            indent--;
+        },
+
+        [&](const IndexExpr& indexExpr) {
+            out("Index '" + indexExpr.name.lexeme + "'");
+            indent++;
+            printExpr(*indexExpr.index);
+            indent--;
+        },
+
+        [&](const IndexAssignExpr& indexAssign) {
+            out("IndexAssign '" + indexAssign.name.lexeme + "'");
+            indent++;
+            out("index:");
+            indent++;
+            printExpr(*indexAssign.index);
+            indent--;
+            out("value:");
+            indent++;
+            printExpr(*indexAssign.value);
+            indent--;
             indent--;
         },
 

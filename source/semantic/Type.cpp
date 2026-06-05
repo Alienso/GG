@@ -185,6 +185,7 @@ std::string typeName(Type t) {
         case TypeKind::Char:   return "char";
         case TypeKind::String: return "string";
         case TypeKind::Ptr:    return "ptr";
+        case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "<error>";
     }

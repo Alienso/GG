@@ -11,10 +11,11 @@
 #include "IR.h"
 #include "../parser/Ast.h"
 #include "../semantic/SemanticAnalyzer.h"
+#include "../CompilerOptions.h"
 
 class CodeGen {
 public:
-    IRModule generate(const Program& program, const ExprTypeMap& typeMap);
+    IRModule generate(const Program& program, const ExprTypeMap& typeMap, const CompilerOptions& options = {});
 
 private:
     // ---- Module-level state ----
@@ -31,6 +32,8 @@ private:
 
     // funcName → ordered list of declared parameter types (populated in generate())
     std::unordered_map<std::string, std::vector<Type>> funcParamTypes;
+
+    bool boundsCheck = true;   // from CompilerOptions; false disables runtime checks
 
     // varName → alloca pointer register name, e.g. "x" → "%x.addr"
     std::unordered_map<std::string, std::string> allocaMap;
@@ -73,6 +76,12 @@ private:
     std::string genPostfix(const PostfixExpr& postfix);
     std::string genCall(const CallExpr& call, Type resolvedType);
     std::string genVarDecl(const VarDeclExpr& varDecl);
+    std::string genIndex(const IndexExpr& indexExpr);
+    std::string genIndexAssign(const IndexAssignExpr& indexAssign);
+
+    // ---- Bounds check helpers ----
+    void ensureAbortDeclared();
+    void emitBoundsCheck(const std::string& indexValue, size_t arraySize);
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

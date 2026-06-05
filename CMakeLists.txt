@@ -43,10 +43,14 @@ add_executable(GG_tests
         tests/semantic_tests.cpp
         tests/codegen_tests.cpp
         tests/import_tests.cpp
+        tests/stdlib_tests.cpp
+        tests/array_tests.cpp
         ${GG_SOURCES}
 )
 target_link_libraries(GG_tests PRIVATE Catch2::Catch2WithMain)
 target_include_directories(GG_tests PRIVATE ${CMAKE_SOURCE_DIR})
+# Expose the repo root so stdlib_tests.cpp can locate the stdlib/ directory.
+target_compile_definitions(GG_tests PRIVATE GG_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Wire Catch2 tests into CTest so "Run All Tests" works in CLion.
 # On MinGW, pass the compiler's bin directory as a DLL search path so the

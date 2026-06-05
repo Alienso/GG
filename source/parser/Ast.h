@@ -71,6 +71,18 @@ struct VarDeclExpr {
     Token typeName;
     Token name;
     std::unique_ptr<Expr> initializer;   // nullptr if absent
+    size_t arraySize = 0;                // 0 = scalar; N > 0 = fixed-size array of N elements
+};
+
+struct IndexExpr {
+    Token                 name;    // array variable name
+    std::unique_ptr<Expr> index;   // subscript expression
+};
+
+struct IndexAssignExpr {
+    Token                 name;    // array variable name
+    std::unique_ptr<Expr> index;   // subscript expression
+    std::unique_ptr<Expr> value;   // right-hand side value
 };
 
 // ---- Expr wrapper ----
@@ -85,7 +97,9 @@ struct Expr {
         CompoundAssignExpr,
         PostfixExpr,
         CallExpr,
-        VarDeclExpr
+        VarDeclExpr,
+        IndexExpr,
+        IndexAssignExpr
     >;
     std::unique_ptr<Variant> node;
 };
@@ -154,7 +168,7 @@ struct ExternFuncDeclStmt {
 
 struct ImportStmt {
     Token keyword;   // 'import' token — used for error reporting
-    Token path;      // STRING token — the file path (lexeme includes surrounding quotes)
+    Token path;      // STRING token — the file path (lexeme is the raw content, quotes stripped by lexer)
 };
 
 // ---- Stmt wrapper ----

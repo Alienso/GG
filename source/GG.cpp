@@ -11,7 +11,7 @@
 
 namespace fs = std::filesystem;
 
-GG::GG(std::vector<std::string>& inputPaths) : paths(inputPaths) {}
+GG::GG(std::vector<std::string>& inputPaths, CompilerOptions opts) : paths(inputPaths), options(opts) {}
 
 void GG::run() {
     const fs::path buildDir = fs::current_path() / "build";
@@ -42,7 +42,7 @@ void GG::run() {
 
         SemanticResult result = semanticAnalyzer.analyze(ast);
         if (!result.hadError) {
-            IRModule ir = codeGenerator.generate(ast, result.typeMap);
+            IRModule ir = codeGenerator.generate(ast, result.typeMap, options);
             IRPrinter irPrinter;
             irPrinter.print(ir, irFile);
         }

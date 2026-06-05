@@ -58,6 +58,8 @@ private:
     [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);
     [[nodiscard]] Type analyzeCall(const CallExpr& call);
     [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& varDecl);
+    [[nodiscard]] Type analyzeIndex(const IndexExpr& indexExpr);
+    [[nodiscard]] Type analyzeIndexAssign(const IndexAssignExpr& indexAssign);
 
     // Helpers
     void          enterScope();

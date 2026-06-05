@@ -6,6 +6,7 @@
 #define GG_TYPE_H
 
 #include <string>
+#include <cstddef>
 #include "../lexer/Token.h"
 
 // ---- TypeKind ----
@@ -16,6 +17,7 @@ enum class TypeKind {
     F32, F64,
     Bool, Char, String,
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
+    Array,  // fixed-size stack array: element type + count stored in Type struct
     Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
@@ -23,12 +25,19 @@ enum class TypeKind {
 // ---- Type ----
 
 struct Type {
-    TypeKind kind;
-    bool isConst    = false;
-    bool isNullable = false;
+    TypeKind kind        = TypeKind::Error;
+    bool     isConst     = false;
+    bool     isNullable  = false;
+    TypeKind elementKind = TypeKind::Error;  // only valid when kind == Array
+    size_t   arraySize   = 0;               // only valid when kind == Array
 
     bool operator==(const Type&) const = default;
 };
+
+// Convenience constructor for array types.
+inline Type makeArrayType(TypeKind elementKind, size_t size) {
+    return Type{TypeKind::Array, false, false, elementKind, size};
+}
 
 // ---- CastResult ----
 

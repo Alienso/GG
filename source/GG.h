@@ -9,6 +9,7 @@
 #include "semantic/SemanticAnalyzer.h"
 #include "codegen/CodeGen.h"
 #include "codegen/IRPrinter.h"
+#include "CompilerOptions.h"
 
 #include <vector>
 #include <string>
@@ -16,12 +17,13 @@
 
 class GG {
 public:
-    explicit GG(std::vector<std::string>& paths);
+    explicit GG(std::vector<std::string>& paths, CompilerOptions options = {});
     void run();
 private:
     std::vector<std::string> paths;
     SemanticAnalyzer         semanticAnalyzer;
     CodeGen                  codeGenerator;
+    CompilerOptions          options;
 };
 
 

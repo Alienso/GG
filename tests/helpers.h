@@ -12,6 +12,7 @@
 #include "../source/semantic/SemanticAnalyzer.h"
 #include "../source/codegen/CodeGen.h"
 #include "../source/codegen/IRPrinter.h"
+#include "../source/CompilerOptions.h"
 
 #include <filesystem>
 #include <fstream>
@@ -82,12 +83,27 @@ inline SemanticResult analyzeString(const std::string& source) {
 }
 
 // Lex + parse + analyse + codegen a source string and return the IR text.
-inline std::string codegenString(const std::string& source) {
+inline std::string codegenString(const std::string& source, CompilerOptions options = {}) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
     SemanticResult semanticResult = analyzer.analyze(ast);
     CodeGen codeGenerator;
-    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap);
+    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap, options);
+    std::ostringstream output;
+    IRPrinter printer;
+    printer.print(ir, output);
+    return output.str();
+}
+
+// Resolve + analyse + codegen a .gg file on disk and return the IR text.
+// Used by stdlib tests that operate on actual source files rather than inline strings.
+inline std::string codegenFile(const std::string& path, CompilerOptions options = {}) {
+    ImportResolver resolver;
+    Program ast = resolver.resolve(path);
+    SemanticAnalyzer analyzer;
+    SemanticResult semanticResult = analyzer.analyze(ast);
+    CodeGen codeGenerator;
+    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap, options);
     std::ostringstream output;
     IRPrinter printer;
     printer.print(ir, output);

@@ -13,10 +13,11 @@
 // Public entry point
 // ============================================================
 
-IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeMap) {
+IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeMap, const CompilerOptions& options) {
     module        = {};
     this->typeMap = &inputTypeMap;
     stringCounter = 0;
+    boundsCheck   = options.boundsCheck;
     funcParamTypes.clear();
 
     // Build function parameter type table (used in genCall to cast arguments).
@@ -306,6 +307,8 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const PostfixExpr& postfix)              -> std::string { return genPostfix(postfix); },
         [&](const CallExpr& call)                    -> std::string { return genCall(call, resolvedType); },
         [&](const VarDeclExpr& varDecl)              -> std::string { return genVarDecl(varDecl); },
+        [&](const IndexExpr& indexExpr)              -> std::string { return genIndex(indexExpr); },
+        [&](const IndexAssignExpr& indexAssign)      -> std::string { return genIndexAssign(indexAssign); },
     }, *expr.node);
 }
 
@@ -662,6 +665,33 @@ std::string CodeGen::genCall(const CallExpr& call, Type resolvedType) {
 // ---- VarDecl ----
 
 std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
+    // ---- Array declaration ----
+    if (varDecl.arraySize > 0) {
+        TypeKind elementKind = typeFromToken(varDecl.typeName.type).kind;
+        Type     arrayType   = makeArrayType(elementKind, varDecl.arraySize);
+        std::string arrayIrType = irTypeName(arrayType);
+        std::string name        = varDecl.name.lexeme;
+
+        std::string ptrName = "%" + name + ".addr";
+        if (usedAllocaNames.count(ptrName)) {
+            int suffix = 1;
+            while (usedAllocaNames.count(ptrName + "." + std::to_string(suffix)))
+                ++suffix;
+            ptrName += "." + std::to_string(suffix);
+        }
+        usedAllocaNames.insert(ptrName);
+
+        emitAlloca(ptrName, arrayIrType);
+        allocaMap[name]  = ptrName;
+        varTypeMap[name] = arrayType;
+
+        // Zero-initialise the entire array in one store
+        emit("store " + arrayIrType + " zeroinitializer, ptr " + ptrName);
+
+        return ptrName;
+    }
+
+    // ---- Scalar declaration (existing logic) ----
     Type        declaredType = typeFromToken(varDecl.typeName.type);
     std::string irType       = irTypeName(declaredType);
     std::string name         = varDecl.name.lexeme;
@@ -691,6 +721,101 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     }
 
     return ptrName;
+}
+
+// ---- Index (array read) ----
+
+std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
+    const std::string& name = indexExpr.name.lexeme;
+    auto varTypeIt = varTypeMap.find(name);
+    auto allocaIt  = allocaMap.find(name);
+    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
+
+    Type        arrayType     = varTypeIt->second;
+    Type        elementType{arrayType.elementKind};
+    std::string elementIrType = irTypeName(elementType);
+    std::string arrayIrType   = irTypeName(arrayType);
+    std::string ptrName       = allocaIt->second;
+
+    // Evaluate and widen the index to i64 for GEP (icmp ult also needs i64)
+    Type        indexType  = exprType(*indexExpr.index);
+    std::string indexValue = genExpr(*indexExpr.index);
+    indexValue = emitCast(indexValue, indexType, Type{TypeKind::I64});
+
+    if (boundsCheck) {
+        ensureAbortDeclared();
+        emitBoundsCheck(indexValue, arrayType.arraySize);
+    }
+
+    std::string elemPtr = freshTemp();
+    emit("%" + elemPtr + " = getelementptr " + arrayIrType + ", ptr " + ptrName
+         + ", i32 0, i64 " + indexValue);
+
+    return emitLoad(elementIrType, "%" + elemPtr);
+}
+
+// ---- IndexAssign (array write) ----
+
+std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
+    const std::string& name = indexAssign.name.lexeme;
+    auto varTypeIt = varTypeMap.find(name);
+    auto allocaIt  = allocaMap.find(name);
+    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
+
+    Type        arrayType     = varTypeIt->second;
+    Type        elementType{arrayType.elementKind};
+    std::string elementIrType = irTypeName(elementType);
+    std::string arrayIrType   = irTypeName(arrayType);
+    std::string ptrName       = allocaIt->second;
+
+    // Index (widen to i64)
+    Type        indexType  = exprType(*indexAssign.index);
+    std::string indexValue = genExpr(*indexAssign.index);
+    indexValue = emitCast(indexValue, indexType, Type{TypeKind::I64});
+
+    if (boundsCheck) {
+        ensureAbortDeclared();
+        emitBoundsCheck(indexValue, arrayType.arraySize);
+    }
+
+    std::string elemPtr = freshTemp();
+    emit("%" + elemPtr + " = getelementptr " + arrayIrType + ", ptr " + ptrName
+         + ", i32 0, i64 " + indexValue);
+
+    // Value (cast to element type)
+    Type        valueType = exprType(*indexAssign.value);
+    std::string value     = genExpr(*indexAssign.value);
+    value = emitCast(value, valueType, elementType);
+
+    emitStore(elementIrType, value, "%" + elemPtr);
+    return value;  // assignment expression returns the stored value
+}
+
+// ---- Bounds check helpers ----
+
+void CodeGen::ensureAbortDeclared() {
+    static const std::string abortDecl = "declare void @abort()";
+    for (const auto& declaration : module.declares)
+        if (declaration == abortDecl) return;
+    module.declares.push_back(abortDecl);
+}
+
+void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {
+    std::string sizeStr  = std::to_string(arraySize);
+    std::string okLabel  = freshLabel("bounds.ok");
+    std::string oobLabel = freshLabel("bounds.oob");
+
+    std::string cmp = freshTemp();
+    // icmp ult catches negative indices too: negative i64 values are huge unsigned numbers
+    emit("%" + cmp + " = icmp ult i64 " + indexValue + ", " + sizeStr);
+    emitCondBr("%" + cmp, okLabel, oobLabel);
+
+    switchBlock(oobLabel);
+    emit("call void @abort()");
+    emit("unreachable");
+    currentBasicBlock->terminated = true;
+
+    switchBlock(okLabel);
 }
 
 // ============================================================

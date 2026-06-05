@@ -21,6 +21,8 @@ static const Token& firstToken(const Expr& expr) {
         const Token& operator()(const PostfixExpr& postfix)            const { return firstToken(*postfix.operand); }
         const Token& operator()(const CallExpr& call)                  const { return call.callee; }
         const Token& operator()(const VarDeclExpr& varDecl)            const { return varDecl.typeName; }
+        const Token& operator()(const IndexExpr& indexExpr)         const { return indexExpr.name; }
+        const Token& operator()(const IndexAssignExpr& indexAssign)  const { return indexAssign.name; }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -287,6 +289,8 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const PostfixExpr& postfix)               { return analyzePostfix(postfix); },
         [&](const CallExpr& call)                     { return analyzeCall(call); },
         [&](const VarDeclExpr& varDecl)               { return analyzeVarDecl(varDecl); },
+        [&](const IndexExpr& indexExpr)               { return analyzeIndex(indexExpr); },
+        [&](const IndexAssignExpr& indexAssign)        { return analyzeIndexAssign(indexAssign); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -576,12 +580,21 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
 }
 
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
-    Type declaredType = typeFromToken(varDecl.typeName.type);
+    Type elementType  = typeFromToken(varDecl.typeName.type);
+    Type declaredType = varDecl.arraySize > 0
+        ? makeArrayType(elementType.kind, varDecl.arraySize)
+        : elementType;
 
-    if (declaredType.kind == TypeKind::Void) {
+    if (elementType.kind == TypeKind::Void) {
         error(varDecl.typeName, "variable '" + varDecl.name.lexeme + "' cannot have type 'void'");
         if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
         return Type{TypeKind::Error};
+    }
+
+    // Array initializers are not yet supported
+    if (varDecl.arraySize > 0 && varDecl.initializer) {
+        error(varDecl.typeName, "array initializers are not yet supported");
+        analyzeExpr(*varDecl.initializer);
     }
 
     // Redeclaration in the same scope?
@@ -590,12 +603,12 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         error(varDecl.name, "variable '" + varDecl.name.lexeme + "' already declared in this scope"
               + " (previously declared at line "
               + std::to_string(existing->declarationToken.line) + ")");
-        if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
-        return declaredType;  // return declared type so downstream uses don't compound errors
+        if (varDecl.initializer && varDecl.arraySize == 0) analyzeExpr(*varDecl.initializer);
+        return declaredType;
     }
 
-    // Analyse initializer
-    if (varDecl.initializer) {
+    // Scalar: analyse initializer
+    if (varDecl.arraySize == 0 && varDecl.initializer) {
         Type initializerType = analyzeExpr(*varDecl.initializer);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
     }
@@ -608,6 +621,87 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     });
 
     return declaredType;
+}
+
+Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
+    const Symbol* sym = symbolTable.lookup(indexExpr.name.lexeme);
+    if (!sym) {
+        error(indexExpr.name, "use of undeclared identifier '" + indexExpr.name.lexeme + "'");
+        analyzeExpr(*indexExpr.index);
+        return Type{TypeKind::Error};
+    }
+    if (sym->type.kind != TypeKind::Array) {
+        error(indexExpr.name, "'" + indexExpr.name.lexeme + "' is not an array");
+        analyzeExpr(*indexExpr.index);
+        return Type{TypeKind::Error};
+    }
+
+    // Index must be an integer
+    Type indexType = analyzeExpr(*indexExpr.index);
+    if (!isError(indexType) && !isInteger(indexType.kind))
+        error(indexExpr.name, "array index must be an integer type, got " + typeName(indexType));
+
+    // Compile-time bounds check for constant literal index
+    if (!isError(indexType) && indexExpr.index->node
+        && std::holds_alternative<LiteralExpr>(*indexExpr.index->node)) {
+        const auto& lit = std::get<LiteralExpr>(*indexExpr.index->node);
+        if (lit.token.type == TokenType::NUMBER
+            && lit.token.lexeme.find('.') == std::string::npos) {
+            try {
+                long long indexVal = std::stoll(lit.token.lexeme);
+                if (indexVal < 0 || static_cast<size_t>(indexVal) >= sym->type.arraySize)
+                    error(lit.token, "array index " + lit.token.lexeme
+                          + " is out of bounds for array of size "
+                          + std::to_string(sym->type.arraySize));
+            } catch (...) {}
+        }
+    }
+
+    return Type{sym->type.elementKind};
+}
+
+Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
+    const Symbol* sym = symbolTable.lookup(indexAssign.name.lexeme);
+    if (!sym) {
+        error(indexAssign.name, "use of undeclared identifier '" + indexAssign.name.lexeme + "'");
+        analyzeExpr(*indexAssign.index);
+        analyzeExpr(*indexAssign.value);
+        return Type{TypeKind::Error};
+    }
+    if (sym->type.kind != TypeKind::Array) {
+        error(indexAssign.name, "'" + indexAssign.name.lexeme + "' is not an array");
+        analyzeExpr(*indexAssign.index);
+        analyzeExpr(*indexAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    // Validate index type
+    Type indexType = analyzeExpr(*indexAssign.index);
+    if (!isError(indexType) && !isInteger(indexType.kind))
+        error(indexAssign.name, "array index must be an integer type, got " + typeName(indexType));
+
+    // Compile-time bounds check for constant literal index
+    if (!isError(indexType) && indexAssign.index->node
+        && std::holds_alternative<LiteralExpr>(*indexAssign.index->node)) {
+        const auto& lit = std::get<LiteralExpr>(*indexAssign.index->node);
+        if (lit.token.type == TokenType::NUMBER
+            && lit.token.lexeme.find('.') == std::string::npos) {
+            try {
+                long long indexVal = std::stoll(lit.token.lexeme);
+                if (indexVal < 0 || static_cast<size_t>(indexVal) >= sym->type.arraySize)
+                    error(lit.token, "array index " + lit.token.lexeme
+                          + " is out of bounds for array of size "
+                          + std::to_string(sym->type.arraySize));
+            } catch (...) {}
+        }
+    }
+
+    // Value type must be assignable to element type
+    Type elementType{sym->type.elementKind};
+    Type valueType = analyzeExpr(*indexAssign.value);
+    checkCast(valueType, elementType, indexAssign.name, "array element assignment");
+
+    return elementType;
 }
 
 // ============================================================

@@ -331,7 +331,20 @@ Stmt Parser::parseExprStmt() {
 // ============================================================
 
 Expr Parser::parseExpression() {
-    // Variable declaration: typeName IDENTIFIER ( = expr )?
+    // Array declaration: typeName [ NUMBER ] IDENTIFIER ( = expr )?
+    if (isTypeName() && peekNext().type == TokenType::LEFT_BRACKET) {
+        Token  typeName  = advance();
+        consume(TokenType::LEFT_BRACKET, "expected '[' after type name");
+        Token  sizeToken = consume(TokenType::NUMBER, "expected integer array size");
+        size_t arraySize = std::stoull(sizeToken.lexeme);
+        consume(TokenType::RIGHT_BRACKET, "expected ']' after array size");
+        Token  name      = consume(TokenType::IDENTIFIER, "expected variable name after array type");
+        std::unique_ptr<Expr> initializer = nullptr;
+        if (match({ TokenType::EQUAL })) initializer = box(parseExpression());
+        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize });
+    }
+
+    // Scalar variable declaration: typeName IDENTIFIER ( = expr )?
     if (isTypeName() && peekNext().type == TokenType::IDENTIFIER) {
         Token typeName = advance();
         Token name     = advance();
@@ -363,7 +376,22 @@ Expr Parser::parseAssignment() {
                 return makeExpr(CompoundAssignExpr{ name, operatorToken, box(std::move(value)) });
         }
     }
-    return parseLogicalOr();
+    Expr expression = parseLogicalOr();
+
+    // Indexed assignment: arr[i] = expr (detected after parsing the LHS)
+    if (expression.node && std::holds_alternative<IndexExpr>(*expression.node)
+        && check(TokenType::EQUAL)) {
+        advance();  // consume =
+        auto indexNode = std::move(std::get<IndexExpr>(*expression.node));
+        Expr value = parseAssignment();  // right-associative
+        return makeExpr(IndexAssignExpr{
+            indexNode.name,
+            std::move(indexNode.index),
+            box(std::move(value))
+        });
+    }
+
+    return expression;
 }
 
 Expr Parser::parseLogicalOr() {
@@ -468,9 +496,23 @@ Expr Parser::parseUnary() {
 
 Expr Parser::parsePostfix() {
     Expr expression = parsePrimary();
-    while (match({ TokenType::INCREMENT, TokenType::DECREMENT })) {
-        Token operatorToken = previous();
-        expression = makeExpr(PostfixExpr{ box(std::move(expression)), operatorToken });
+    for (;;) {
+        // Subscript access: identifier[index]
+        if (check(TokenType::LEFT_BRACKET)
+            && expression.node
+            && std::holds_alternative<IdentifierExpr>(*expression.node)) {
+            advance();  // consume [
+            Expr indexExpr = parseExpression();
+            consume(TokenType::RIGHT_BRACKET, "expected ']' after array index");
+            Token arrayName = std::get<IdentifierExpr>(*expression.node).name;
+            return makeExpr(IndexExpr{ arrayName, box(std::move(indexExpr)) });
+        }
+        // Postfix ++ and --
+        if (match({ TokenType::INCREMENT, TokenType::DECREMENT })) {
+            expression = makeExpr(PostfixExpr{ box(std::move(expression)), previous() });
+            continue;
+        }
+        break;
     }
     return expression;
 }

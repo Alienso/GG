@@ -21,15 +21,13 @@ using ExprTypeMap = std::unordered_map<const Expr::Variant*, Type>;
 
 struct ClassInfo {
     struct Field {
-        bool  isPublic;
+        bool  isPublic = false;
         Type  type;
-        int   index;    // field index in the struct (0-based, declaration order)
-        Token decl;     // the field name token, for error reporting
+        int   index    = 0;  // field index in the struct (0-based, declaration order)
+        Token decl;          // the field name token, for error reporting
     };
     struct Method {
-        bool             isPublic;
-        bool             isConstructor;
-        bool             isDestructor;
+        bool             isPublic  = false;
         Type             returnType;
         std::vector<Type> paramTypes;
         Token            decl;     // method name token
@@ -49,9 +47,6 @@ struct SemanticResult {
 class SemanticAnalyzer {
 public:
     SemanticResult analyze(const Program& program);  // resets all state per call
-
-    // Access class registry (used by CodeGen)
-    const std::unordered_map<std::string, ClassInfo>& getClassRegistry() const { return classRegistry_; }
 
 private:
     SymbolTable         symbolTable;
@@ -107,11 +102,21 @@ private:
     const Symbol* lookupSymbol(const Token& nameToken);  // emits error if missing
     void          error(const Token& token, const std::string& message);
     void          warn(const Token& token, const std::string& message);
-    void          recordType(const Expr& expr, Type type);
-    void          checkCast(Type from, Type to, const Token& site,
+    void          recordType(const Expr& expr, const Type& type);
+    void          checkCast(const Type& from, const Type& to, const Token& site,
                             const std::string& context);
     // Resolve a type token — handles IDENTIFIER tokens that name a known class.
     [[nodiscard]] Type resolveTypeToken(const Token& typeToken) const;
+
+    // Resolve an Object type to its ClassInfo; emits error and returns nullptr if not an Object or class not found.
+    [[nodiscard]] const ClassInfo* lookupObjectClass(Type objectType, const Token& site);
+    // Type-check and analyse a call's arguments against declared param types.
+    void analyzeCallArgs(const std::vector<std::unique_ptr<Expr>>& args,
+                         const std::vector<Type>& paramTypes,
+                         const Token& callee,
+                         const std::string& context);
+    // Emit a compile-time out-of-bounds error if `indexExpr` is a constant literal outside [0, arraySize).
+    void checkConstantIndexBounds(const Expr& indexExpr, size_t arraySize);
 };
 
 #endif //GG_SEMANTICANALYZER_H

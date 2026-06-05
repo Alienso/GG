@@ -11,7 +11,7 @@
 
 namespace fs = std::filesystem;
 
-GG::GG(std::vector<std::string>& inputPaths, CompilerOptions opts) : paths(inputPaths), options(opts) {}
+GG::GG(std::vector<std::string>& inputPaths, CompilerOptions options) : paths(inputPaths), options(options) {}
 
 void GG::run() {
     const fs::path buildDir = fs::current_path() / "build";

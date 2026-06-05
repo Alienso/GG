@@ -160,8 +160,7 @@ Stmt Parser::parseDeclaration() {
     }
 
     if (match({ TokenType::CLASS })) {
-        Token keyword = previous();
-        return parseClassDecl(keyword);
+        return parseClassDecl();
     }
 
     // Function decl: typeName IDENTIFIER ( ...
@@ -183,7 +182,7 @@ Stmt Parser::parseDeclaration() {
     return parseStatement();
 }
 
-Stmt Parser::parseExternFuncDecl(Token keyword) {
+Stmt Parser::parseExternFuncDecl(const Token& keyword) {
     if (!isTypeName())
         throw error(peek(), "expected return type after 'extern'");
     Token returnType = advance();
@@ -205,13 +204,13 @@ Stmt Parser::parseExternFuncDecl(Token keyword) {
     return makeStmt(ExternFuncDeclStmt{ keyword, returnType, name, std::move(params) });
 }
 
-Stmt Parser::parseImportStmt(Token keyword) {
+Stmt Parser::parseImportStmt(const Token& keyword) {
     Token path = consume(TokenType::STRING, "expected file path string after 'import'");
     consume(TokenType::SEMICOLON, "expected ';' after import path");
     return makeStmt(ImportStmt{ keyword, path });
 }
 
-Stmt Parser::parseFunctionDecl(Token returnType, Token name) {
+Stmt Parser::parseFunctionDecl(const Token& returnType, const Token& name) {
     consume(TokenType::LEFT_PAREN, "expected '(' after function name");
 
     std::vector<ParamDecl> params;
@@ -233,7 +232,7 @@ Stmt Parser::parseFunctionDecl(Token returnType, Token name) {
     return makeStmt(FunctionDeclStmt{ returnType, name, std::move(params), std::move(body) });
 }
 
-Stmt Parser::parseClassDecl(Token keyword) {
+Stmt Parser::parseClassDecl() {
     Token name = consume(TokenType::IDENTIFIER, "expected class name after 'class'");
     consume(TokenType::LEFT_BRACE, "expected '{' after class name");
 

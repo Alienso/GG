@@ -60,14 +60,14 @@ bool isUnsignedInt(TypeKind k);
 bool isInteger(TypeKind k);
 bool isFloat(TypeKind k);
 bool isNumeric(TypeKind k);
-bool isBoolCompatible(Type t);  // bool or any numeric
-bool isError(Type t);
+bool isBoolCompatible(const Type& t);  // bool or any numeric
+bool isError(const Type& t);
 
 // ---- Type operations ----
 
-CastResult  canImplicitlyCast(Type from, Type to);
-Type        commonArithmeticType(Type a, Type b);
+CastResult  canImplicitlyCast(const Type& from, const Type& to);
+Type        commonArithmeticType(const Type& a, const Type& b);
 Type        typeFromToken(TokenType tt);
-std::string typeName(Type t);
+std::string typeName(const Type& t);
 
 #endif //GG_TYPE_H

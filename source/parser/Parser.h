@@ -52,10 +52,10 @@ private:
 
     // ---- Statement parsers ----
     [[nodiscard]] Stmt      parseDeclaration();
-    [[nodiscard]] Stmt      parseClassDecl(Token keyword);
-    [[nodiscard]] Stmt      parseFunctionDecl(Token returnType, Token name);
-    [[nodiscard]] Stmt      parseExternFuncDecl(Token keyword);
-    [[nodiscard]] Stmt      parseImportStmt(Token keyword);
+    [[nodiscard]] Stmt      parseClassDecl();
+    [[nodiscard]] Stmt      parseFunctionDecl(const Token& returnType, const Token& name);
+    [[nodiscard]] Stmt      parseExternFuncDecl(const Token& keyword);
+    [[nodiscard]] Stmt      parseImportStmt(const Token& keyword);
     [[nodiscard]] Stmt      parseStatement();
     [[nodiscard]] BlockStmt parseBlockBody();
     [[nodiscard]] Stmt      parseBlock();

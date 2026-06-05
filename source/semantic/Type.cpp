@@ -27,11 +27,11 @@ bool isFloat(TypeKind k) {
 
 bool isNumeric(TypeKind k) { return isInteger(k) || isFloat(k); }
 
-bool isBoolCompatible(Type t) {
+bool isBoolCompatible(const Type& t) {
     return t.kind == TypeKind::Bool || isNumeric(t.kind);
 }
 
-bool isError(Type t) { return t.kind == TypeKind::Error; }
+bool isError(const Type& t) { return t.kind == TypeKind::Error; }
 
 // ============================================================
 // Internal helper: bit-width of an integer or float kind
@@ -54,7 +54,7 @@ static int bitWidth(TypeKind k) {
 // canImplicitlyCast
 // ============================================================
 
-CastResult canImplicitlyCast(Type from, Type to) {
+CastResult canImplicitlyCast(const Type& from, const Type& to) {
     if (from == to)                          return CastResult::Silent;  // identity
     if (isError(from) || isError(to))        return CastResult::None;
 
@@ -105,7 +105,7 @@ CastResult canImplicitlyCast(Type from, Type to) {
 // commonArithmeticType
 // ============================================================
 
-Type commonArithmeticType(Type a, Type b) {
+Type commonArithmeticType(const Type& a, const Type& b) {
     if (isError(a) || isError(b)) return Type{TypeKind::Error};
 
     // Bool == Bool stays as Bool (i1 comparison in IR)
@@ -163,7 +163,7 @@ Type typeFromToken(TokenType tt) {
 // typeName
 // ============================================================
 
-std::string typeName(Type t) {
+std::string typeName(const Type& t) {
     switch (t.kind) {
         case TypeKind::I8:     return "i8";
         case TypeKind::I16:    return "i16";

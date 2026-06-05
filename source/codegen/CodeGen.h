@@ -32,7 +32,6 @@ private:
     // destructor enters scope, popped and flushed (in reverse order) at scope exit.
     using DtorEntry = std::pair<std::string, std::string>;
     std::vector<std::vector<DtorEntry>> dtorScopes_;
-    const std::unordered_map<std::string, ClassInfo>* classRegistry_ = nullptr;
 
     // ---- Module-level state ----
     IRModule           module;
@@ -86,25 +85,47 @@ private:
 
     // ---- Expression codegen — return SSA value string ("%t3", "42", …) ----
     std::string genExpr(const Expr& expr);
-    std::string genLiteral(const LiteralExpr& literal, Type resolvedType);
+    std::string genLiteral(const LiteralExpr& literal, const Type& resolvedType);
     std::string genIdentifier(const IdentifierExpr& identifier);
-    std::string genUnary(const UnaryExpr& unary, Type resolvedType);
-    std::string genBinary(const BinaryExpr& binary, Type resolvedType);
+    std::string genUnary(const UnaryExpr& unary, const Type& resolvedType);
+    std::string genBinary(const BinaryExpr& binary, const Type& resolvedType);
     std::string genAssign(const AssignExpr& assign);
     std::string genCompoundAssign(const CompoundAssignExpr& compoundAssign);
     std::string genPostfix(const PostfixExpr& postfix);
-    std::string genCall(const CallExpr& call, Type resolvedType);
+    std::string genCall(const CallExpr& call, const Type& resolvedType);
     std::string genVarDecl(const VarDeclExpr& varDecl);
     std::string genIndex(const IndexExpr& indexExpr);
     std::string genIndexAssign(const IndexAssignExpr& indexAssign);
     std::string genThis(const ThisExpr& thisExpr);
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
-    std::string genMethodCall(const MethodCallExpr& methodCall, Type resolvedType);
+    std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
 
     // ---- Destructor helpers ----
     // Emit destructor calls for all entries in one scope (in reverse declaration order).
     void emitDtorsForScope(const std::vector<DtorEntry>& scope);
+
+    // ---- Shared codegen helpers ----
+    // Returns a unique alloca pointer name for `varName` (e.g. "%x.addr" or "%x.addr.1")
+    // and registers it in usedAllocaNames.
+    std::string freshAllocaName(const std::string& varName);
+
+    // Spill a parameter list into alloca slots; populates allocaMap / varTypeMap.
+    void spillParamsToAllocas(const std::vector<ParamDecl>& params);
+
+    // Emit the body of a function (open dtor scope, gen stmts, ensure termination, close scope).
+    void emitFunctionBody(const BlockStmt& body, const std::string& returnIrType);
+
+    // Build a comma-separated LLVM argument string for a call, casting each arg to
+    // the declared param type when provided.
+    std::string buildArgString(const std::vector<std::unique_ptr<Expr>>& args,
+                               const std::vector<Type>* declaredParamTypes);
+
+    // Emit a GEP for field `fieldName` on `objPtr` of class `className`.
+    // Returns {gepRegister, fieldType}; returns {"0", Error} on lookup failure.
+    std::pair<std::string, Type> resolveFieldGEP(const std::string& objPtr,
+                                                  const std::string& className,
+                                                  const std::string& fieldName);
 
     // ---- Bounds check helpers ----
     void ensureAbortDeclared();
@@ -135,16 +156,16 @@ private:
     Type        exprType(const Expr& expression) const;
 
     // Insert a cast instruction if from != to; return (possibly unchanged) value reg.
-    std::string emitCast(const std::string& value, Type from, Type to);
+    std::string emitCast(const std::string& value, const Type& from, const Type& to);
 
     // Ensure result is i1 (suitable for conditional branches).
-    std::string emitToBool(const std::string& value, Type valueType);
+    std::string emitToBool(const std::string& value, const Type& valueType);
 
     // Arithmetic instruction name (add/fadd/sub/…) for a binary op on type t.
-    static std::string arithInstr(TokenType operatorType, Type type);
+    static std::string arithInstr(TokenType operatorType, const Type& type);
 
     // Comparison instruction fragment (icmp slt / fcmp olt / …).
-    static std::string cmpInstr(TokenType operatorType, Type type);
+    static std::string cmpInstr(TokenType operatorType, const Type& type);
 
     // Compound-assign base op (PLUS_EQUAL → PLUS, etc.).
     static TokenType compoundBaseOp(TokenType operatorType);

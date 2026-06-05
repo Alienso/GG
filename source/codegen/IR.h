@@ -13,7 +13,7 @@
 // Type → LLVM IR type string
 // ============================================================
 
-inline std::string irTypeName(Type t) {
+inline std::string irTypeName(const Type& t) {
     switch (t.kind) {
         case TypeKind::I8:     return "i8";
         case TypeKind::I16:    return "i16";

@@ -29,10 +29,10 @@ public:
     bool          declare(const std::string& name, Symbol symbol);
 
     // Walks all scopes from innermost to outermost.
-    const Symbol* lookup(const std::string& name) const;
+    [[nodiscard]] const Symbol* lookup(const std::string& name) const;
 
     // Looks only in the current (innermost) scope.
-    const Symbol* lookupCurrentScope(const std::string& name) const;
+    [[nodiscard]] const Symbol* lookupCurrentScope(const std::string& name) const;
 
 private:
     std::vector<std::unordered_map<std::string, Symbol>> scopes;

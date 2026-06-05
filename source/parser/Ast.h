@@ -198,15 +198,15 @@ struct ImportStmt {
 };
 
 struct FieldDecl {
-    bool  isPublic;
+    bool  isPublic  = false;
     Token typeName;   // type keyword token
     Token name;
 };
 
 struct MethodDecl {
-    bool                   isPublic;
-    bool                   isConstructor;  // true when name == class name
-    bool                   isDestructor;   // true for ~ClassName() — no params, no return type
+    bool                   isPublic      = false;
+    bool                   isConstructor = false;  // true when name == class name
+    bool                   isDestructor  = false;   // true for ~ClassName() — no params, no return type
     Token                  returnType;     // for constructors/destructors: class-name token
     Token                  name;
     std::vector<ParamDecl> params;

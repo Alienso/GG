@@ -204,7 +204,6 @@ void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDec
 void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     // Registry was built in collectClasses. Here we fully analyse each method body.
     const std::string& className = classDecl.name.lexeme;
-    const ClassInfo&   classInfo = classRegistry_.at(className);
 
     std::string savedClassName = currentClassName_;
     currentClassName_          = className;

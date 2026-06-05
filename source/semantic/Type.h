@@ -33,12 +33,22 @@ struct Type {
     size_t      arraySize   = 0;               // only valid when kind == Array
     std::string className;                     // only valid when kind == Object
 
+    // Default-constructs to TypeKind::Error (used as a sentinel throughout).
+    Type() = default;
+
+    // Single-kind constructor — avoids aggregate-init warnings when className
+    // is not needed (the common case).
+    explicit Type(TypeKind k) noexcept : kind(k) {}
+
     bool operator==(const Type&) const = default;
 };
 
 // Convenience constructor for array types.
 inline Type makeArrayType(TypeKind elementKind, size_t size) {
-    return Type{TypeKind::Array, false, false, elementKind, size};
+    Type t{TypeKind::Array};
+    t.elementKind = elementKind;
+    t.arraySize   = size;
+    return t;
 }
 
 // Convenience constructor for class instance types.

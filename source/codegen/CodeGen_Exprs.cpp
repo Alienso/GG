@@ -30,7 +30,7 @@ std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& ar
 
         // Cast to the declared parameter type when the IR types differ.
         if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
-            Type paramType = (*declaredParamTypes)[paramIndex];
+            const Type& paramType = (*declaredParamTypes)[paramIndex];
             value   = emitCast(value, argType, paramType);
             argType = paramType;
         }
@@ -444,7 +444,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         {
             auto cgIt = cgClasses_.find(className);
             if (cgIt != cgClasses_.end() && cgIt->second.hasDestructor && !dtorScopes_.empty())
-                dtorScopes_.back().push_back({ptrName, className});
+                dtorScopes_.back().emplace_back(ptrName, className);
         }
 
         // If initializer is a constructor CallExpr, emit the constructor call

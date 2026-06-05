@@ -4,6 +4,7 @@
 
 #include "ImportResolver.h"
 #include "lexer/Lexer.h"
+#include "lexer/Token.h"
 #include "parser/Parser.h"
 
 #include <filesystem>
@@ -18,6 +19,50 @@ namespace fs = std::filesystem;
 Program ImportResolver::resolve(const std::string& rootFilePath) {
     processedPaths.clear();
     return processFile(rootFilePath);
+}
+
+// ============================================================
+// Class-name pre-scanner
+// ============================================================
+
+std::unordered_set<std::string> ImportResolver::collectClassNames(
+    const std::string& filePath,
+    std::unordered_set<std::string>& visitedPaths)
+{
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
+    if (ec || !fs::exists(canonical)) return {};
+
+    std::string canonicalStr = canonical.string();
+    if (visitedPaths.count(canonicalStr)) return {};
+    visitedPaths.insert(canonicalStr);
+
+    std::vector<std::string> paths{ canonicalStr };
+    Lexer lexer(paths);
+    lexer.lex();
+    const auto& tokens = lexer.tokens()[0];
+
+    std::unordered_set<std::string> names;
+    fs::path parentDir = canonical.parent_path();
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        // Collect class names defined in this file
+        if (i + 1 < tokens.size()
+            && tokens[i].type    == TokenType::CLASS
+            && tokens[i + 1].type == TokenType::IDENTIFIER) {
+            names.insert(tokens[i + 1].lexeme);
+        }
+        // Follow import statements to collect from transitive dependencies
+        if (tokens[i].type == TokenType::IMPORT
+            && i + 1 < tokens.size()
+            && tokens[i + 1].type == TokenType::STRING) {
+            std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
+            std::string absPath = (parentDir / rawPath).string();
+            auto imported = collectClassNames(absPath, visitedPaths);
+            names.insert(imported.begin(), imported.end());
+        }
+    }
+    return names;
 }
 
 // ============================================================
@@ -38,11 +83,17 @@ Program ImportResolver::processFile(const std::string& filePath) {
     if (processedPaths.count(canonicalString)) return Program{};
     processedPaths.insert(canonicalString);  // mark before recursing — breaks cycles
 
-    // Lex and parse the file.
+    // Collect class names from this file and all its transitive imports so that
+    // cross-file constructor calls ("ClassName varName(args)") are recognised as
+    // variable declarations during parsing.
+    std::unordered_set<std::string> classNameVisited;
+    auto allClassNames = collectClassNames(canonicalString, classNameVisited);
+
+    // Lex and parse the file, seeding the parser with the pre-collected class names.
     std::vector<std::string> paths = { canonicalString };
     Lexer lexer(paths);
     lexer.lex();
-    Parser parser;
+    Parser parser(std::move(allClassNames));
     Program rawProgram = parser.parse(lexer.tokens()[0]);
 
     fs::path parentDirectory = canonical.parent_path();

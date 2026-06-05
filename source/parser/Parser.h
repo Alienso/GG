@@ -20,7 +20,11 @@ public:
 
 class Parser {
 public:
-    Parser();
+    Parser() = default;
+    // Pre-register class names from imported files so that cross-file constructor
+    // calls (e.g. "String s(...)") are recognised as VarDecl, not misidentified
+    // as a function declaration or expression.
+    explicit Parser(std::unordered_set<std::string> initialClassNames);
     [[nodiscard]] Program parse(const std::vector<Token>& inputTokens);
 
 private:

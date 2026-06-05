@@ -48,16 +48,37 @@ $llFile = "$Build\$stem.ll"
 $exeOut = "$Build\$stem.exe"
 
 # ---- Helper: run a native command, capture stdout+stderr separately --------
-# Returns a hashtable: @{ ExitCode = int; Output = string[] }
+# Uses System.Diagnostics.Process to avoid PowerShell 5.1's behaviour of
+# wrapping every stderr line from a native exe into an ErrorRecord, which
+# prints spurious "NativeCommandError" entries even for harmless warnings.
+# Returns a hashtable: @{ ExitCode = int; Stdout = string[]; Stderr = string[] }
 
 function Invoke-Native {
     param([string]$Exe, [string[]]$Arguments)
-    $tmpErr = [System.IO.Path]::GetTempFileName()
-    $out = & $Exe @Arguments 2>$tmpErr
-    $code = $LASTEXITCODE
-    $err = Get-Content $tmpErr -ErrorAction SilentlyContinue
-    Remove-Item $tmpErr -Force -ErrorAction SilentlyContinue
-    return @{ ExitCode = $code; Stdout = @($out); Stderr = @($err) }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
+    # Build argument string, quoting each argument that contains spaces.
+    $psi.Arguments              = ($Arguments | ForEach-Object {
+        if ($_ -match '\s') { "`"$_`"" } else { $_ }
+    }) -join ' '
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute        = $false
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $proc.Start() | Out-Null
+
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    $splitLines = { param($s) if ($s) { $s -split "`r?`n" | Where-Object { $_ -ne '' } } else { @() } }
+    return @{
+        ExitCode = $proc.ExitCode
+        Stdout   = (& $splitLines $stdout)
+        Stderr   = (& $splitLines $stderr)
+    }
 }
 
 # ---- Step 1: GG → LLVM IR -------------------------------------------------

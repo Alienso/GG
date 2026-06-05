@@ -1,0 +1,11 @@
+// stdlib/mem.gg — memory management bindings
+//
+// Wraps the C heap allocation functions.
+// Import this module to allocate and release dynamic memory.
+
+extern ptr  malloc(u64 size);                    // allocate `size` bytes; returns null on failure
+extern ptr  realloc(ptr pointer, u64 size);      // resize an existing allocation
+extern void free(ptr pointer);                   // release a heap allocation
+extern ptr  memcpy(ptr dest, ptr src, u64 n);    // copy `n` bytes from src to dest (no overlap)
+extern ptr  memset(ptr dest, i32 value, u64 n);  // fill `n` bytes of dest with `value`
+extern ptr  memmove(ptr dest, ptr src, u64 n);   // copy `n` bytes; handles overlapping regions

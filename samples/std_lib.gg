@@ -1,0 +1,10 @@
+import "../stdlib/string_class.gg";
+import "../stdlib/io.gg";
+
+i32 main(){
+
+    String s("Hello World!");
+    puts(s.data);
+
+    return 0;
+}

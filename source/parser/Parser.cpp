@@ -5,14 +5,14 @@
 #include "Parser.h"
 #include <iostream>
 
-Parser::Parser() {}
+Parser::Parser(std::unordered_set<std::string> initialClassNames)
+    : classNames_(std::move(initialClassNames)) {}
 
 Program Parser::parse(const std::vector<Token>& inputTokens) {
     tokens  = std::vector<Token>(inputTokens);
     current = 0;
-    classNames_.clear();
-
-    // Pre-pass: scan for "class IDENTIFIER" to register class names before parsing.
+    // Do NOT clear classNames_ here — pre-registered names from imports must survive.
+    // Pre-pass: also register class names defined in THIS file's token stream.
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
         if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER)
             classNames_.insert(tokens[i + 1].lexeme);

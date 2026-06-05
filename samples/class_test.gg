@@ -1,0 +1,342 @@
+// class_test.gg
+// Comprehensive test of class features in GG.
+//
+// Five classes exercise: constructors, zero-init, public/private fields,
+// getters/setters, computed methods, method-calls-method, bool fields,
+// mixed field types, and objects in loops.
+//
+// Returns 0 on success, or the number of the first failing test.
+// Expected exit code: 0
+
+// ============================================================
+// Point — two f32 fields, constructor, getters, setters,
+//         computed method, method that calls another method
+// ============================================================
+
+class Point {
+    public f32 x;
+    public f32 y;
+
+    public Point(f32 x, f32 y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public f32 getX() { return this.x; }
+    public f32 getY() { return this.y; }
+
+    public void setX(f32 v) { this.x = v; }
+    public void setY(f32 v) { this.y = v; }
+
+    // x² + y²
+    public f32 squaredLen() {
+        return this.x * this.x + this.y * this.y;
+    }
+
+    // Calls squaredLen() on this — tests method-to-method dispatch
+    public f32 twiceSquaredLen() {
+        f32 len = this.squaredLen();
+        return len + len;
+    }
+}
+
+// ============================================================
+// Counter — i32 field, arithmetic mutations, boolean query,
+//           method that calls another method on this
+// ============================================================
+
+class Counter {
+    public i32 count;
+
+    public Counter(i32 n) {
+        this.count = n;
+    }
+
+    public void increment() {
+        this.count = this.count + 1;
+    }
+
+    public void decrement() {
+        this.count = this.count - 1;
+    }
+
+    public void addN(i32 n) {
+        this.count = this.count + n;
+    }
+
+    public i32 get() {
+        return this.count;
+    }
+
+    public bool isPositive() {
+        return this.count > 0;
+    }
+
+    // Delegates to get() — tests method-to-method dispatch on this
+    public i32 doubled() {
+        return this.get() * 2;
+    }
+}
+
+// ============================================================
+// Box — private field accessed only through public methods
+// ============================================================
+
+class Box {
+    private i32 value;
+
+    public Box(i32 v) {
+        this.value = v;
+    }
+
+    public i32 get() {
+        return this.value;
+    }
+
+    public void set(i32 v) {
+        this.value = v;
+    }
+
+    public void doubleIt() {
+        this.value = this.value * 2;
+    }
+}
+
+// ============================================================
+// Flag — bool field with toggle method
+// ============================================================
+
+class Flag {
+    public bool active;
+
+    public Flag(bool b) {
+        this.active = b;
+    }
+
+    public bool isActive() {
+        return this.active;
+    }
+
+    public void toggle() {
+        this.active = !this.active;
+    }
+}
+
+// ============================================================
+// Accumulator — mixed i32 + f64 fields; tests struct layout
+//               with two different field types
+// ============================================================
+
+class Accumulator {
+    public i32 steps;
+    public f64 total;
+
+    public Accumulator(i32 s, f64 t) {
+        this.steps = s;
+        this.total = t;
+    }
+
+    public void add(f64 v) {
+        this.steps = this.steps + 1;
+        this.total = this.total + v;
+    }
+
+    public f64 average() {
+        return this.total / this.steps;
+    }
+}
+
+// ============================================================
+// main
+// ============================================================
+
+i32 main() {
+
+    // ==== Point ===============================================================
+
+    // 1-2: Zero-init (declared without constructor call) — fields default to 0
+    Point zero;
+    if (zero.x != 0.0) { return 1; }
+    if (zero.y != 0.0) { return 2; }
+
+    // 3-4: Constructor sets both fields
+    Point p(3.0, 4.0);
+    if (p.x != 3.0)    { return 3; }
+    if (p.y != 4.0)    { return 4; }
+
+    // 5-6: Getter methods return correct values
+    if (p.getX() != 3.0) { return 5; }
+    if (p.getY() != 4.0) { return 6; }
+
+    // 7: Setter method changes one field
+    p.setX(10.0);
+    if (p.x != 10.0)   { return 7; }
+
+    // 8: Direct field write via dot notation
+    p.x = 3.0;
+    if (p.x != 3.0)    { return 8; }
+
+    // 9: Computed method — squaredLen = 3²+4² = 25
+    if (p.squaredLen() != 25.0) { return 9; }
+
+    // 10: Method that calls another method on this — twiceSquaredLen = 50
+    if (p.twiceSquaredLen() != 50.0) { return 10; }
+
+    // 11-12: Two independent instances have separate state
+    Point a(1.0, 2.0);
+    Point b(5.0, 6.0);
+    if (a.x != 1.0)    { return 11; }
+    if (b.x != 5.0)    { return 12; }
+
+    // 13-14: Mutating one instance does not affect the other
+    a.setX(99.0);
+    if (a.x != 99.0)   { return 13; }
+    if (b.x != 5.0)    { return 14; }  // b unaffected
+
+    // 15-16: setY is independent of x
+    p.setY(0.0);
+    if (p.y != 0.0)    { return 15; }
+    if (p.x != 3.0)    { return 16; }  // x unchanged
+
+    // 17-18: Direct field arithmetic without going through a method
+    Point arith(3.0, 4.0);
+    f32 manualLen = arith.x * arith.x + arith.y * arith.y;
+    if (manualLen != 25.0)   { return 17; }
+
+    // 18: Read-modify-write a field directly (p.x = p.x + 1)
+    arith.x = arith.x + 1;  // 3 + 1 = 4
+    if (arith.x != 4.0)      { return 18; }
+
+    // ==== Counter =============================================================
+
+    // 19: Constructor with initial value
+    Counter c(0);
+    if (c.get() != 0)  { return 19; }
+
+    // 20-21: increment
+    c.increment();
+    if (c.get() != 1)  { return 20; }
+    c.increment();
+    c.increment();
+    if (c.get() != 3)  { return 21; }
+
+    // 22: decrement
+    c.decrement();
+    if (c.get() != 2)  { return 22; }
+
+    // 23: addN
+    c.addN(8);
+    if (c.get() != 10) { return 23; }
+
+    // 24-25: isPositive boolean query
+    if (!c.isPositive())       { return 24; }
+    Counter neg(-3);
+    if (neg.isPositive())      { return 25; }
+
+    // 26: Zero-init (no explicit constructor call) — count defaults to 0
+    Counter blank;
+    if (blank.count != 0)      { return 26; }
+
+    // 27: doubled() delegates to this.get()
+    Counter d(7);
+    if (d.doubled() != 14)     { return 27; }
+
+    // 28: Counter in a for loop — sum 1+2+3+4+5 = 15
+    Counter sumC(0);
+    for (i32 i = 1; i <= 5; i++) {
+        sumC.addN(i);
+    }
+    if (sumC.get() != 15)      { return 28; }
+
+    // 29: Counter as a while-loop condition — count down to zero
+    Counter wc(5);
+    while (wc.get() > 0) {
+        wc.decrement();
+    }
+    if (wc.get() != 0)         { return 29; }
+
+    // 30: Fresh objects created inside a loop accumulate correctly
+    //     Loop squares:  1² + 2² + 3² + 4² = 1+4+9+16 = 30
+    Counter loopSum(0);
+    for (i32 i = 1; i <= 4; i++) {
+        Counter temp(i * i);
+        loopSum.addN(temp.get());
+    }
+    if (loopSum.get() != 30)   { return 30; }
+
+    // ==== Box =================================================================
+
+    // 31: Private field accessible through public getter
+    Box box(42);
+    if (box.get() != 42)       { return 31; }
+
+    // 32: set() replaces private field value
+    box.set(100);
+    if (box.get() != 100)      { return 32; }
+
+    // 33: doubleIt() mutates private field
+    box.doubleIt();
+    if (box.get() != 200)      { return 33; }
+
+    // 34: Chain of mutations — set then double twice
+    box.set(5);
+    box.doubleIt();   // 10
+    box.doubleIt();   // 20
+    if (box.get() != 20)       { return 34; }
+
+    // 35: Two independent Box instances
+    Box box1(3);
+    Box box2(7);
+    box1.doubleIt();
+    if (box1.get() != 6)       { return 35; }
+    if (box2.get() != 7)       { return 36; }  // box2 unaffected
+
+    // ==== Flag ================================================================
+
+    // 37: Constructor with true sets active field
+    Flag flag(true);
+    if (!flag.isActive())      { return 37; }
+
+    // 38: Direct read of bool field
+    if (!flag.active)          { return 38; }
+
+    // 39: toggle() flips true → false
+    flag.toggle();
+    if (flag.isActive())       { return 39; }
+
+    // 40: toggle() flips false → true
+    flag.toggle();
+    if (!flag.isActive())      { return 40; }
+
+    // 41: Constructor with false
+    Flag flag2(false);
+    if (flag2.active)          { return 41; }
+
+    // 42: toggle a false flag → true
+    flag2.toggle();
+    if (!flag2.active)         { return 42; }
+
+    // ==== Accumulator (mixed i32 + f64 fields) ================================
+
+    // 43: Constructor sets both fields
+    Accumulator acc(0, 0.0);
+    if (acc.steps != 0)        { return 43; }
+
+    // 44-45: add() increments steps and accumulates total
+    acc.add(10.0);
+    acc.add(20.0);
+    acc.add(30.0);
+    if (acc.steps != 3)        { return 44; }
+    if (acc.total != 60.0)     { return 45; }
+
+    // 46: average() = total / steps = 60 / 3 = 20
+    if (acc.average() != 20.0) { return 46; }
+
+    // 47: i32 field and f64 field updated independently in add()
+    Accumulator acc2(1, 100.0);
+    acc2.add(50.0);
+    if (acc2.steps != 2)       { return 47; }
+    if (acc2.total != 150.0)   { return 48; }
+
+    return 0;  // all 48 tests passed
+}

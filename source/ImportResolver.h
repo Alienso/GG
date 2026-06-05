@@ -27,6 +27,13 @@ private:
 
     Program processFile(const std::string& filePath);
 
+    // Collects all class names (transitively) reachable from filePath by lexing
+    // each file and scanning for "class IDENTIFIER" tokens.  visitedPaths prevents
+    // cycles and duplicate work.
+    static std::unordered_set<std::string> collectClassNames(
+        const std::string& filePath,
+        std::unordered_set<std::string>& visitedPaths);
+
     // Strips the surrounding double-quote characters from a STRING token lexeme.
     static std::string stripQuotes(const std::string& lexeme);
 };

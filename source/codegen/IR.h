@@ -27,7 +27,6 @@ inline std::string irTypeName(Type t) {
         case TypeKind::F64:    return "double";
         case TypeKind::Bool:   return "i1";
         case TypeKind::Char:   return "i32";
-        case TypeKind::String: return "ptr";
         case TypeKind::Ptr:    return "ptr";
         case TypeKind::Array:  return "[" + std::to_string(t.arraySize) + " x " + irTypeName(Type{t.elementKind}) + "]";
         case TypeKind::Void:   return "void";

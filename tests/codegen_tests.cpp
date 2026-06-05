@@ -705,7 +705,7 @@ TEST_CASE("CodeGen - nested loops produce unique label names", "[codegen]") {
 
 TEST_CASE("CodeGen - string literal emits private global constant", "[codegen]") {
     auto ir = codegenString(R"(
-        string foo() { string s = "hello"; return s; }
+        ptr foo() { ptr s = "hello"; return s; }
     )");
     REQUIRE(irContains(ir, "@.str.0"));
     REQUIRE(irContains(ir, "private unnamed_addr constant"));
@@ -715,14 +715,14 @@ TEST_CASE("CodeGen - string literal emits private global constant", "[codegen]")
 TEST_CASE("CodeGen - string global size includes null terminator", "[codegen]") {
     // "hi" = 2 chars + 1 null byte = [3 x i8]
     auto ir = codegenString(R"(
-        string foo() { string s = "hi"; return s; }
+        ptr foo() { ptr s = "hi"; return s; }
     )");
     REQUIRE(irContains(ir, "[3 x i8]"));
 }
 
 TEST_CASE("CodeGen - two string literals get distinct global names", "[codegen]") {
     auto ir = codegenString(R"(
-        void foo() { string a = "hello"; string b = "world"; }
+        void foo() { ptr a = "hello"; ptr b = "world"; }
     )");
     REQUIRE(irContains(ir, "@.str.0"));
     REQUIRE(irContains(ir, "@.str.1"));
@@ -918,8 +918,8 @@ TEST_CASE("CodeGen - ptr parameter in extern uses ptr IR type", "[codegen]") {
     REQUIRE(irContains(ir, "declare void @free(ptr)"));
 }
 
-TEST_CASE("CodeGen - string passes to extern ptr param without cast", "[codegen]") {
-    // string and ptr are the same IR type; no bitcast should appear
+TEST_CASE("CodeGen - string literal passes to ptr param without cast", "[codegen]") {
+    // String literals are typed as ptr; no bitcast should appear when passed to a ptr param.
     auto ir = codegenString(R"(
         extern i32 puts(ptr s);
         void main() { puts("hello"); }

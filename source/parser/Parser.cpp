@@ -98,7 +98,6 @@ void Parser::synchronize() {
             case TokenType::F64:
             case TokenType::BOOL:
             case TokenType::CHAR_TYPE:
-            case TokenType::STRING_TYPE:
             case TokenType::VOID:
             case TokenType::PTR:
                 return;
@@ -127,7 +126,6 @@ bool Parser::isTypeName() const {
         case TokenType::F64:
         case TokenType::BOOL:
         case TokenType::CHAR_TYPE:
-        case TokenType::STRING_TYPE:
         case TokenType::VOID:
         case TokenType::PTR:
             return true;

@@ -307,7 +307,7 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
                 return Type{TypeKind::F64};
             return Type{TypeKind::I32};
         case TokenType::STRING:
-            return Type{TypeKind::String};
+            return Type{TypeKind::Ptr};
         case TokenType::CHAR:
             return Type{TypeKind::Char};
         default:

@@ -45,7 +45,7 @@ enum class TokenType {
     F32, F64,
 
     // Type keywords — other.
-    BOOL, CHAR_TYPE, STRING_TYPE, VOID, PTR,
+    BOOL, CHAR_TYPE, VOID, PTR,
 
     END_OF_FILE
 };

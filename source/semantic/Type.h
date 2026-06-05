@@ -15,7 +15,7 @@ enum class TypeKind {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
     F32, F64,
-    Bool, Char, String,
+    Bool, Char,
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
     Array,  // fixed-size stack array: element type + count stored in Type struct
     Void,   // for functions that return nothing

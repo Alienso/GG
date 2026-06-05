@@ -84,10 +84,11 @@ TEST_CASE("Lexer - float type keywords", "[lexer]") {
 }
 
 TEST_CASE("Lexer - other type keywords", "[lexer]") {
-    auto tokens = lexString("bool char string");
+    auto tokens = lexString("bool char ptr void");
     REQUIRE(tokens[0].type == TokenType::BOOL);
     REQUIRE(tokens[1].type == TokenType::CHAR_TYPE);
-    REQUIRE(tokens[2].type == TokenType::STRING_TYPE);
+    REQUIRE(tokens[2].type == TokenType::PTR);
+    REQUIRE(tokens[3].type == TokenType::VOID);
 }
 
 // ============================================================

@@ -452,7 +452,8 @@ TEST_CASE("Semantic - ptr variable is valid", "[semantic]") {
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Semantic - string can be passed where ptr is expected", "[semantic]") {
+TEST_CASE("Semantic - string literal has ptr type and passes ptr parameter", "[semantic]") {
+    // String literals are typed as ptr (pointer to null-terminated char data).
     auto result = analyzeString(R"(
         extern i32 puts(ptr s);
         void main() { puts("hello"); }
@@ -460,12 +461,10 @@ TEST_CASE("Semantic - string can be passed where ptr is expected", "[semantic]")
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Semantic - ptr can be passed where string is expected", "[semantic]") {
-    auto result = analyzeString(R"(
-        extern ptr getStr();
-        void useStr(string s) { }
-        void main() { useStr(getStr()); }
-    )");
+TEST_CASE("Semantic - string is no longer a reserved keyword", "[semantic]") {
+    // 'string' was formerly a type keyword; it is now a plain identifier.
+    // It can therefore be used as a function name without error.
+    auto result = analyzeString("i32 string() { return 42; }");
     REQUIRE_FALSE(result.hadError);
 }
 

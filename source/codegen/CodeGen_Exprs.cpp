@@ -63,6 +63,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess); },
         [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
         [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
+        [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
     }, *expr.node);
 }
 
@@ -555,4 +556,54 @@ std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
 
     emitStore(elementIrType, value, "%" + elemPtr);
     return value;  // assignment expression returns the stored value
+}
+
+// ---- Cast ----
+
+std::string CodeGen::genCast(const CastExpr& castExpr, const Type& toType) {
+    Type fromType = exprType(*castExpr.operand);
+
+    if (isError(fromType) || isError(toType)) {
+        genExpr(*castExpr.operand);
+        return "0";
+    }
+
+    // Array → ptr: GEP to first element.
+    // Must be handled before genExpr to avoid emitting a spurious array load.
+    if (fromType.kind == TypeKind::Array && toType.kind == TypeKind::Ptr) {
+        if (std::holds_alternative<IdentifierExpr>(*castExpr.operand->node)) {
+            const auto& id = std::get<IdentifierExpr>(*castExpr.operand->node);
+            auto it = allocaMap.find(id.name.lexeme);
+            if (it != allocaMap.end()) {
+                std::string elemPtr = freshTemp();
+                emit("%" + elemPtr + " = getelementptr " + irTypeName(fromType)
+                     + ", ptr " + it->second + ", i32 0, i32 0");
+                return "%" + elemPtr;
+            }
+        }
+        return "0";
+    }
+
+    std::string value = genExpr(*castExpr.operand);
+
+    // Object → ptr: genIdentifier already returns the alloca pointer for Object types.
+    if (fromType.kind == TypeKind::Object && toType.kind == TypeKind::Ptr)
+        return value;
+
+    // ptr → integer: ptrtoint
+    if (fromType.kind == TypeKind::Ptr && isInteger(toType.kind)) {
+        std::string tempName = freshTemp();
+        emit("%" + tempName + " = ptrtoint ptr " + value + " to " + irTypeName(toType));
+        return "%" + tempName;
+    }
+
+    // integer → ptr: inttoptr
+    if (isInteger(fromType.kind) && toType.kind == TypeKind::Ptr) {
+        std::string tempName = freshTemp();
+        emit("%" + tempName + " = inttoptr " + irTypeName(fromType) + " " + value + " to ptr");
+        return "%" + tempName;
+    }
+
+    // Numeric / bool / char conversions — emitCast covers all remaining cases.
+    return emitCast(value, fromType, toType);
 }

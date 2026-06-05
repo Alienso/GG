@@ -21,6 +21,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const MemberAccessExpr& ma)               { return analyzeMemberAccess(ma); },
         [&](const MemberAssignExpr& ma)               { return analyzeMemberAssign(ma); },
         [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
+        [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -542,4 +543,53 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     analyzeCallArgs(methodCall.args, method.paramTypes, methodCall.method,
                     "method '" + methodCall.method.lexeme + "'");
     return method.returnType;
+}
+
+// ============================================================
+// Cast expression analysis
+// ============================================================
+
+Type SemanticAnalyzer::analyzeCast(const CastExpr& castExpr) {
+    Type fromType = analyzeExpr(*castExpr.operand);
+    Type toType   = resolveTypeToken(castExpr.targetType);
+
+    if (isError(fromType) || isError(toType)) return Type{TypeKind::Error};
+
+    // Cannot cast from or to void
+    if (fromType.kind == TypeKind::Void)
+        error(castExpr.targetType, "cannot cast from 'void'");
+    if (toType.kind == TypeKind::Void)
+        error(castExpr.targetType, "cannot cast to 'void'");
+
+    // Identity — always fine (no-op)
+    if (fromType == toType) return toType;
+
+    // Numeric ↔ numeric (any combination of I8/I16/I32/I64/U8/U16/U32/U64/F32/F64)
+    if (isNumeric(fromType.kind) && isNumeric(toType.kind)) return toType;
+
+    // Char ↔ integer / numeric
+    if (fromType.kind == TypeKind::Char && (isInteger(toType.kind) || isFloat(toType.kind))) return toType;
+    if ((isInteger(fromType.kind) || isFloat(fromType.kind)) && toType.kind == TypeKind::Char) return toType;
+
+    // Bool ↔ integer / float
+    if (fromType.kind == TypeKind::Bool && isNumeric(toType.kind)) return toType;
+    if (isNumeric(fromType.kind) && toType.kind == TypeKind::Bool) return toType;
+
+    // Char ↔ Bool
+    if (fromType.kind == TypeKind::Char && toType.kind == TypeKind::Bool) return toType;
+    if (fromType.kind == TypeKind::Bool && toType.kind == TypeKind::Char) return toType;
+
+    // Integer ↔ ptr
+    if (isInteger(fromType.kind) && toType.kind == TypeKind::Ptr) return toType;
+    if (fromType.kind == TypeKind::Ptr && isInteger(toType.kind)) return toType;
+
+    // Object → ptr (take address of stack-allocated struct)
+    if (fromType.kind == TypeKind::Object && toType.kind == TypeKind::Ptr) return toType;
+
+    // Array → ptr (pointer to first element)
+    if (fromType.kind == TypeKind::Array && toType.kind == TypeKind::Ptr) return toType;
+
+    error(castExpr.targetType,
+          "cannot cast '" + typeName(fromType) + "' to '" + typeName(toType) + "'");
+    return Type{TypeKind::Error};
 }

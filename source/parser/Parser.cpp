@@ -629,12 +629,23 @@ Expr Parser::parseAddSub() {
 }
 
 Expr Parser::parseMulDiv() {
-    Expr left = parseUnary();
+    Expr left = parseCast();
     while (match({ TokenType::STAR, TokenType::SLASH, TokenType::PERCENT })) {
         Token operatorToken = previous();
-        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseUnary()) });
+        left = makeExpr(BinaryExpr{ box(std::move(left)), operatorToken, box(parseCast()) });
     }
     return left;
+}
+
+Expr Parser::parseCast() {
+    Expr expr = parseUnary();
+    while (check(TokenType::AS)) {
+        advance();  // consume 'as'
+        if (!isTypeName()) throw error(peek(), "expected type name after 'as'");
+        Token targetType = advance();
+        expr = makeExpr(CastExpr{ box(std::move(expr)), targetType });
+    }
+    return expr;
 }
 
 Expr Parser::parseUnary() {

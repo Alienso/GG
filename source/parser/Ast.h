@@ -107,6 +107,11 @@ struct MethodCallExpr {
     std::vector<std::unique_ptr<Expr>> args;
 };
 
+struct CastExpr {
+    std::unique_ptr<Expr> operand;
+    Token                 targetType;   // type keyword token (i32, f32, ptr, …)
+};
+
 // ---- Expr wrapper ----
 
 struct Expr {
@@ -125,7 +130,8 @@ struct Expr {
         ThisExpr,
         MemberAccessExpr,
         MemberAssignExpr,
-        MethodCallExpr
+        MethodCallExpr,
+        CastExpr
     >;
     std::unique_ptr<Variant> node;
 };

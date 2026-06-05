@@ -135,6 +135,13 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const CastExpr& castExpr) {
+            out("Cast as '" + castExpr.targetType.lexeme + "'");
+            indent++;
+            printExpr(*castExpr.operand);
+            indent--;
+        },
+
     }, *expr.node);
 }
 

@@ -82,6 +82,7 @@ private:
     [[nodiscard]] Expr parseShift();
     [[nodiscard]] Expr parseAddSub();
     [[nodiscard]] Expr parseMulDiv();
+    [[nodiscard]] Expr parseCast();
     [[nodiscard]] Expr parseUnary();
     [[nodiscard]] Expr parsePostfix();
     [[nodiscard]] Expr parsePrimary();

@@ -22,6 +22,7 @@ static const Token& firstToken(const Expr& expr) {
         const Token& operator()(const MemberAccessExpr& ma)            const { return firstToken(*ma.object); }
         const Token& operator()(const MemberAssignExpr& ma)            const { return firstToken(*ma.object); }
         const Token& operator()(const MethodCallExpr& mc)              const { return firstToken(*mc.object); }
+        const Token& operator()(const CastExpr& castExpr)              const { return firstToken(*castExpr.operand); }
     };
     return std::visit(Visitor{}, *expr.node);
 }

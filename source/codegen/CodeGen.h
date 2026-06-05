@@ -100,6 +100,7 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
+    std::string genCast(const CastExpr& castExpr, const Type& toType);
 
     // ---- Destructor helpers ----
     // Emit destructor calls for all entries in one scope (in reverse declaration order).

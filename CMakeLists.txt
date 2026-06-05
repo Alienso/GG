@@ -16,6 +16,7 @@ set(GG_SOURCES
         source/codegen/IR.h
         source/codegen/CodeGen.h      source/codegen/CodeGen.cpp
         source/codegen/IRPrinter.h    source/codegen/IRPrinter.cpp
+        source/ImportResolver.h       source/ImportResolver.cpp
 )
 
 # ---- Main executable ----
@@ -41,6 +42,7 @@ add_executable(GG_tests
         tests/parser_tests.cpp
         tests/semantic_tests.cpp
         tests/codegen_tests.cpp
+        tests/import_tests.cpp
         ${GG_SOURCES}
 )
 target_link_libraries(GG_tests PRIVATE Catch2::Catch2WithMain)

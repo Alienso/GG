@@ -9,14 +9,11 @@
 #include <fstream>
 #include <iostream>
 
-GG::GG(std::vector<std::string>& inputPaths) : paths(inputPaths), lexer(inputPaths) {
+namespace fs = std::filesystem;
 
-}
+GG::GG(std::vector<std::string>& inputPaths) : paths(inputPaths) {}
 
 void GG::run() {
-    lexer.lex();
-
-    namespace fs = std::filesystem;
     const fs::path buildDir = fs::current_path() / "build";
     std::error_code errorCode;
     fs::create_directories(buildDir, errorCode);
@@ -25,8 +22,8 @@ void GG::run() {
         return;
     }
 
-    for (size_t fileIndex = 0; fileIndex < lexer.tokens().size(); ++fileIndex) {
-        const std::string stem    = fs::path(paths[fileIndex]).stem().string();
+    for (const std::string& filePath : paths) {
+        const std::string stem    = fs::path(filePath).stem().string();
         const fs::path    astPath = buildDir / (stem + ".ast");
         const fs::path    irPath  = buildDir / (stem + ".ll");
 
@@ -36,7 +33,9 @@ void GG::run() {
         if (!astFile) { std::cerr << "Error: cannot open " << astPath << " for writing\n"; continue; }
         if (!irFile)  { std::cerr << "Error: cannot open " << irPath  << " for writing\n"; continue; }
 
-        Program ast = parser.parse(lexer.tokens()[fileIndex]);
+        // Resolve all imports and produce a single flat program.
+        ImportResolver resolver;
+        Program ast = resolver.resolve(filePath);
 
         AstPrinter astPrinter;
         astPrinter.print(ast, astFile);

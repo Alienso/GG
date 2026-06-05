@@ -84,6 +84,7 @@ void Parser::synchronize() {
             case TokenType::RETURN:
             case TokenType::BREAK:
             case TokenType::CONTINUE:
+            case TokenType::IMPORT:
             case TokenType::EXTERN:
             case TokenType::I8:
             case TokenType::I16:
@@ -141,6 +142,11 @@ bool Parser::isTypeName() const {
 
 Stmt Parser::parseDeclaration() {
     // extern returnType name( params );
+    if (match({ TokenType::IMPORT })) {
+        Token keyword = previous();
+        return parseImportStmt(keyword);
+    }
+
     if (match({ TokenType::EXTERN })) {
         Token keyword = previous();
         return parseExternFuncDecl(keyword);
@@ -180,6 +186,12 @@ Stmt Parser::parseExternFuncDecl(Token keyword) {
     consume(TokenType::SEMICOLON,   "expected ';' after extern declaration");
 
     return makeStmt(ExternFuncDeclStmt{ keyword, returnType, name, std::move(params) });
+}
+
+Stmt Parser::parseImportStmt(Token keyword) {
+    Token path = consume(TokenType::STRING, "expected file path string after 'import'");
+    consume(TokenType::SEMICOLON, "expected ';' after import path");
+    return makeStmt(ImportStmt{ keyword, path });
 }
 
 Stmt Parser::parseFunctionDecl(Token returnType, Token name) {

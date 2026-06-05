@@ -32,7 +32,7 @@ enum class TokenType {
     IDENTIFIER, STRING, CHAR, NUMBER,
 
     // Keywords.
-    CLASS, ELSE, EXTERN, FALSE, FOR, IF,
+    CLASS, ELSE, EXTERN, FALSE, FOR, IF, IMPORT,
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
 
     // Type keywords — signed integers.

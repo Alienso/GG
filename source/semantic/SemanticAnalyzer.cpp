@@ -56,6 +56,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ExprStmt&)            { return false; },
         [](const FunctionDeclStmt&)    { return false; },
         [](const ExternFuncDeclStmt&)  { return false; },
+        [](const ImportStmt&)          { return false; },
     }, *stmt.node);
 }
 
@@ -149,6 +150,7 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },
         [&](const FunctionDeclStmt& functionDecl)    { analyzeFunctionDecl(functionDecl); },
         [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },
+        [&](const ImportStmt&)                       { /* resolved before semantic pass */ },
     }, *stmt.node);
 }
 

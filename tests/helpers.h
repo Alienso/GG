@@ -5,7 +5,9 @@
 #ifndef GG_HELPERS_H
 #define GG_HELPERS_H
 
+#include "../source/ImportResolver.h"
 #include "../source/lexer/Lexer.h"
+#include "../source/lexer/Token.h"
 #include "../source/parser/Parser.h"
 #include "../source/semantic/SemanticAnalyzer.h"
 #include "../source/codegen/CodeGen.h"
@@ -45,7 +47,7 @@ namespace detail {
     }
 }
 
-// Lex a source string and return all tokens (including the trailing EOF).
+// Lex a source string and return the token list (used by lexer tests).
 inline std::vector<Token> lexString(const std::string& source) {
     std::string path = detail::writeTempSource(source);
     std::vector<std::string> paths{ path };
@@ -54,11 +56,22 @@ inline std::vector<Token> lexString(const std::string& source) {
     return lexer.tokens()[0];
 }
 
-// Lex + parse a source string and return the Program AST.
-inline Program parseString(const std::string& source) {
-    auto tokens = lexString(source);
+// Lex + parse a source string WITHOUT resolving imports.
+// Use this when testing the import syntax itself (ImportStmt nodes are preserved).
+inline Program parseStringRaw(const std::string& source) {
+    std::string path = detail::writeTempSource(source);
+    std::vector<std::string> paths{ path };
+    Lexer lexer(paths);
+    lexer.lex();
     Parser parser;
-    return parser.parse(tokens);
+    return parser.parse(lexer.tokens()[0]);
+}
+
+// Lex + parse + resolve imports for a source string and return the Program AST.
+inline Program parseString(const std::string& source) {
+    std::string path = detail::writeTempSource(source);
+    ImportResolver resolver;
+    return resolver.resolve(path);
 }
 
 // Lex + parse + analyse a source string and return the SemanticResult.

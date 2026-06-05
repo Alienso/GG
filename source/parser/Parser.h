@@ -47,6 +47,7 @@ private:
     [[nodiscard]] Stmt      parseDeclaration();
     [[nodiscard]] Stmt      parseFunctionDecl(Token returnType, Token name);
     [[nodiscard]] Stmt      parseExternFuncDecl(Token keyword);
+    [[nodiscard]] Stmt      parseImportStmt(Token keyword);
     [[nodiscard]] Stmt      parseStatement();
     [[nodiscard]] BlockStmt parseBlockBody();
     [[nodiscard]] Stmt      parseBlock();

@@ -190,6 +190,10 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             indent--;
         },
 
+        [&](const ImportStmt& importStmt) {
+            out("Import " + importStmt.path.lexeme);
+        },
+
         [&](const ExternFuncDeclStmt& externDecl) {
             std::string params;
             bool first = true;

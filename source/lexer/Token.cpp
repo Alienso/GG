@@ -33,6 +33,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 
     // Keywords
     {"extern",   TokenType::EXTERN},
+    {"import",   TokenType::IMPORT},
     {"return",   TokenType::RETURN},
     {"break",    TokenType::BREAK},
     {"continue", TokenType::CONTINUE},

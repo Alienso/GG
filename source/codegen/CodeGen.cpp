@@ -149,6 +149,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },
         [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
         [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
+        [&](const ImportStmt&)               { /* resolved before codegen pass */ },
     }, *stmt.node);
 }
 

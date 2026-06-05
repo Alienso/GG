@@ -152,6 +152,11 @@ struct ExternFuncDeclStmt {
     std::vector<ParamDecl> params;
 };
 
+struct ImportStmt {
+    Token keyword;   // 'import' token — used for error reporting
+    Token path;      // STRING token — the file path (lexeme includes surrounding quotes)
+};
+
 // ---- Stmt wrapper ----
 
 struct Stmt {
@@ -165,7 +170,8 @@ struct Stmt {
         ContinueStmt,
         ReturnStmt,
         FunctionDeclStmt,
-        ExternFuncDeclStmt
+        ExternFuncDeclStmt,
+        ImportStmt
     >;
     std::unique_ptr<Variant> node;
 };

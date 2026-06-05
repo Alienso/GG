@@ -45,6 +45,7 @@ add_executable(GG_tests
         tests/import_tests.cpp
         tests/stdlib_tests.cpp
         tests/array_tests.cpp
+        tests/class_tests.cpp
         ${GG_SOURCES}
 )
 target_link_libraries(GG_tests PRIVATE Catch2::Catch2WithMain)

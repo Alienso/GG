@@ -11,6 +11,7 @@
 #include <vector>
 #include <stdexcept>
 #include <initializer_list>
+#include <unordered_set>
 
 class ParseError : public std::runtime_error {
 public:
@@ -23,8 +24,10 @@ public:
     [[nodiscard]] Program parse(const std::vector<Token>& inputTokens);
 
 private:
-    std::vector<Token> tokens;
-    size_t             current = 0;
+    std::vector<Token>             tokens;
+    size_t                         current = 0;
+    std::unordered_set<std::string> classNames_;   // class names registered during parse
+    bool                           insideFunction_ = false;  // true when parsing a function/method body
 
     // ---- Token stream navigation ----
     [[nodiscard]] const Token& peek() const;
@@ -45,6 +48,7 @@ private:
 
     // ---- Statement parsers ----
     [[nodiscard]] Stmt      parseDeclaration();
+    [[nodiscard]] Stmt      parseClassDecl(Token keyword);
     [[nodiscard]] Stmt      parseFunctionDecl(Token returnType, Token name);
     [[nodiscard]] Stmt      parseExternFuncDecl(Token keyword);
     [[nodiscard]] Stmt      parseImportStmt(Token keyword);

@@ -88,7 +88,7 @@ inline std::string codegenString(const std::string& source, CompilerOptions opti
     SemanticAnalyzer analyzer;
     SemanticResult semanticResult = analyzer.analyze(ast);
     CodeGen codeGenerator;
-    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap, options);
+    IRModule ir = codeGenerator.generate(ast, semanticResult, options);
     std::ostringstream output;
     IRPrinter printer;
     printer.print(ir, output);
@@ -103,7 +103,7 @@ inline std::string codegenFile(const std::string& path, CompilerOptions options 
     SemanticAnalyzer analyzer;
     SemanticResult semanticResult = analyzer.analyze(ast);
     CodeGen codeGenerator;
-    IRModule ir = codeGenerator.generate(ast, semanticResult.typeMap, options);
+    IRModule ir = codeGenerator.generate(ast, semanticResult, options);
     std::ostringstream output;
     IRPrinter printer;
     printer.print(ir, output);

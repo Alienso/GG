@@ -42,7 +42,7 @@ void GG::run() {
 
         SemanticResult result = semanticAnalyzer.analyze(ast);
         if (!result.hadError) {
-            IRModule ir = codeGenerator.generate(ast, result.typeMap, options);
+            IRModule ir = codeGenerator.generate(ast, result, options);
             IRPrinter irPrinter;
             irPrinter.print(ir, irFile);
         }

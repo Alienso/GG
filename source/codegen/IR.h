@@ -29,6 +29,7 @@ inline std::string irTypeName(Type t) {
         case TypeKind::Char:   return "i32";
         case TypeKind::Ptr:    return "ptr";
         case TypeKind::Array:  return "[" + std::to_string(t.arraySize) + " x " + irTypeName(Type{t.elementKind}) + "]";
+        case TypeKind::Object: return "%" + t.className;
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "i32";   // fallback — suppressed errors
     }
@@ -52,6 +53,7 @@ struct IRFunction {
 };
 
 struct IRModule {
+    std::vector<std::string> typeDecls;  // %ClassName = type { ... } — struct type definitions
     std::vector<std::string> declares;   // declare <retType> @<name>(<params>) — extern functions
     std::vector<std::string> globals;    // @.str.N = private unnamed_addr constant …
     std::vector<IRFunction>  functions;

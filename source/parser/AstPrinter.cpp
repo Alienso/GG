@@ -107,6 +107,34 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const ThisExpr&) {
+            out("This");
+        },
+
+        [&](const MemberAccessExpr& ma) {
+            out("MemberAccess '." + ma.field.lexeme + "'");
+            indent++;
+            printExpr(*ma.object);
+            indent--;
+        },
+
+        [&](const MemberAssignExpr& ma) {
+            out("MemberAssign '." + ma.field.lexeme + "'");
+            indent++;
+            printExpr(*ma.object);
+            printExpr(*ma.value);
+            indent--;
+        },
+
+        [&](const MethodCallExpr& mc) {
+            out("MethodCall '." + mc.method.lexeme + "'");
+            indent++;
+            printExpr(*mc.object);
+            for (const auto& arg : mc.args) printExpr(*arg);
+            if (mc.args.empty()) out("(no args)");
+            indent--;
+        },
+
     }, *expr.node);
 }
 
@@ -227,6 +255,31 @@ void AstPrinter::printStmt(const Stmt& stmt) {
                 params += param.typeName.lexeme + " " + param.name.lexeme;
             }
             out("ExternFuncDecl " + externDecl.returnType.lexeme + " '" + externDecl.name.lexeme + "' (" + params + ")");
+        },
+
+        [&](const ClassDeclStmt& classDecl) {
+            out("ClassDecl '" + classDecl.name.lexeme + "'");
+            indent++;
+            for (const FieldDecl& fd : classDecl.fields) {
+                out(std::string(fd.isPublic ? "public" : "private")
+                    + " field " + fd.typeName.lexeme + " '" + fd.name.lexeme + "'");
+            }
+            for (const MethodDecl& md : classDecl.methods) {
+                std::string params;
+                bool first = true;
+                for (const auto& param : md.params) {
+                    if (!first) params += ", ";
+                    first = false;
+                    params += param.typeName.lexeme + " " + param.name.lexeme;
+                }
+                std::string prefix = std::string(md.isPublic ? "public" : "private")
+                                   + (md.isConstructor ? " ctor " : " method ");
+                out(prefix + "'" + md.name.lexeme + "' (" + params + ")");
+                indent++;
+                printBlock(md.body);
+                indent--;
+            }
+            indent--;
         },
 
     }, *stmt.node);

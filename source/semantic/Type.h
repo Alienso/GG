@@ -18,6 +18,7 @@ enum class TypeKind {
     Bool, Char,
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
     Array,  // fixed-size stack array: element type + count stored in Type struct
+    Object, // class instance — stack-allocated; className stores the class name
     Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
@@ -25,11 +26,12 @@ enum class TypeKind {
 // ---- Type ----
 
 struct Type {
-    TypeKind kind        = TypeKind::Error;
-    bool     isConst     = false;
-    bool     isNullable  = false;
-    TypeKind elementKind = TypeKind::Error;  // only valid when kind == Array
-    size_t   arraySize   = 0;               // only valid when kind == Array
+    TypeKind    kind        = TypeKind::Error;
+    bool        isConst     = false;
+    bool        isNullable  = false;
+    TypeKind    elementKind = TypeKind::Error;  // only valid when kind == Array
+    size_t      arraySize   = 0;               // only valid when kind == Array
+    std::string className;                     // only valid when kind == Object
 
     bool operator==(const Type&) const = default;
 };
@@ -37,6 +39,14 @@ struct Type {
 // Convenience constructor for array types.
 inline Type makeArrayType(TypeKind elementKind, size_t size) {
     return Type{TypeKind::Array, false, false, elementKind, size};
+}
+
+// Convenience constructor for class instance types.
+inline Type makeObjectType(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::Object;
+    t.className = name;
+    return t;
 }
 
 // ---- CastResult ----

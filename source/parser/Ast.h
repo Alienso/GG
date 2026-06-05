@@ -5,6 +5,7 @@
 #ifndef GG_AST_H
 #define GG_AST_H
 
+#include <deque>
 #include <memory>
 #include <vector>
 #include <optional>
@@ -85,6 +86,27 @@ struct IndexAssignExpr {
     std::unique_ptr<Expr> value;   // right-hand side value
 };
 
+struct ThisExpr {
+    Token keyword;   // the 'this' token
+};
+
+struct MemberAccessExpr {
+    std::unique_ptr<Expr> object;
+    Token                 field;
+};
+
+struct MemberAssignExpr {
+    std::unique_ptr<Expr> object;
+    Token                 field;
+    std::unique_ptr<Expr> value;
+};
+
+struct MethodCallExpr {
+    std::unique_ptr<Expr>              object;
+    Token                              method;
+    std::vector<std::unique_ptr<Expr>> args;
+};
+
 // ---- Expr wrapper ----
 
 struct Expr {
@@ -99,7 +121,11 @@ struct Expr {
         CallExpr,
         VarDeclExpr,
         IndexExpr,
-        IndexAssignExpr
+        IndexAssignExpr,
+        ThisExpr,
+        MemberAccessExpr,
+        MemberAssignExpr,
+        MethodCallExpr
     >;
     std::unique_ptr<Variant> node;
 };
@@ -171,6 +197,30 @@ struct ImportStmt {
     Token path;      // STRING token — the file path (lexeme is the raw content, quotes stripped by lexer)
 };
 
+struct FieldDecl {
+    bool  isPublic;
+    Token typeName;   // type keyword token
+    Token name;
+};
+
+struct MethodDecl {
+    bool                   isPublic;
+    bool                   isConstructor;  // true when name == class name
+    Token                  returnType;     // for constructors this is the class-name token
+    Token                  name;
+    std::vector<ParamDecl> params;
+    BlockStmt              body;
+};
+
+struct ClassDeclStmt {
+    Token                  name;
+    std::vector<FieldDecl> fields;
+    // std::deque avoids moving existing elements on growth, which is needed
+    // because MethodDecl contains BlockStmt (with unique_ptr) and Token
+    // (const string members) — making it neither copyable nor noexcept-moveable.
+    std::deque<MethodDecl> methods;
+};
+
 // ---- Stmt wrapper ----
 
 struct Stmt {
@@ -185,7 +235,8 @@ struct Stmt {
         ReturnStmt,
         FunctionDeclStmt,
         ExternFuncDeclStmt,
-        ImportStmt
+        ImportStmt,
+        ClassDeclStmt
     >;
     std::unique_ptr<Variant> node;
 };

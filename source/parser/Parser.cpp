@@ -10,6 +10,13 @@ Parser::Parser() {}
 Program Parser::parse(const std::vector<Token>& inputTokens) {
     tokens  = std::vector<Token>(inputTokens);
     current = 0;
+    classNames_.clear();
+
+    // Pre-pass: scan for "class IDENTIFIER" to register class names before parsing.
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER)
+            classNames_.insert(tokens[i + 1].lexeme);
+    }
 
     Program program;
     while (!isAtEnd()) {
@@ -129,6 +136,8 @@ bool Parser::isTypeName() const {
         case TokenType::VOID:
         case TokenType::PTR:
             return true;
+        case TokenType::IDENTIFIER:
+            return classNames_.count(peek().lexeme) > 0;
         default:
             return false;
     }
@@ -150,13 +159,23 @@ Stmt Parser::parseDeclaration() {
         return parseExternFuncDecl(keyword);
     }
 
+    if (match({ TokenType::CLASS })) {
+        Token keyword = previous();
+        return parseClassDecl(keyword);
+    }
+
     // Function decl: typeName IDENTIFIER ( ...
-    // Variable decl at top level falls through to parseStatement → parseExprStmt
-    // since VarDecl is an expression.
+    // Exception: if we are inside a function body and the return type is a class
+    // name (an IDENTIFIER in classNames_), then "ClassName varName(args)" is a
+    // constructor call (VarDecl with ctor initializer), not a function decl.
+    // Keyword-typed patterns like "void inner() { ... }" are always function decls.
     if (isTypeName()
         && peekNext().type == TokenType::IDENTIFIER
         && current + 2 < tokens.size()
-        && tokens[current + 2].type == TokenType::LEFT_PAREN) {
+        && tokens[current + 2].type == TokenType::LEFT_PAREN
+        && !(insideFunction_
+             && peek().type == TokenType::IDENTIFIER
+             && classNames_.count(peek().lexeme))) {
         Token returnType = advance();
         Token name       = advance();
         return parseFunctionDecl(returnType, name);
@@ -207,8 +226,100 @@ Stmt Parser::parseFunctionDecl(Token returnType, Token name) {
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
     consume(TokenType::LEFT_BRACE,  "expected '{' before function body");
 
+    bool savedInsideFunction = insideFunction_;
+    insideFunction_ = true;
     BlockStmt body = parseBlockBody();
+    insideFunction_ = savedInsideFunction;
     return makeStmt(FunctionDeclStmt{ returnType, name, std::move(params), std::move(body) });
+}
+
+Stmt Parser::parseClassDecl(Token keyword) {
+    Token name = consume(TokenType::IDENTIFIER, "expected class name after 'class'");
+    consume(TokenType::LEFT_BRACE, "expected '{' after class name");
+
+    std::vector<FieldDecl> fields;
+    std::deque<MethodDecl> methods;
+
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+        // Each member starts with public/private
+        bool isPublic = true;
+        if (match({ TokenType::PUBLIC })) {
+            isPublic = true;
+        } else if (match({ TokenType::PRIVATE })) {
+            isPublic = false;
+        } else {
+            throw error(peek(), "expected 'public' or 'private' before class member");
+        }
+
+        // Constructor: IDENTIFIER (== class name) followed by '('
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == name.lexeme
+            && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LEFT_PAREN) {
+            Token ctorName = advance();  // consume class name
+            consume(TokenType::LEFT_PAREN, "expected '(' after constructor name");
+
+            std::vector<ParamDecl> params;
+            if (!check(TokenType::RIGHT_PAREN)) {
+                do {
+                    if (!isTypeName()) throw error(peek(), "expected parameter type");
+                    Token paramType = advance();
+                    Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
+                    params.push_back(ParamDecl{ paramType, paramName });
+                } while (match({ TokenType::COMMA }));
+            }
+            consume(TokenType::RIGHT_PAREN, "expected ')' after constructor parameters");
+            consume(TokenType::LEFT_BRACE,  "expected '{' before constructor body");
+            bool savedIF1 = insideFunction_;
+            insideFunction_ = true;
+            BlockStmt body = parseBlockBody();
+            insideFunction_ = savedIF1;
+
+            methods.push_back(MethodDecl{
+                isPublic, /*isConstructor=*/true,
+                ctorName,   // returnType token = class name token (no actual return type)
+                ctorName,   // name token
+                std::move(params), std::move(body)
+            });
+            continue;
+        }
+
+        // Regular method or field: typeName IDENTIFIER
+        if (!isTypeName()) throw error(peek(), "expected type name for class member");
+        Token memberType = advance();
+        Token memberName = consume(TokenType::IDENTIFIER, "expected member name");
+
+        if (check(TokenType::LEFT_PAREN)) {
+            // Method
+            consume(TokenType::LEFT_PAREN, "");
+            std::vector<ParamDecl> params;
+            if (!check(TokenType::RIGHT_PAREN)) {
+                do {
+                    if (!isTypeName()) throw error(peek(), "expected parameter type");
+                    Token paramType = advance();
+                    Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
+                    params.push_back(ParamDecl{ paramType, paramName });
+                } while (match({ TokenType::COMMA }));
+            }
+            consume(TokenType::RIGHT_PAREN, "expected ')' after method parameters");
+            consume(TokenType::LEFT_BRACE,  "expected '{' before method body");
+            bool savedIF2 = insideFunction_;
+            insideFunction_ = true;
+            BlockStmt body = parseBlockBody();
+            insideFunction_ = savedIF2;
+
+            methods.push_back(MethodDecl{
+                isPublic, /*isConstructor=*/false,
+                memberType, memberName,
+                std::move(params), std::move(body)
+            });
+        } else {
+            // Field
+            consume(TokenType::SEMICOLON, "expected ';' after field declaration");
+            fields.push_back(FieldDecl{ isPublic, memberType, memberName });
+        }
+    }
+
+    consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
+    return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
 }
 
 Stmt Parser::parseStatement() {
@@ -342,12 +453,25 @@ Expr Parser::parseExpression() {
         return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize });
     }
 
-    // Scalar variable declaration: typeName IDENTIFIER ( = expr )?
+    // Scalar variable declaration: typeName IDENTIFIER ( = expr | (args) )?
     if (isTypeName() && peekNext().type == TokenType::IDENTIFIER) {
         Token typeName = advance();
         Token name     = advance();
         std::unique_ptr<Expr> initializer = nullptr;
-        if (match({ TokenType::EQUAL })) initializer = box(parseExpression());
+        if (match({ TokenType::EQUAL })) {
+            initializer = box(parseExpression());
+        } else if (check(TokenType::LEFT_PAREN)
+                   && classNames_.count(typeName.lexeme) > 0) {
+            // Constructor call syntax: ClassName varName(args)
+            advance();  // consume '('
+            std::vector<std::unique_ptr<Expr>> args;
+            if (!check(TokenType::RIGHT_PAREN)) {
+                do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+            }
+            consume(TokenType::RIGHT_PAREN, "expected ')' after constructor arguments");
+            // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
+            initializer = box(makeExpr(CallExpr{ typeName, std::move(args) }));
+        }
         return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer) });
     }
     return parseAssignment();
@@ -386,6 +510,17 @@ Expr Parser::parseAssignment() {
             indexNode.name,
             std::move(indexNode.index),
             box(std::move(value))
+        });
+    }
+
+    // Member assignment: obj.field = expr (detected after parsing obj.field LHS)
+    if (expression.node && std::holds_alternative<MemberAccessExpr>(*expression.node)
+        && check(TokenType::EQUAL)) {
+        advance();  // consume =
+        auto& ma = std::get<MemberAccessExpr>(*expression.node);
+        Expr value = parseAssignment();  // right-associative
+        return makeExpr(MemberAssignExpr{
+            std::move(ma.object), ma.field, box(std::move(value))
         });
     }
 
@@ -510,12 +645,39 @@ Expr Parser::parsePostfix() {
             expression = makeExpr(PostfixExpr{ box(std::move(expression)), previous() });
             continue;
         }
+        // Member access / method call: expr.member or expr.method(args)
+        if (check(TokenType::DOT)) {
+            advance();  // consume '.'
+            Token member = consume(TokenType::IDENTIFIER, "expected member name after '.'");
+            if (check(TokenType::LEFT_PAREN)) {
+                advance();  // consume '('
+                std::vector<std::unique_ptr<Expr>> args;
+                if (!check(TokenType::RIGHT_PAREN)) {
+                    do {
+                        args.push_back(box(parseExpression()));
+                    } while (match({ TokenType::COMMA }));
+                }
+                consume(TokenType::RIGHT_PAREN, "expected ')' after method arguments");
+                expression = makeExpr(MethodCallExpr{
+                    box(std::move(expression)), member, std::move(args)
+                });
+            } else {
+                expression = makeExpr(MemberAccessExpr{
+                    box(std::move(expression)), member
+                });
+            }
+            continue;
+        }
         break;
     }
     return expression;
 }
 
 Expr Parser::parsePrimary() {
+    if (match({ TokenType::THIS })) {
+        return makeExpr(ThisExpr{ previous() });
+    }
+
     if (match({ TokenType::TRUE, TokenType::FALSE,
                 TokenType::NUMBER, TokenType::STRING, TokenType::CHAR })) {
         return makeExpr(LiteralExpr{ previous() });

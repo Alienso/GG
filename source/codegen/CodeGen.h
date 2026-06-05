@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "IR.h"
 #include "../parser/Ast.h"
 #include "../semantic/SemanticAnalyzer.h"
@@ -15,13 +16,22 @@
 
 class CodeGen {
 public:
-    IRModule generate(const Program& program, const ExprTypeMap& typeMap, const CompilerOptions& options = {});
+    IRModule generate(const Program& program, const SemanticResult& semanticResult, const CompilerOptions& options = {});
 
 private:
+    // ---- Per-class info (populated in generate()) ----
+    struct CGClassInfo {
+        std::string                             irTypeName;  // "%Point"
+        std::vector<std::pair<std::string,Type>> fields;    // ordered: (name, type)
+    };
+    std::unordered_map<std::string, CGClassInfo>      cgClasses_;
+    const std::unordered_map<std::string, ClassInfo>* classRegistry_ = nullptr;
+
     // ---- Module-level state ----
     IRModule           module;
-    const ExprTypeMap* typeMap      = nullptr;
-    int                stringCounter = 0;
+    const ExprTypeMap* typeMap        = nullptr;
+    int                stringCounter  = 0;
+    std::string        currentClassName_;  // set while generating a method
 
     // ---- Per-function state (reset in genFunction) ----
     IRFunction*  currentFunction    = nullptr;
@@ -51,9 +61,11 @@ private:
     std::vector<std::string> breakLabelStack;
     std::vector<std::string> continueLabelStack;
 
-    // ---- Function / extern codegen ----
+    // ---- Function / extern / class codegen ----
     void genFunction(const FunctionDeclStmt& function);
     void genExternDecl(const ExternFuncDeclStmt& ext);
+    void genClassDecl(const ClassDeclStmt& classDecl);
+    void genMethod(const std::string& className, const MethodDecl& method);
 
     // ---- Statement codegen ----
     void genStmt(const Stmt& stmt);
@@ -78,6 +90,10 @@ private:
     std::string genVarDecl(const VarDeclExpr& varDecl);
     std::string genIndex(const IndexExpr& indexExpr);
     std::string genIndexAssign(const IndexAssignExpr& indexAssign);
+    std::string genThis(const ThisExpr& thisExpr);
+    std::string genMemberAccess(const MemberAccessExpr& memberAccess);
+    std::string genMemberAssign(const MemberAssignExpr& memberAssign);
+    std::string genMethodCall(const MethodCallExpr& methodCall, Type resolvedType);
 
     // ---- Bounds check helpers ----
     void ensureAbortDeclared();
@@ -99,6 +115,9 @@ private:
     // ---- Value / type helpers ----
     std::string freshTemp();
     std::string freshLabel(const std::string& hint);
+
+    // Resolve a ParamDecl type token — handles IDENTIFIER tokens naming a class.
+    Type        resolveParamType(const ParamDecl& param) const;
 
     // Look up the resolved type for an expression via the side-table.
     // Returns TypeKind::Error if not found (should not happen after semantic pass).

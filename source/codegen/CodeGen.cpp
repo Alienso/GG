@@ -13,12 +13,29 @@
 // Public entry point
 // ============================================================
 
-IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeMap, const CompilerOptions& options) {
-    module        = {};
-    this->typeMap = &inputTypeMap;
-    stringCounter = 0;
-    boundsCheck   = options.boundsCheck;
+IRModule CodeGen::generate(const Program& program, const SemanticResult& semanticResult, const CompilerOptions& options) {
+    module           = {};
+    this->typeMap    = &semanticResult.typeMap;
+    classRegistry_   = &semanticResult.classRegistry;
+    stringCounter    = 0;
+    currentClassName_ = "";
+    boundsCheck      = options.boundsCheck;
     funcParamTypes.clear();
+    cgClasses_.clear();
+
+    // Build CGClassInfo for each class (field order + types for GEP).
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (!std::holds_alternative<ClassDeclStmt>(*decl.node)) continue;
+        const auto& cls = std::get<ClassDeclStmt>(*decl.node);
+        CGClassInfo cgi;
+        cgi.irTypeName = "%" + cls.name.lexeme;
+        for (const FieldDecl& fd : cls.fields) {
+            Type fieldType = typeFromToken(fd.typeName.type);
+            cgi.fields.push_back({fd.name.lexeme, fieldType});
+        }
+        cgClasses_[cls.name.lexeme] = std::move(cgi);
+    }
 
     // Build function parameter type table (used in genCall to cast arguments).
     for (const auto& decl : program.declarations) {
@@ -27,7 +44,7 @@ IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeM
             const auto& function = std::get<FunctionDeclStmt>(*decl.node);
             std::vector<Type> paramTypes;
             for (const auto& param : function.params)
-                paramTypes.push_back(typeFromToken(param.typeName.type));
+                paramTypes.push_back(resolveParamType(param));
             funcParamTypes[function.name.lexeme] = std::move(paramTypes);
         } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
             const auto& externDecl = std::get<ExternFuncDeclStmt>(*decl.node);
@@ -35,7 +52,23 @@ IRModule CodeGen::generate(const Program& program, const ExprTypeMap& inputTypeM
             for (const auto& param : externDecl.params)
                 paramTypes.push_back(typeFromToken(param.typeName.type));
             funcParamTypes[externDecl.name.lexeme] = std::move(paramTypes);
+        } else if (std::holds_alternative<ClassDeclStmt>(*decl.node)) {
+            const auto& cls = std::get<ClassDeclStmt>(*decl.node);
+            for (const MethodDecl& md : cls.methods) {
+                std::string mangledName = cls.name.lexeme + "_" + md.name.lexeme;
+                std::vector<Type> paramTypes;
+                for (const auto& param : md.params)
+                    paramTypes.push_back(resolveParamType(param));
+                funcParamTypes[mangledName] = std::move(paramTypes);
+            }
         }
+    }
+
+    // Emit class type declarations first, then regular declarations.
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (std::holds_alternative<ClassDeclStmt>(*decl.node))
+            genClassDecl(std::get<ClassDeclStmt>(*decl.node));
     }
 
     for (const auto& decl : program.declarations) {
@@ -72,7 +105,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     for (const auto& param : function.params) {
         if (!first) parameterString += ", ";
         first = false;
-        parameterString += irTypeName(typeFromToken(param.typeName.type));
+        parameterString += irTypeName(resolveParamType(param));
         parameterString += " %";
         parameterString += param.name.lexeme;
     }
@@ -89,7 +122,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
 
     // Spill each parameter into an alloca so it can be reassigned.
     for (const auto& param : function.params) {
-        Type        paramType  = typeFromToken(param.typeName.type);
+        Type        paramType  = resolveParamType(param);
         std::string irType     = irTypeName(paramType);
         std::string ptrName    = "%" + param.name.lexeme + ".addr";
         emitAlloca(ptrName, irType);
@@ -134,6 +167,108 @@ void CodeGen::genExternDecl(const ExternFuncDeclStmt& externDecl) {
         "declare " + returnIrType + " @" + externDecl.name.lexeme + "(" + parameterString + ")");
 }
 
+void CodeGen::genClassDecl(const ClassDeclStmt& classDecl) {
+    const std::string& className = classDecl.name.lexeme;
+
+    // Emit struct type declaration: %ClassName = type { irType1, irType2, ... }
+    auto cgIt = cgClasses_.find(className);
+    if (cgIt != cgClasses_.end()) {
+        std::string typeBody;
+        bool first = true;
+        for (const auto& [fieldName, fieldType] : cgIt->second.fields) {
+            if (!first) typeBody += ", ";
+            first = false;
+            typeBody += irTypeName(fieldType);
+        }
+        module.typeDecls.push_back("%" + className + " = type { " + typeBody + " }");
+    }
+
+    // Emit each method
+    for (const MethodDecl& md : classDecl.methods)
+        genMethod(className, md);
+}
+
+void CodeGen::genMethod(const std::string& className, const MethodDecl& method) {
+    // Reset per-function state
+    tempCounter         = 0;
+    labelCounter        = 0;
+    allocaMap.clear();
+    varTypeMap.clear();
+    usedAllocaNames.clear();
+    breakLabelStack.clear();
+    continueLabelStack.clear();
+    currentClassName_   = className;
+
+    // Return type
+    Type returnType;
+    std::string returnIrType;
+    if (method.isConstructor) {
+        returnType   = Type{TypeKind::Void};
+        returnIrType = "void";
+    } else {
+        returnType   = typeFromToken(method.returnType.type);
+        returnIrType = irTypeName(returnType);
+    }
+    currentReturnType = returnType;
+
+    // Build mangled name: ClassName_methodName
+    std::string mangledName = className + "_" + method.name.lexeme;
+
+    // Parameters: (ptr %self, param1, param2, ...)
+    std::string parameterString = "ptr %self";
+    for (const auto& param : method.params) {
+        parameterString += ", ";
+        parameterString += irTypeName(resolveParamType(param));
+        parameterString += " %";
+        parameterString += param.name.lexeme;
+    }
+
+    IRFunction irFunction;
+    irFunction.signature = "define " + returnIrType + " @" + mangledName + "(" + parameterString + ")";
+
+    module.functions.push_back(std::move(irFunction));
+    currentFunction = &module.functions.back();
+
+    // Create entry basic block
+    currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
+    currentBasicBlock = &currentFunction->blocks.back();
+
+    // 'this' maps directly to %self — no alloca spill, return ptr directly
+    allocaMap["this"]  = "%self";
+    varTypeMap["this"] = makeObjectType(className);
+
+    // Spill each parameter into an alloca
+    for (const auto& param : method.params) {
+        Type        paramType = resolveParamType(param);
+        std::string irType    = irTypeName(paramType);
+        std::string ptrName   = "%" + param.name.lexeme + ".addr";
+        emitAlloca(ptrName, irType);
+        usedAllocaNames.insert(ptrName);
+        allocaMap[param.name.lexeme]  = ptrName;
+        varTypeMap[param.name.lexeme] = paramType;
+        emitStore(irType, "%" + param.name.lexeme, ptrName);
+    }
+
+    // Codegen body
+    for (const auto& stmtPtr : method.body.body) {
+        if (stmtPtr) genStmt(*stmtPtr);
+    }
+
+    // Ensure termination
+    if (currentBasicBlock && !currentBasicBlock->terminated) {
+        if (returnIrType == "void") {
+            emit("ret void");
+        } else {
+            emit("unreachable");
+        }
+        currentBasicBlock->terminated = true;
+    }
+
+    currentFunction   = nullptr;
+    currentBasicBlock = nullptr;
+    currentClassName_ = "";
+}
+
 // ============================================================
 // Statement codegen
 // ============================================================
@@ -151,6 +286,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
         [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
         [&](const ImportStmt&)               { /* resolved before codegen pass */ },
+        [&](const ClassDeclStmt&)            { /* handled at module level in generate() */ },
     }, *stmt.node);
 }
 
@@ -309,6 +445,10 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const VarDeclExpr& varDecl)              -> std::string { return genVarDecl(varDecl); },
         [&](const IndexExpr& indexExpr)              -> std::string { return genIndex(indexExpr); },
         [&](const IndexAssignExpr& indexAssign)      -> std::string { return genIndexAssign(indexAssign); },
+        [&](const ThisExpr& thisExpr)                -> std::string { return genThis(thisExpr); },
+        [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess); },
+        [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
+        [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
     }, *expr.node);
 }
 
@@ -432,7 +572,14 @@ std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
     auto varTypeIt = varTypeMap.find(identifier.name.lexeme);
     if (varTypeIt == varTypeMap.end()) return "0";
 
-    std::string irType  = irTypeName(varTypeIt->second);
+    const Type& varType = varTypeIt->second;
+
+    // Object types: the alloca IS the struct pointer — return it directly (no load)
+    if (varType.kind == TypeKind::Object) {
+        return allocaIt->second;
+    }
+
+    std::string irType  = irTypeName(varType);
     std::string ptrName = allocaIt->second;
     return emitLoad(irType, ptrName);
 }
@@ -691,6 +838,64 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         return ptrName;
     }
 
+    // ---- Object (class) declaration ----
+    if (varDecl.typeName.type == TokenType::IDENTIFIER) {
+        // Class type — varDecl.typeName.lexeme is the class name
+        const std::string& className  = varDecl.typeName.lexeme;
+        Type               objectType = makeObjectType(className);
+        std::string        name       = varDecl.name.lexeme;
+
+        std::string ptrName = "%" + name + ".addr";
+        if (usedAllocaNames.count(ptrName)) {
+            int suffix = 1;
+            while (usedAllocaNames.count(ptrName + "." + std::to_string(suffix))) ++suffix;
+            ptrName += "." + std::to_string(suffix);
+        }
+        usedAllocaNames.insert(ptrName);
+
+        emitAlloca(ptrName, "%" + className);
+        allocaMap[name]  = ptrName;
+        varTypeMap[name] = objectType;
+
+        // Zero-initialise the struct
+        emit("store %" + className + " zeroinitializer, ptr " + ptrName);
+
+        // If initializer is a constructor CallExpr, emit the constructor call
+        if (varDecl.initializer) {
+            if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
+                const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
+                std::string mangledName = className + "_" + className;
+
+                // Look up declared constructor param types
+                auto funcLookup = funcParamTypes.find(mangledName);
+                const std::vector<Type>* declaredParamTypes =
+                    funcLookup != funcParamTypes.end() ? &funcLookup->second : nullptr;
+
+                std::string argumentString;
+                bool   first      = true;
+                size_t paramIndex = 0;
+                for (const auto& arg : ctorCall.args) {
+                    if (!first) argumentString += ", ";
+                    first = false;
+                    Type        argType = exprType(*arg);
+                    std::string value   = genExpr(*arg);
+                    if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
+                        Type paramType = (*declaredParamTypes)[paramIndex];
+                        value   = emitCast(value, argType, paramType);
+                        argType = paramType;
+                    }
+                    ++paramIndex;
+                    argumentString += irTypeName(argType) + " " + value;
+                }
+
+                emit("call void @" + mangledName + "(ptr " + ptrName
+                     + (argumentString.empty() ? "" : ", " + argumentString) + ")");
+            }
+        }
+
+        return ptrName;
+    }
+
     // ---- Scalar declaration (existing logic) ----
     Type        declaredType = typeFromToken(varDecl.typeName.type);
     std::string irType       = irTypeName(declaredType);
@@ -791,6 +996,126 @@ std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
     return value;  // assignment expression returns the stored value
 }
 
+// ---- this ----
+
+std::string CodeGen::genThis(const ThisExpr&) {
+    auto it = allocaMap.find("this");
+    return it != allocaMap.end() ? it->second : "null";
+}
+
+// ---- Member access (field read) ----
+
+std::string CodeGen::genMemberAccess(const MemberAccessExpr& memberAccess) {
+    std::string objPtr = genExpr(*memberAccess.object);
+
+    // Determine the class name from the object's type in the type map
+    Type objType = exprType(*memberAccess.object);
+    if (objType.kind != TypeKind::Object) return "0";
+
+    const std::string& className = objType.className;
+    auto cgIt = cgClasses_.find(className);
+    if (cgIt == cgClasses_.end()) return "0";
+
+    // Find the field index
+    int fieldIndex = -1;
+    Type fieldType{TypeKind::Error};
+    for (int i = 0; i < static_cast<int>(cgIt->second.fields.size()); ++i) {
+        if (cgIt->second.fields[i].first == memberAccess.field.lexeme) {
+            fieldIndex = i;
+            fieldType  = cgIt->second.fields[i].second;
+            break;
+        }
+    }
+    if (fieldIndex < 0) return "0";
+
+    std::string gepName = freshTemp();
+    emit("%" + gepName + " = getelementptr %" + className + ", ptr " + objPtr
+         + ", i32 0, i32 " + std::to_string(fieldIndex));
+    return emitLoad(irTypeName(fieldType), "%" + gepName);
+}
+
+// ---- Member assign (field write) ----
+
+std::string CodeGen::genMemberAssign(const MemberAssignExpr& memberAssign) {
+    std::string objPtr = genExpr(*memberAssign.object);
+
+    Type objType = exprType(*memberAssign.object);
+    if (objType.kind != TypeKind::Object) return "0";
+
+    const std::string& className = objType.className;
+    auto cgIt = cgClasses_.find(className);
+    if (cgIt == cgClasses_.end()) return "0";
+
+    int fieldIndex = -1;
+    Type fieldType{TypeKind::Error};
+    for (int i = 0; i < static_cast<int>(cgIt->second.fields.size()); ++i) {
+        if (cgIt->second.fields[i].first == memberAssign.field.lexeme) {
+            fieldIndex = i;
+            fieldType  = cgIt->second.fields[i].second;
+            break;
+        }
+    }
+    if (fieldIndex < 0) return "0";
+
+    std::string gepName = freshTemp();
+    emit("%" + gepName + " = getelementptr %" + className + ", ptr " + objPtr
+         + ", i32 0, i32 " + std::to_string(fieldIndex));
+
+    Type        valueType = exprType(*memberAssign.value);
+    std::string value     = genExpr(*memberAssign.value);
+    value = emitCast(value, valueType, fieldType);
+    emitStore(irTypeName(fieldType), value, "%" + gepName);
+    return value;
+}
+
+// ---- Method call ----
+
+std::string CodeGen::genMethodCall(const MethodCallExpr& methodCall, Type resolvedType) {
+    std::string objPtr = genExpr(*methodCall.object);
+
+    Type objType = exprType(*methodCall.object);
+    if (objType.kind != TypeKind::Object) return "0";
+
+    const std::string& className   = objType.className;
+    std::string        mangledName = className + "_" + methodCall.method.lexeme;
+    std::string        returnIrType = irTypeName(resolvedType);
+
+    // Look up declared parameter types
+    auto funcLookup = funcParamTypes.find(mangledName);
+    const std::vector<Type>* declaredParamTypes =
+        funcLookup != funcParamTypes.end() ? &funcLookup->second : nullptr;
+
+    std::string argumentString;
+    bool   first      = true;
+    size_t paramIndex = 0;
+    for (const auto& arg : methodCall.args) {
+        if (!first) argumentString += ", ";
+        first = false;
+        Type        argType = exprType(*arg);
+        std::string value   = genExpr(*arg);
+        if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
+            Type paramType = (*declaredParamTypes)[paramIndex];
+            value   = emitCast(value, argType, paramType);
+            argType = paramType;
+        }
+        ++paramIndex;
+        argumentString += irTypeName(argType) + " " + value;
+    }
+
+    // First arg is always the object pointer
+    std::string fullArgs = "ptr " + objPtr;
+    if (!argumentString.empty()) fullArgs += ", " + argumentString;
+
+    if (returnIrType == "void") {
+        emit("call void @" + mangledName + "(" + fullArgs + ")");
+        return "";
+    }
+
+    std::string tempName = freshTemp();
+    emit("%" + tempName + " = call " + returnIrType + " @" + mangledName + "(" + fullArgs + ")");
+    return "%" + tempName;
+}
+
 // ---- Bounds check helpers ----
 
 void CodeGen::ensureAbortDeclared() {
@@ -882,6 +1207,12 @@ Type CodeGen::exprType(const Expr& expression) const {
     auto it = typeMap->find(expression.node.get());
     if (it == typeMap->end()) return Type{TypeKind::Error};
     return it->second;
+}
+
+Type CodeGen::resolveParamType(const ParamDecl& param) const {
+    if (param.typeName.type == TokenType::IDENTIFIER && cgClasses_.count(param.typeName.lexeme))
+        return makeObjectType(param.typeName.lexeme);
+    return typeFromToken(param.typeName.type);
 }
 
 std::string CodeGen::emitCast(const std::string& value, Type from, Type to) {

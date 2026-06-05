@@ -21,8 +21,12 @@ static const Token& firstToken(const Expr& expr) {
         const Token& operator()(const PostfixExpr& postfix)            const { return firstToken(*postfix.operand); }
         const Token& operator()(const CallExpr& call)                  const { return call.callee; }
         const Token& operator()(const VarDeclExpr& varDecl)            const { return varDecl.typeName; }
-        const Token& operator()(const IndexExpr& indexExpr)         const { return indexExpr.name; }
-        const Token& operator()(const IndexAssignExpr& indexAssign)  const { return indexAssign.name; }
+        const Token& operator()(const IndexExpr& indexExpr)            const { return indexExpr.name; }
+        const Token& operator()(const IndexAssignExpr& indexAssign)    const { return indexAssign.name; }
+        const Token& operator()(const ThisExpr& thisExpr)              const { return thisExpr.keyword; }
+        const Token& operator()(const MemberAccessExpr& ma)            const { return firstToken(*ma.object); }
+        const Token& operator()(const MemberAssignExpr& ma)            const { return firstToken(*ma.object); }
+        const Token& operator()(const MethodCallExpr& mc)              const { return firstToken(*mc.object); }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -59,6 +63,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const FunctionDeclStmt&)    { return false; },
         [](const ExternFuncDeclStmt&)  { return false; },
         [](const ImportStmt&)          { return false; },
+        [](const ClassDeclStmt&)       { return false; },
     }, *stmt.node);
 }
 
@@ -72,9 +77,12 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
     hadError          = false;
     currentReturnType = std::nullopt;
     loopDepth         = 0;
+    currentClassName_ = "";
+    classRegistry_.clear();
 
     symbolTable.enterScope();   // global scope
 
+    collectClasses(program);    // pass 0: build class registry
     collectFunctions(program);  // pass 1: hoist function signatures
 
     for (const Stmt& stmt : program.declarations)
@@ -82,7 +90,40 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
 
     symbolTable.exitScope();
 
-    return SemanticResult{ hadError, std::move(typeMap) };
+    return SemanticResult{ hadError, std::move(typeMap), classRegistry_ };
+}
+
+// ============================================================
+// Pass 0 — collect class declarations into classRegistry_
+// ============================================================
+
+void SemanticAnalyzer::collectClasses(const Program& program) {
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<ClassDeclStmt>(*stmt.node)) continue;
+        const auto& cls = std::get<ClassDeclStmt>(*stmt.node);
+
+        ClassInfo info;
+        int fieldIndex = 0;
+        for (const FieldDecl& fd : cls.fields) {
+            Type fieldType = typeFromToken(fd.typeName.type);
+            info.fieldOrder.push_back(fd.name.lexeme);
+            // emplace constructs in-place, avoiding copy/move-assignment of Token
+            info.fields.emplace(fd.name.lexeme,
+                ClassInfo::Field{fd.isPublic, fieldType, fieldIndex++, fd.name});
+        }
+        for (const MethodDecl& md : cls.methods) {
+            Type returnType = md.isConstructor
+                ? Type{TypeKind::Void}
+                : resolveTypeToken(md.returnType);
+            std::vector<Type> paramTypes;
+            for (const ParamDecl& p : md.params)
+                paramTypes.push_back(resolveTypeToken(p.typeName));
+            info.methods.emplace(md.name.lexeme,
+                ClassInfo::Method{md.isPublic, md.isConstructor, returnType,
+                                  std::move(paramTypes), md.name});
+        }
+        classRegistry_.emplace(cls.name.lexeme, std::move(info));
+    }
 }
 
 // ============================================================
@@ -96,11 +137,11 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
 
             std::vector<Type> paramTypes;
             for (const ParamDecl& param : function.params)
-                paramTypes.push_back(typeFromToken(param.typeName.type));
+                paramTypes.push_back(resolveTypeToken(param.typeName));
 
             Symbol sym{
                 Symbol::Kind::Function,
-                typeFromToken(function.returnType.type),
+                resolveTypeToken(function.returnType),
                 function.name,
                 std::move(paramTypes)
             };
@@ -153,6 +194,7 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const FunctionDeclStmt& functionDecl)    { analyzeFunctionDecl(functionDecl); },
         [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },
         [&](const ImportStmt&)                       { /* resolved before semantic pass */ },
+        [&](const ClassDeclStmt& classDecl)          { analyzeClassDecl(classDecl); },
     }, *stmt.node);
 }
 
@@ -227,13 +269,13 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     // Signature is already registered in the global scope by collectFunctions.
     std::optional<Type> savedReturnType = currentReturnType;
     int                 savedLoopDepth  = loopDepth;
-    currentReturnType = typeFromToken(functionDecl.returnType.type);
+    currentReturnType = resolveTypeToken(functionDecl.returnType);
     loopDepth         = 0;  // loops in the outer scope do not extend into this function
 
     enterScope();  // function scope — parameters live here
 
     for (const ParamDecl& param : functionDecl.params) {
-        Type paramType = typeFromToken(param.typeName.type);
+        Type paramType = resolveTypeToken(param.typeName);
         if (paramType.kind == TypeKind::Void) {
             error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
             paramType = Type{TypeKind::Error};  // suppress cascading errors in the body
@@ -274,6 +316,64 @@ void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDec
     }
 }
 
+void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
+    // Registry was built in collectClasses. Here we fully analyse each method body.
+    const std::string& className = classDecl.name.lexeme;
+    const ClassInfo&   classInfo = classRegistry_.at(className);
+
+    std::string savedClassName = currentClassName_;
+    currentClassName_          = className;
+
+    for (const MethodDecl& md : classDecl.methods) {
+        std::optional<Type> savedReturnType = currentReturnType;
+        int                 savedLoopDepth  = loopDepth;
+
+        currentReturnType = md.isConstructor ? Type{TypeKind::Void}
+                                             : resolveTypeToken(md.returnType);
+        loopDepth         = 0;
+
+        enterScope();  // method scope
+
+        // Inject 'this' as a variable with type Object{className}
+        symbolTable.declare("this", Symbol{
+            Symbol::Kind::Variable,
+            makeObjectType(className),
+            classDecl.name,
+            {}
+        });
+
+        // Declare parameters
+        for (const ParamDecl& param : md.params) {
+            Type paramType = resolveTypeToken(param.typeName);
+            if (paramType.kind == TypeKind::Void) {
+                error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (!symbolTable.declare(param.name.lexeme, Symbol{
+                    Symbol::Kind::Variable, paramType, param.name, {}}))
+                error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
+        }
+
+        // Analyse body
+        for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
+
+        // Warn on missing return for non-void non-constructor methods
+        if (!md.isConstructor
+            && currentReturnType->kind != TypeKind::Void
+            && !alwaysReturns(md.body)) {
+            warn(md.name, "method '" + md.name.lexeme
+                 + "' does not always return a value");
+        }
+
+        exitScope();
+
+        currentReturnType = savedReturnType;
+        loopDepth         = savedLoopDepth;
+    }
+
+    currentClassName_ = savedClassName;
+}
+
 // ============================================================
 // Expression analysis
 // ============================================================
@@ -291,6 +391,10 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const VarDeclExpr& varDecl)               { return analyzeVarDecl(varDecl); },
         [&](const IndexExpr& indexExpr)               { return analyzeIndex(indexExpr); },
         [&](const IndexAssignExpr& indexAssign)        { return analyzeIndexAssign(indexAssign); },
+        [&](const ThisExpr& thisExpr)                 { return analyzeThis(thisExpr); },
+        [&](const MemberAccessExpr& ma)               { return analyzeMemberAccess(ma); },
+        [&](const MemberAssignExpr& ma)               { return analyzeMemberAssign(ma); },
+        [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -545,6 +649,38 @@ Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
 }
 
 Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
+    // Constructor call: callee is a class name
+    if (classRegistry_.count(call.callee.lexeme)) {
+        const ClassInfo& cls = classRegistry_.at(call.callee.lexeme);
+        auto ctorIt = cls.methods.find(call.callee.lexeme);
+        if (ctorIt == cls.methods.end()) {
+            // No explicit constructor — only allow zero-arg call
+            if (!call.args.empty()) {
+                error(call.callee, "class '" + call.callee.lexeme
+                      + "' has no constructor but was called with arguments");
+            }
+            for (const auto& arg : call.args) analyzeExpr(*arg);
+            return makeObjectType(call.callee.lexeme);
+        }
+        const ClassInfo::Method& ctor = ctorIt->second;
+        if (call.args.size() != ctor.paramTypes.size()) {
+            error(call.callee, "constructor '" + call.callee.lexeme + "' expects "
+                  + std::to_string(ctor.paramTypes.size()) + " argument(s), got "
+                  + std::to_string(call.args.size()));
+            for (const auto& arg : call.args) analyzeExpr(*arg);
+            return makeObjectType(call.callee.lexeme);
+        }
+        size_t argIndex = 0;
+        for (const auto& arg : call.args) {
+            Type argumentType = analyzeExpr(*arg);
+            checkCast(argumentType, ctor.paramTypes[argIndex], call.callee,
+                      "argument " + std::to_string(argIndex + 1)
+                      + " of constructor '" + call.callee.lexeme + "'");
+            ++argIndex;
+        }
+        return makeObjectType(call.callee.lexeme);
+    }
+
     const Symbol* sym = symbolTable.lookup(call.callee.lexeme);
     if (!sym) {
         error(call.callee, "undeclared function '" + call.callee.lexeme + "'");
@@ -580,7 +716,14 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
 }
 
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
-    Type elementType  = typeFromToken(varDecl.typeName.type);
+    Type elementType;
+    // If the type token is an IDENTIFIER that names a class, resolve to Object type
+    if (varDecl.typeName.type == TokenType::IDENTIFIER
+        && classRegistry_.count(varDecl.typeName.lexeme)) {
+        elementType = makeObjectType(varDecl.typeName.lexeme);
+    } else {
+        elementType = typeFromToken(varDecl.typeName.type);
+    }
     Type declaredType = varDecl.arraySize > 0
         ? makeArrayType(elementType.kind, varDecl.arraySize)
         : elementType;
@@ -705,6 +848,148 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
 }
 
 // ============================================================
+// Class expression analysis
+// ============================================================
+
+Type SemanticAnalyzer::analyzeThis(const ThisExpr& thisExpr) {
+    if (currentClassName_.empty()) {
+        error(thisExpr.keyword, "'this' used outside of a class method");
+        return Type{TypeKind::Error};
+    }
+    return makeObjectType(currentClassName_);
+}
+
+Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess) {
+    Type objectType = analyzeExpr(*memberAccess.object);
+    if (isError(objectType)) return Type{TypeKind::Error};
+
+    if (objectType.kind != TypeKind::Object) {
+        error(memberAccess.field,
+              "member access on non-class type '" + typeName(objectType) + "'");
+        return Type{TypeKind::Error};
+    }
+
+    auto classIt = classRegistry_.find(objectType.className);
+    if (classIt == classRegistry_.end()) {
+        error(memberAccess.field, "unknown class '" + objectType.className + "'");
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo& cls = classIt->second;
+    auto fieldIt = cls.fields.find(memberAccess.field.lexeme);
+    if (fieldIt == cls.fields.end()) {
+        error(memberAccess.field, "class '" + objectType.className
+              + "' has no field '" + memberAccess.field.lexeme + "'");
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo::Field& field = fieldIt->second;
+    // Access control: private fields only accessible from within the same class
+    if (!field.isPublic && currentClassName_ != objectType.className) {
+        error(memberAccess.field, "field '" + memberAccess.field.lexeme
+              + "' is private in class '" + objectType.className + "'");
+    }
+
+    return field.type;
+}
+
+Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign) {
+    Type objectType = analyzeExpr(*memberAssign.object);
+    if (isError(objectType)) {
+        analyzeExpr(*memberAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    if (objectType.kind != TypeKind::Object) {
+        error(memberAssign.field,
+              "member access on non-class type '" + typeName(objectType) + "'");
+        analyzeExpr(*memberAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    auto classIt = classRegistry_.find(objectType.className);
+    if (classIt == classRegistry_.end()) {
+        error(memberAssign.field, "unknown class '" + objectType.className + "'");
+        analyzeExpr(*memberAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo& cls = classIt->second;
+    auto fieldIt = cls.fields.find(memberAssign.field.lexeme);
+    if (fieldIt == cls.fields.end()) {
+        error(memberAssign.field, "class '" + objectType.className
+              + "' has no field '" + memberAssign.field.lexeme + "'");
+        analyzeExpr(*memberAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo::Field& field = fieldIt->second;
+    if (!field.isPublic && currentClassName_ != objectType.className) {
+        error(memberAssign.field, "field '" + memberAssign.field.lexeme
+              + "' is private in class '" + objectType.className + "'");
+    }
+
+    Type valueType = analyzeExpr(*memberAssign.value);
+    checkCast(valueType, field.type, memberAssign.field, "field assignment");
+    return field.type;
+}
+
+Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
+    Type objectType = analyzeExpr(*methodCall.object);
+    if (isError(objectType)) {
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    if (objectType.kind != TypeKind::Object) {
+        error(methodCall.method,
+              "method call on non-class type '" + typeName(objectType) + "'");
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    auto classIt = classRegistry_.find(objectType.className);
+    if (classIt == classRegistry_.end()) {
+        error(methodCall.method, "unknown class '" + objectType.className + "'");
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo& cls = classIt->second;
+    auto methodIt = cls.methods.find(methodCall.method.lexeme);
+    if (methodIt == cls.methods.end()) {
+        error(methodCall.method, "class '" + objectType.className
+              + "' has no method '" + methodCall.method.lexeme + "'");
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo::Method& method = methodIt->second;
+    if (!method.isPublic && currentClassName_ != objectType.className) {
+        error(methodCall.method, "method '" + methodCall.method.lexeme
+              + "' is private in class '" + objectType.className + "'");
+    }
+
+    if (methodCall.args.size() != method.paramTypes.size()) {
+        error(methodCall.method, "method '" + methodCall.method.lexeme + "' expects "
+              + std::to_string(method.paramTypes.size()) + " argument(s), got "
+              + std::to_string(methodCall.args.size()));
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return method.returnType;
+    }
+
+    size_t argIndex = 0;
+    for (const auto& arg : methodCall.args) {
+        Type argumentType = analyzeExpr(*arg);
+        checkCast(argumentType, method.paramTypes[argIndex], methodCall.method,
+                  "argument " + std::to_string(argIndex + 1)
+                  + " of method '" + methodCall.method.lexeme + "'");
+        ++argIndex;
+    }
+    return method.returnType;
+}
+
+// ============================================================
 // Helpers
 // ============================================================
 
@@ -734,6 +1019,12 @@ void SemanticAnalyzer::error(const Token& token, const std::string& message) {
 
 void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
     std::cerr << "[line " << token.line << "] Warning: " << message << '\n';
+}
+
+Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
+    if (typeToken.type == TokenType::IDENTIFIER && classRegistry_.count(typeToken.lexeme))
+        return makeObjectType(typeToken.lexeme);
+    return typeFromToken(typeToken.type);
 }
 
 void SemanticAnalyzer::recordType(const Expr& expr, Type type) {

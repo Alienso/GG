@@ -276,8 +276,8 @@ Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
 
 Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     // Constructor call: callee is a class name
-    if (classRegistry_.count(call.callee.lexeme)) {
-        const ClassInfo& cls = classRegistry_.at(call.callee.lexeme);
+    if (classRegistry.count(call.callee.lexeme)) {
+        const ClassInfo& cls = classRegistry.at(call.callee.lexeme);
         auto ctorIt = cls.methods.find(call.callee.lexeme);
         if (ctorIt == cls.methods.end()) {
             // No explicit constructor — only allow zero-arg call
@@ -332,7 +332,7 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     Type elementType;
     // If the type token is an IDENTIFIER that names a class, resolve to Object type
     if (varDecl.typeName.type == TokenType::IDENTIFIER
-        && classRegistry_.count(varDecl.typeName.lexeme)) {
+        && classRegistry.count(varDecl.typeName.lexeme)) {
         elementType = makeObjectType(varDecl.typeName.lexeme);
     } else {
         elementType = typeFromToken(varDecl.typeName.type);
@@ -441,11 +441,11 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
 // ============================================================
 
 Type SemanticAnalyzer::analyzeThis(const ThisExpr& thisExpr) {
-    if (currentClassName_.empty()) {
+    if (currentClassName.empty()) {
         error(thisExpr.keyword, "'this' used outside of a class method");
         return Type{TypeKind::Error};
     }
-    return makeObjectType(currentClassName_);
+    return makeObjectType(currentClassName);
 }
 
 Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess) {
@@ -464,7 +464,7 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
 
     const ClassInfo::Field& field = fieldIt->second;
     // Access control: private fields only accessible from within the same class
-    if (!field.isPublic && currentClassName_ != objectType.className) {
+    if (!field.isPublic && currentClassName != objectType.className) {
         error(memberAccess.field, "field '" + memberAccess.field.lexeme
               + "' is private in class '" + objectType.className + "'");
     }
@@ -494,7 +494,7 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
     }
 
     const ClassInfo::Field& field = fieldIt->second;
-    if (!field.isPublic && currentClassName_ != objectType.className) {
+    if (!field.isPublic && currentClassName != objectType.className) {
         error(memberAssign.field, "field '" + memberAssign.field.lexeme
               + "' is private in class '" + objectType.className + "'");
     }
@@ -526,7 +526,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     }
 
     const ClassInfo::Method& method = methodIt->second;
-    if (!method.isPublic && currentClassName_ != objectType.className) {
+    if (!method.isPublic && currentClassName != objectType.className) {
         error(methodCall.method, "method '" + methodCall.method.lexeme
               + "' is private in class '" + objectType.className + "'");
     }

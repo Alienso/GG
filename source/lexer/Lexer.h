@@ -8,6 +8,7 @@
 #include <fstream>
 #include <vector>
 #include "Token.h"
+#include "../CompileError.h"
 
 class Lexer {
 public:
@@ -19,9 +20,10 @@ public:
 
 private:
     std::vector<std::ifstream>       inputFiles;
+    std::vector<std::string>         filenames;
     std::vector<std::vector<Token>>  tokensForFiles;
 
-    static void processFile(std::ifstream &file, std::vector<Token>& tokens);
+    static void processFile(std::ifstream& file, std::vector<Token>& tokens, const std::string& filename);
 };
 
 

@@ -12,6 +12,7 @@
 #include "SymbolTable.h"
 #include "Type.h"
 #include "../parser/Ast.h"
+#include "../CompileError.h"
 
 // Maps each Expr variant pointer to its resolved Type.
 // Key = expr.node.get() — stable because the AST is never mutated during analysis.
@@ -46,16 +47,17 @@ struct SemanticResult {
 
 class SemanticAnalyzer {
 public:
-    SemanticResult analyze(const Program& program);  // resets all state per call
+    SemanticResult analyze(const Program& program, const std::string& filename = "");  // resets all state per call
 
 private:
     SymbolTable         symbolTable;
     ExprTypeMap         typeMap;
     bool                hadError          = false;
+    std::string         filename;                // source filename for error messages
     std::optional<Type> currentReturnType; // nullopt = top-level (not inside a function)
     int                 loopDepth         = 0;  // > 0 while inside a while/for loop
-    std::string         currentClassName_;       // set while analysing a class body
-    std::unordered_map<std::string, ClassInfo> classRegistry_;
+    std::string         currentClassName;       // set while analysing a class body
+    std::unordered_map<std::string, ClassInfo> classRegistry;
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);

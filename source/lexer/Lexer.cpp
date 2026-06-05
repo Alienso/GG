@@ -9,26 +9,27 @@
 Lexer::Lexer(std::vector<std::string> &paths){
 
     inputFiles.reserve(paths.size());
+    filenames.reserve(paths.size());
     tokensForFiles.resize(paths.size());
 
     for (const auto& path : paths){
+        filenames.push_back(path);
         inputFiles.emplace_back(path);
 
         std::ifstream& newFile = inputFiles[inputFiles.size() - 1];
         if (!newFile.is_open()) {
-            std::cout << "Could not open file: " << path << '\n';
-            exit(1);
+            throw CompileError("error: cannot open file: " + path);
         }
     }
 }
 
 void Lexer::lex() {
     for (size_t i = 0; i < inputFiles.size(); i++) {
-        processFile(inputFiles[i], tokensForFiles[i]);
+        processFile(inputFiles[i], tokensForFiles[i], filenames[i]);
     }
 }
 
-void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens) {
+void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const std::string& filename) {
 
     tokens.reserve(1024);
 
@@ -144,8 +145,7 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens) {
                         advance();
                     }
                     if (!terminated) {
-                        std::cerr << "Unterminated block comment starting at line " << commentLine << '\n';
-                        exit(1);
+                        throw CompileError(filename + ":" + std::to_string(commentLine) + ": error: unterminated block comment");
                     }
                 } else if (match('=')) {
                     tokens.emplace_back(TokenType::SLASH_EQUAL, "/=", line);
@@ -161,8 +161,7 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens) {
                     advance();
                 }
                 if (current >= length) {
-                    std::cerr << "Unterminated string literal at line " << line << '\n';
-                    exit(1);
+                    throw CompileError(filename + ":" + std::to_string(line) + ": error: unterminated string literal");
                 }
                 advance(); // closing "
                 tokens.emplace_back(TokenType::STRING,
@@ -173,15 +172,12 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens) {
             // --- char literals ---
             case '\'': {
                 if (peek() == '\'') {
-                    std::cerr << "Empty char literal at line " << line << '\n';
-                    advance();
-                    break;
+                    throw CompileError(filename + ":" + std::to_string(line) + ": error: empty char literal");
                 }
                 char ch = advance();
                 if (ch == '\\') advance(); // escape sequence (e.g. '\n')
                 if (peek() != '\'') {
-                    std::cerr << "Unterminated or multi-character char literal at line " << line << '\n';
-                    exit(1);
+                    throw CompileError(filename + ":" + std::to_string(line) + ": error: unterminated or multi-character char literal");
                 }
                 advance(); // closing '
                 tokens.emplace_back(TokenType::CHAR,
@@ -208,7 +204,7 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens) {
                     TokenType type = lookupKeyword(text);
                     tokens.emplace_back(type, text, line);
                 } else {
-                    std::cerr << "Unexpected character '" << c << "' at line " << line << '\n';
+                    throw CompileError(filename + ":" + std::to_string(line) + ": error: unexpected character '" + c + "'");
                 }
                 break;
         }

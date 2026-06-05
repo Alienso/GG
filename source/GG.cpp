@@ -3,6 +3,7 @@
 //
 
 #include "GG.h"
+#include "CompileError.h"
 #include "parser/AstPrinter.h"
 
 #include <filesystem>
@@ -23,28 +24,31 @@ void GG::run() {
     }
 
     for (const std::string& filePath : paths) {
-        const std::string stem    = fs::path(filePath).stem().string();
-        const fs::path    astPath = buildDir / (stem + ".ast");
-        const fs::path    irPath  = buildDir / (stem + ".ll");
+        try {
+            const std::string stem    = fs::path(filePath).stem().string();
+            const fs::path    astPath = buildDir / (stem + ".ast");
+            const fs::path    irPath  = buildDir / (stem + ".ll");
 
-        std::ofstream astFile(astPath);
-        std::ofstream irFile(irPath);
+            std::ofstream astFile(astPath);
+            std::ofstream irFile(irPath);
 
-        if (!astFile) { std::cerr << "Error: cannot open " << astPath << " for writing\n"; continue; }
-        if (!irFile)  { std::cerr << "Error: cannot open " << irPath  << " for writing\n"; continue; }
+            if (!astFile) { std::cerr << "Error: cannot open " << astPath << " for writing\n"; continue; }
+            if (!irFile)  { std::cerr << "Error: cannot open " << irPath  << " for writing\n"; continue; }
 
-        // Resolve all imports and produce a single flat program.
-        ImportResolver resolver;
-        Program ast = resolver.resolve(filePath);
+            // Resolve all imports and produce a single flat program.
+            ImportResolver resolver;
+            Program ast = resolver.resolve(filePath);
 
-        AstPrinter astPrinter;
-        astPrinter.print(ast, astFile);
+            AstPrinter astPrinter;
+            astPrinter.print(ast, astFile);
 
-        SemanticResult result = semanticAnalyzer.analyze(ast);
-        if (!result.hadError) {
+            SemanticResult result = semanticAnalyzer.analyze(ast, filePath);
             IRModule ir = codeGenerator.generate(ast, result, options);
             IRPrinter irPrinter;
             irPrinter.print(ir, irFile);
+        } catch (const CompileError& e) {
+            std::cerr << e.what() << '\n';
+            return;
         }
     }
 }

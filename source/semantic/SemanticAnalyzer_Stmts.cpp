@@ -205,8 +205,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     // Registry was built in collectClasses. Here we fully analyse each method body.
     const std::string& className = classDecl.name.lexeme;
 
-    std::string savedClassName = currentClassName_;
-    currentClassName_          = className;
+    std::string savedClassName = currentClassName;
+    currentClassName          = className;
 
     for (const MethodDecl& md : classDecl.methods) {
         std::optional<Type> savedReturnType = currentReturnType;
@@ -256,5 +256,5 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         loopDepth         = savedLoopDepth;
     }
 
-    currentClassName_ = savedClassName;
+    currentClassName = savedClassName;
 }

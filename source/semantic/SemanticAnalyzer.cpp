@@ -9,14 +9,15 @@
 // Public entry point
 // ============================================================
 
-SemanticResult SemanticAnalyzer::analyze(const Program& program) {
+SemanticResult SemanticAnalyzer::analyze(const Program& program, const std::string& filenameParam) {
     symbolTable       = SymbolTable{};
     typeMap.clear();
     hadError          = false;
+    filename          = filenameParam;
     currentReturnType = std::nullopt;
     loopDepth         = 0;
-    currentClassName_ = "";
-    classRegistry_.clear();
+    currentClassName = "";
+    classRegistry.clear();
 
     symbolTable.enterScope();   // global scope
 
@@ -28,7 +29,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program) {
 
     symbolTable.exitScope();
 
-    return SemanticResult{ hadError, std::move(typeMap), classRegistry_ };
+    return SemanticResult{hadError, std::move(typeMap), classRegistry };
 }
 
 // ============================================================
@@ -76,7 +77,7 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
             info.methods.emplace(md.name.lexeme,
                 ClassInfo::Method{md.isPublic, returnType, std::move(paramTypes), md.name});
         }
-        classRegistry_.emplace(cls.name.lexeme, std::move(info));
+        classRegistry.emplace(cls.name.lexeme, std::move(info));
     }
 }
 
@@ -155,16 +156,18 @@ const Symbol* SemanticAnalyzer::lookupSymbol(const Token& nameToken) {
 }
 
 void SemanticAnalyzer::error(const Token& token, const std::string& message) {
-    hadError = true;
-    std::cerr << "[line " << token.line << "] Error: " << message << '\n';
+    std::string prefix = filename.empty() ? "" : filename + ":";
+    std::string formatted = prefix + std::to_string(token.line) + ": error: " + message;
+    throw CompileError(formatted);
 }
 
 void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
-    std::cerr << "[line " << token.line << "] Warning: " << message << '\n';
+    std::string prefix = filename.empty() ? "" : filename + ":";
+    std::cerr << prefix << token.line << ": Warning: " << message << '\n';
 }
 
 Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
-    if (typeToken.type == TokenType::IDENTIFIER && classRegistry_.count(typeToken.lexeme))
+    if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
     return typeFromToken(typeToken.type);
 }
@@ -192,8 +195,8 @@ const ClassInfo* SemanticAnalyzer::lookupObjectClass(Type objectType, const Toke
         error(site, "member access on non-class type '" + typeName(objectType) + "'");
         return nullptr;
     }
-    auto it = classRegistry_.find(objectType.className);
-    if (it == classRegistry_.end()) {
+    auto it = classRegistry.find(objectType.className);
+    if (it == classRegistry.end()) {
         error(site, "unknown class '" + objectType.className + "'");
         return nullptr;
     }
@@ -221,10 +224,13 @@ void SemanticAnalyzer::checkConstantIndexBounds(
     const auto& lit = std::get<LiteralExpr>(*indexExpr.node);
     if (lit.token.type != TokenType::NUMBER) return;
     if (lit.token.lexeme.find('.') != std::string::npos) return;
+    long long idx = 0;
     try {
-        long long idx = std::stoll(lit.token.lexeme);
-        if (idx < 0 || static_cast<size_t>(idx) >= arraySize)
-            error(lit.token, "array index " + lit.token.lexeme
-                  + " is out of bounds for array of size " + std::to_string(arraySize));
-    } catch (...) {}
+        idx = std::stoll(lit.token.lexeme);
+    } catch (const std::exception&) {
+        return;  // non-integer or overflow — skip bounds check
+    }
+    if (idx < 0 || static_cast<size_t>(idx) >= arraySize)
+        error(lit.token, "array index " + lit.token.lexeme
+              + " is out of bounds for array of size " + std::to_string(arraySize));
 }

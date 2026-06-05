@@ -13,6 +13,7 @@
 #include "../source/codegen/CodeGen.h"
 #include "../source/codegen/IRPrinter.h"
 #include "../source/CompilerOptions.h"
+#include "../source/CompileError.h"
 
 #include <filesystem>
 #include <fstream>
@@ -59,33 +60,51 @@ inline std::vector<Token> lexString(const std::string& source) {
 
 // Lex + parse a source string WITHOUT resolving imports.
 // Use this when testing the import syntax itself (ImportStmt nodes are preserved).
+// If a parse/lex error occurs (CompileError), prints the error to stderr and returns an empty Program.
 inline Program parseStringRaw(const std::string& source) {
     std::string path = detail::writeTempSource(source);
     std::vector<std::string> paths{ path };
     Lexer lexer(paths);
     lexer.lex();
     Parser parser;
-    return parser.parse(lexer.tokens()[0]);
+    try {
+        return parser.parse(lexer.tokens()[0]);
+    } catch (const CompileError& e) {
+        std::cerr << e.what() << '\n';
+        return Program{};
+    }
 }
 
 // Lex + parse + resolve imports for a source string and return the Program AST.
+// If a parse/lex error occurs (CompileError), prints the error to stderr and returns an empty Program.
 inline Program parseString(const std::string& source) {
     std::string path = detail::writeTempSource(source);
     ImportResolver resolver;
-    return resolver.resolve(path);
+    try {
+        return resolver.resolve(path);
+    } catch (const CompileError& e) {
+        std::cerr << e.what() << '\n';
+        return Program{};
+    }
 }
 
 // Lex + parse + analyse a source string and return the SemanticResult.
 inline SemanticResult analyzeString(const std::string& source) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
-    return analyzer.analyze(ast);
+    try {
+        return analyzer.analyze(ast);
+    } catch (const CompileError& e) {
+        std::cerr << e.what() << '\n';
+        return SemanticResult{true, {}, {}};
+    }
 }
 
 // Lex + parse + analyse + codegen a source string and return the IR text.
 inline std::string codegenString(const std::string& source, CompilerOptions options = {}) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
+    // Let CompileError propagate — a semantic error in codegenString is a test failure
     SemanticResult semanticResult = analyzer.analyze(ast);
     CodeGen codeGenerator;
     IRModule ir = codeGenerator.generate(ast, semanticResult, options);

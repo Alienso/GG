@@ -7,15 +7,16 @@
 
 #include "Ast.h"
 #include "../lexer/Token.h"
+#include "../CompileError.h"
 
 #include <vector>
 #include <stdexcept>
 #include <initializer_list>
 #include <unordered_set>
 
-class ParseError : public std::runtime_error {
+class ParseError : public CompileError {
 public:
-    explicit ParseError(const std::string& msg) : std::runtime_error(msg) {}
+    explicit ParseError(const std::string& msg) : CompileError(msg) {}
 };
 
 class Parser {
@@ -25,13 +26,14 @@ public:
     // calls (e.g. "String s(...)") are recognised as VarDecl, not misidentified
     // as a function declaration or expression.
     explicit Parser(std::unordered_set<std::string> initialClassNames);
-    [[nodiscard]] Program parse(const std::vector<Token>& inputTokens);
+    [[nodiscard]] Program parse(const std::vector<Token>& inputTokens, const std::string& filename = "");
 
 private:
     std::vector<Token>             tokens;
     size_t                         current = 0;
-    std::unordered_set<std::string> classNames_;   // class names registered during parse
-    bool                           insideFunction_ = false;  // true when parsing a function/method body
+    std::string                    filename;               // source filename for error messages
+    std::unordered_set<std::string> classNames;   // class names registered during parse
+    bool                           insideFunction = false;  // true when parsing a function/method body
 
     // ---- Token stream navigation ----
     [[nodiscard]] const Token& peek() const;

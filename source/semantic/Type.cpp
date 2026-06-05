@@ -76,14 +76,18 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     // float → any integer (warn — floor/truncate toward −∞)
     if (isFloat(f) && isInteger(t))          return CastResult::Warn;
 
-    // Signed integer widening: i8 → i16 → i32 → i64
+    // Signed integer widening: i8 → i16 → i32 → i64 (silent)
+    // Signed integer narrowing: i32 → i8 etc. (warn — may lose data)
     if (isSignedInt(f) && isSignedInt(t)) {
-        if (bitWidth(t) > bitWidth(f))       return CastResult::Silent;
+        if (bitWidth(t) > bitWidth(f))  return CastResult::Silent;
+        if (bitWidth(t) < bitWidth(f))  return CastResult::Warn;
     }
 
-    // Unsigned integer widening: u8 → u16 → u32 → u64
+    // Unsigned integer widening: u8 → u16 → u32 → u64 (silent)
+    // Unsigned integer narrowing: u32 → u8 etc. (warn — may lose data)
     if (isUnsignedInt(f) && isUnsignedInt(t)) {
-        if (bitWidth(t) > bitWidth(f))       return CastResult::Silent;
+        if (bitWidth(t) > bitWidth(f))  return CastResult::Silent;
+        if (bitWidth(t) < bitWidth(f))  return CastResult::Warn;
     }
 
     // Signed → unsigned (warn — value may be negative at runtime)

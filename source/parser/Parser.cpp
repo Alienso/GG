@@ -6,25 +6,22 @@
 #include <iostream>
 
 Parser::Parser(std::unordered_set<std::string> initialClassNames)
-    : classNames_(std::move(initialClassNames)) {}
+    : classNames(std::move(initialClassNames)) {}
 
-Program Parser::parse(const std::vector<Token>& inputTokens) {
-    tokens  = std::vector<Token>(inputTokens);
-    current = 0;
+Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& filenameStr) {
+    tokens   = std::vector<Token>(inputTokens);
+    current  = 0;
+    filename = filenameStr;
     // Do NOT clear classNames_ here — pre-registered names from imports must survive.
     // Pre-pass: also register class names defined in THIS file's token stream.
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
         if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER)
-            classNames_.insert(tokens[i + 1].lexeme);
+            classNames.insert(tokens[i + 1].lexeme);
     }
 
     Program program;
     while (!isAtEnd()) {
-        try {
-            program.declarations.push_back(parseDeclaration());
-        } catch (const ParseError&) {
-            synchronize();
-        }
+        program.declarations.push_back(parseDeclaration());
     }
     return program;
 }
@@ -76,8 +73,10 @@ const Token& Parser::consume(TokenType type, const std::string& msg) {
 // ============================================================
 
 ParseError Parser::error(const Token& token, const std::string& msg) {
-    std::cerr << "[line " << token.line << "] Error: " << msg << '\n';
-    return ParseError("[line " + std::to_string(token.line) + "] Error: " + msg);
+    std::string prefix = filename.empty() ? "" : filename + ":";
+    std::string formatted = prefix + std::to_string(token.line) + ": error: " + msg;
+    std::cerr << formatted << '\n';
+    return ParseError(formatted);
 }
 
 void Parser::synchronize() {
@@ -137,7 +136,7 @@ bool Parser::isTypeName() const {
         case TokenType::PTR:
             return true;
         case TokenType::IDENTIFIER:
-            return classNames_.count(peek().lexeme) > 0;
+            return classNames.count(peek().lexeme) > 0;
         default:
             return false;
     }
@@ -172,9 +171,9 @@ Stmt Parser::parseDeclaration() {
         && peekNext().type == TokenType::IDENTIFIER
         && current + 2 < tokens.size()
         && tokens[current + 2].type == TokenType::LEFT_PAREN
-        && !(insideFunction_
+        && !(insideFunction
              && peek().type == TokenType::IDENTIFIER
-             && classNames_.count(peek().lexeme))) {
+             && classNames.count(peek().lexeme))) {
         Token returnType = advance();
         Token name       = advance();
         return parseFunctionDecl(returnType, name);
@@ -225,10 +224,10 @@ Stmt Parser::parseFunctionDecl(const Token& returnType, const Token& name) {
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
     consume(TokenType::LEFT_BRACE,  "expected '{' before function body");
 
-    bool savedInsideFunction = insideFunction_;
-    insideFunction_ = true;
+    bool savedInsideFunction = insideFunction;
+    insideFunction = true;
     BlockStmt body = parseBlockBody();
-    insideFunction_ = savedInsideFunction;
+    insideFunction = savedInsideFunction;
     return makeStmt(FunctionDeclStmt{ returnType, name, std::move(params), std::move(body) });
 }
 
@@ -263,10 +262,10 @@ Stmt Parser::parseClassDecl() {
             consume(TokenType::LEFT_PAREN,  "expected '(' after destructor name");
             consume(TokenType::RIGHT_PAREN, "expected ')' — destructor takes no parameters");
             consume(TokenType::LEFT_BRACE,  "expected '{' before destructor body");
-            bool savedDtor = insideFunction_;
-            insideFunction_ = true;
+            bool savedDtor = insideFunction;
+            insideFunction = true;
             BlockStmt dtorBody = parseBlockBody();
-            insideFunction_ = savedDtor;
+            insideFunction = savedDtor;
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/true,
@@ -292,10 +291,10 @@ Stmt Parser::parseClassDecl() {
             }
             consume(TokenType::RIGHT_PAREN, "expected ')' after constructor parameters");
             consume(TokenType::LEFT_BRACE,  "expected '{' before constructor body");
-            bool savedIF1 = insideFunction_;
-            insideFunction_ = true;
+            bool savedIF1 = insideFunction;
+            insideFunction = true;
             BlockStmt body = parseBlockBody();
-            insideFunction_ = savedIF1;
+            insideFunction = savedIF1;
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/true, /*isDestructor=*/false,
@@ -325,10 +324,10 @@ Stmt Parser::parseClassDecl() {
             }
             consume(TokenType::RIGHT_PAREN, "expected ')' after method parameters");
             consume(TokenType::LEFT_BRACE,  "expected '{' before method body");
-            bool savedIF2 = insideFunction_;
-            insideFunction_ = true;
+            bool savedIF2 = insideFunction;
+            insideFunction = true;
             BlockStmt body = parseBlockBody();
-            insideFunction_ = savedIF2;
+            insideFunction = savedIF2;
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/false,
@@ -361,11 +360,7 @@ BlockStmt Parser::parseBlockBody() {
     // Called after '{' has already been consumed.
     std::vector<std::unique_ptr<Stmt>> body;
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
-        try {
-            body.push_back(std::make_unique<Stmt>(parseDeclaration()));
-        } catch (const ParseError&) {
-            synchronize();
-        }
+        body.push_back(std::make_unique<Stmt>(parseDeclaration()));
     }
     consume(TokenType::RIGHT_BRACE, "expected '}'");
     return BlockStmt{ std::move(body) };
@@ -485,7 +480,7 @@ Expr Parser::parseExpression() {
         if (match({ TokenType::EQUAL })) {
             initializer = box(parseExpression());
         } else if (check(TokenType::LEFT_PAREN)
-                   && classNames_.count(typeName.lexeme) > 0) {
+                   && classNames.count(typeName.lexeme) > 0) {
             // Constructor call syntax: ClassName varName(args)
             advance();  // consume '('
             std::vector<std::unique_ptr<Expr>> args;

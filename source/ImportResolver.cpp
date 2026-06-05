@@ -94,7 +94,7 @@ Program ImportResolver::processFile(const std::string& filePath) {
     Lexer lexer(paths);
     lexer.lex();
     Parser parser(std::move(allClassNames));
-    Program rawProgram = parser.parse(lexer.tokens()[0]);
+    Program rawProgram = parser.parse(lexer.tokens()[0], canonicalString);
 
     fs::path parentDirectory = canonical.parent_path();
     Program result;

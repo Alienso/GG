@@ -56,7 +56,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     for (const auto& p : function.params) {
         if (!first) paramStr += ", ";
         first = false;
-        paramStr += irTypeName(resolveParamType(p)) + " %" + p.name.lexeme;
+        paramStr += paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
     }
 
     IRFunction irFunc;
@@ -92,7 +92,7 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
 
     std::string paramStr = "ptr %self";
     for (const auto& p : method.params) {
-        paramStr += ", " + irTypeName(resolveParamType(p)) + " %" + p.name.lexeme;
+        paramStr += ", " + paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
     }
 
     IRFunction irFunc;
@@ -115,14 +115,28 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
 
 void CodeGen::spillParamsToAllocas(const std::vector<ParamDecl>& params) {
     for (const auto& param : params) {
-        Type        paramType = resolveParamType(param);
-        std::string irType    = irTypeName(paramType);
-        std::string ptrName   = freshAllocaName(param.name.lexeme);
+        Type paramType = resolveParamType(param);
+
+        // Objects are passed by reference: the incoming `ptr %name` already points
+        // at the caller's object. Bind the name directly to that pointer — no copy,
+        // so field mutations propagate back to the caller (Java-style references).
+        if (paramType.kind == TypeKind::Object) {
+            allocaMap[param.name.lexeme]  = "%" + param.name.lexeme;
+            varTypeMap[param.name.lexeme] = paramType;
+            continue;
+        }
+
+        std::string irType  = irTypeName(paramType);
+        std::string ptrName = freshAllocaName(param.name.lexeme);
         emitAlloca(ptrName, irType);
         allocaMap[param.name.lexeme]  = ptrName;
         varTypeMap[param.name.lexeme] = paramType;
         emitStore(irType, "%" + param.name.lexeme, ptrName);
     }
+}
+
+std::string CodeGen::paramIrType(const Type& type) {
+    return type.kind == TypeKind::Object ? "ptr" : irTypeName(type);
 }
 
 void CodeGen::emitFunctionBody(const BlockStmt& body, const std::string& returnIrType) {

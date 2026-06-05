@@ -152,6 +152,10 @@ private:
     // Resolve a ParamDecl type token — handles IDENTIFIER tokens naming a class.
     Type        resolveParamType(const ParamDecl& param) const;
 
+    // IR type used to pass `type` as a function argument / parameter.
+    // Objects are passed by reference (ptr); all other types by value.
+    static std::string paramIrType(const Type& type);
+
     // Look up the resolved type for an expression via the side-table.
     // Returns TypeKind::Error if not found (should not happen after semantic pass).
     Type        exprType(const Expr& expression) const;

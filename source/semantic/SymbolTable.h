@@ -18,6 +18,7 @@ struct Symbol {
     Type              type;              // variable: declared type; function: return type
     Token             declarationToken; // for "previously declared at line N" messages
     std::vector<Type> paramTypes;       // non-empty for Function symbols only
+    bool              isParameter = false; // true for function/method parameters (object params are immutable references)
 };
 
 class SymbolTable {

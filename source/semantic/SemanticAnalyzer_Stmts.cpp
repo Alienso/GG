@@ -170,7 +170,8 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
             Symbol::Kind::Variable,
             paramType,
             param.name,
-            {}
+            {},
+            /*isParameter=*/true
         };
         if (!symbolTable.declare(param.name.lexeme, sym))
             error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
@@ -236,7 +237,7 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
                 paramType = Type{TypeKind::Error};
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
-                    Symbol::Kind::Variable, paramType, param.name, {}}))
+                    Symbol::Kind::Variable, paramType, param.name, {}, /*isParameter=*/true}))
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 

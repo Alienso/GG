@@ -36,7 +36,8 @@ std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& ar
         }
         ++paramIndex;
 
-        argumentString += irTypeName(argType) + " " + value;
+        // Objects pass by reference: `value` is already the object's address.
+        argumentString += paramIrType(argType) + " " + value;
     }
     return argumentString;
 }

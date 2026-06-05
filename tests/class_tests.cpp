@@ -482,3 +482,99 @@ TEST_CASE("Destructor - parser: destructor with params produces no destructor in
     }
     REQUIRE_FALSE(dtorWithParamsFound);
 }
+
+// ============================================================
+// Pass-by-reference for objects (basic types stay by value)
+// ============================================================
+
+TEST_CASE("PassByRef - object parameter lowers to ptr in signature", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { public f32 x; public f32 y; }
+        void use(Point p) { p.x = 1.0; }
+    )");
+    REQUIRE(ir.find("define void @use(ptr %p)") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - object parameter is not copied into a local alloca", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { public f32 x; public f32 y; }
+        void use(Point p) { p.x = 1.0; }
+    )");
+    // The @use body must NOT allocate or copy a %Point for the parameter.
+    auto usePos = ir.find("define void @use(ptr %p)");
+    REQUIRE(usePos != std::string::npos);
+    auto useBody = ir.substr(usePos);
+    auto nextDef = useBody.find("\ndefine ", 1);
+    if (nextDef != std::string::npos) useBody = useBody.substr(0, nextDef);
+    REQUIRE(useBody.find("alloca %Point") == std::string::npos);
+    REQUIRE(useBody.find("store %Point %p") == std::string::npos);
+    // Field write GEPs straight into the incoming pointer %p.
+    REQUIRE(useBody.find("getelementptr %Point, ptr %p") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - basic-type parameter is still passed by value", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        void use(i32 n) { n = n + 1; }
+    )");
+    REQUIRE(ir.find("define void @use(i32 %n)") != std::string::npos);
+    // Value params are spilled to an alloca so they remain locally mutable.
+    REQUIRE(ir.find("%n.addr = alloca i32")    != std::string::npos);
+    REQUIRE(ir.find("store i32 %n, ptr %n.addr") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - mixed object + basic params", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { public f32 x; public f32 y; }
+        void use(Point p, i32 n) { }
+    )");
+    REQUIRE(ir.find("define void @use(ptr %p, i32 %n)") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - call site passes the object's address", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { public f32 x; public f32 y; public Point(f32 a, f32 b) { this.x = a; this.y = b; } }
+        void use(Point p) { }
+        void main() {
+            Point p(1.0, 2.0);
+            use(p);
+        }
+    )");
+    REQUIRE(ir.find("call void @use(ptr %p.addr)") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - method taking an object parameter lowers to ptr", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { public f32 x; public f32 y; }
+        class Line {
+            public f32 len;
+            public void from(Point a) { this.len = a.x; }
+        }
+    )");
+    REQUIRE(ir.find("define void @Line_from(ptr %self, ptr %a)") != std::string::npos);
+}
+
+TEST_CASE("PassByRef - mutating an object parameter's field is allowed", "[class][semantic][byref]") {
+    auto result = analyzeString(R"(
+        class Point { public f32 x; public f32 y; }
+        void use(Point p) { p.x = 5.0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("PassByRef - reassigning an object parameter is an error", "[class][semantic][byref]") {
+    auto result = analyzeString(R"(
+        class Point { public f32 x; public f32 y; public Point(f32 a, f32 b) { this.x = a; this.y = b; } }
+        void use(Point p) {
+            Point q(1.0, 2.0);
+            p = q;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("PassByRef - reassigning a basic-type parameter is still allowed", "[class][semantic][byref]") {
+    auto result = analyzeString(R"(
+        void use(i32 n) { n = 5; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

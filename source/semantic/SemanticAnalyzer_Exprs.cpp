@@ -204,6 +204,15 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return Type{TypeKind::Error};
     }
 
+    // Object parameters are immutable references: you may mutate their fields
+    // (obj.field = ...) but you may not rebind the reference itself (obj = ...).
+    if (sym->isParameter && sym->type.kind == TypeKind::Object) {
+        error(assign.name, "cannot reassign object parameter '" + assign.name.lexeme
+              + "': object references are immutable");
+        analyzeExpr(*assign.value);
+        return sym->type;
+    }
+
     Type lhsType = sym->type;
     Type rhsType = analyzeExpr(*assign.value);
     checkCast(rhsType, lhsType, assign.name, "assignment");

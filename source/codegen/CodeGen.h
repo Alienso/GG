@@ -21,10 +21,17 @@ public:
 private:
     // ---- Per-class info (populated in generate()) ----
     struct CGClassInfo {
-        std::string                             irTypeName;  // "%Point"
-        std::vector<std::pair<std::string,Type>> fields;    // ordered: (name, type)
+        std::string                             irTypeName;      // "%Point"
+        std::vector<std::pair<std::string,Type>> fields;        // ordered: (name, type)
+        bool                                    hasDestructor = false;
     };
     std::unordered_map<std::string, CGClassInfo>      cgClasses_;
+
+    // ---- Destructor scope tracking ----
+    // Each entry: (allocaPtr, className) — pushed when an Object variable with a
+    // destructor enters scope, popped and flushed (in reverse order) at scope exit.
+    using DtorEntry = std::pair<std::string, std::string>;
+    std::vector<std::vector<DtorEntry>> dtorScopes_;
     const std::unordered_map<std::string, ClassInfo>* classRegistry_ = nullptr;
 
     // ---- Module-level state ----
@@ -94,6 +101,10 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, Type resolvedType);
+
+    // ---- Destructor helpers ----
+    // Emit destructor calls for all entries in one scope (in reverse declaration order).
+    void emitDtorsForScope(const std::vector<DtorEntry>& scope);
 
     // ---- Bounds check helpers ----
     void ensureAbortDeclared();

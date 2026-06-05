@@ -251,6 +251,31 @@ Stmt Parser::parseClassDecl(Token keyword) {
             throw error(peek(), "expected 'public' or 'private' before class member");
         }
 
+        // Destructor: ~ClassName()
+        if (check(TokenType::TILDE)
+            && current + 1 < tokens.size()
+            && tokens[current + 1].type == TokenType::IDENTIFIER
+            && tokens[current + 1].lexeme == name.lexeme
+            && current + 2 < tokens.size()
+            && tokens[current + 2].type == TokenType::LEFT_PAREN) {
+
+            advance();                          // consume '~'
+            Token dtorName = advance();         // consume ClassName
+            consume(TokenType::LEFT_PAREN,  "expected '(' after destructor name");
+            consume(TokenType::RIGHT_PAREN, "expected ')' — destructor takes no parameters");
+            consume(TokenType::LEFT_BRACE,  "expected '{' before destructor body");
+            bool savedDtor = insideFunction_;
+            insideFunction_ = true;
+            BlockStmt dtorBody = parseBlockBody();
+            insideFunction_ = savedDtor;
+
+            methods.push_back(MethodDecl{
+                isPublic, /*isConstructor=*/false, /*isDestructor=*/true,
+                dtorName, dtorName, {}, std::move(dtorBody)
+            });
+            continue;
+        }
+
         // Constructor: IDENTIFIER (== class name) followed by '('
         if (check(TokenType::IDENTIFIER) && peek().lexeme == name.lexeme
             && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LEFT_PAREN) {
@@ -274,7 +299,7 @@ Stmt Parser::parseClassDecl(Token keyword) {
             insideFunction_ = savedIF1;
 
             methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/true,
+                isPublic, /*isConstructor=*/true, /*isDestructor=*/false,
                 ctorName,   // returnType token = class name token (no actual return type)
                 ctorName,   // name token
                 std::move(params), std::move(body)
@@ -307,7 +332,7 @@ Stmt Parser::parseClassDecl(Token keyword) {
             insideFunction_ = savedIF2;
 
             methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/false,
+                isPublic, /*isConstructor=*/false, /*isDestructor=*/false,
                 memberType, memberName,
                 std::move(params), std::move(body)
             });

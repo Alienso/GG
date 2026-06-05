@@ -1,16 +1,8 @@
-// stdlib/string.gg — C string utility bindings
+// stdlib/process.gg — process control bindings
 //
-// Wraps the standard null-terminated string functions from <string.h>.
-// All strings are represented as `ptr` (opaque pointer to char data).
+// Wraps the standard process management functions from <stdlib.h>.
 
-extern u64 strlen(ptr s);                        // length of null-terminated string (excluding null)
-extern ptr strcpy(ptr dest, ptr src);            // copy src into dest; returns dest
-extern ptr strncpy(ptr dest, ptr src, u64 n);    // copy at most `n` bytes; returns dest
-extern ptr strcat(ptr dest, ptr src);            // append src to dest; returns dest
-extern ptr strncat(ptr dest, ptr src, u64 n);    // append at most `n` bytes; returns dest
-extern i32 strcmp(ptr a, ptr b);                 // compare strings; 0 = equal, <0 / >0 otherwise
-extern i32 strncmp(ptr a, ptr b, u64 n);         // compare at most `n` bytes
-extern ptr strchr(ptr s, i32 c);                 // find first occurrence of `c` in s; null if absent
-extern ptr strrchr(ptr s, i32 c);                // find last  occurrence of `c` in s; null if absent
-extern ptr strstr(ptr haystack, ptr needle);     // find first occurrence of needle in haystack
-extern ptr strdup(ptr s);                        // allocate a copy of s (caller must free)
+extern void exit(i32 status);          // terminate the process with the given exit code
+extern void abort();                   // terminate the process abnormally
+extern ptr  getenv(ptr name);          // get the value of an environment variable; null if absent
+extern i32  system(ptr command);       // run a shell command; returns exit status

@@ -29,6 +29,7 @@ struct ClassInfo {
     struct Method {
         bool             isPublic;
         bool             isConstructor;
+        bool             isDestructor;
         Type             returnType;
         std::vector<Type> paramTypes;
         Token            decl;     // method name token
@@ -36,6 +37,7 @@ struct ClassInfo {
     std::vector<std::string>              fieldOrder;   // preserves declaration order
     std::unordered_map<std::string, Field>  fields;
     std::unordered_map<std::string, Method> methods;
+    std::optional<Method>                   destructor; // at most one per class
 };
 
 struct SemanticResult {

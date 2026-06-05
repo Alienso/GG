@@ -34,6 +34,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             Type fieldType = typeFromToken(fd.typeName.type);
             cgi.fields.push_back({fd.name.lexeme, fieldType});
         }
+        // Check whether this class declares a destructor
+        for (const MethodDecl& md : cls.methods)
+            if (md.isDestructor) { cgi.hasDestructor = true; break; }
         cgClasses_[cls.name.lexeme] = std::move(cgi);
     }
 
@@ -55,7 +58,10 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         } else if (std::holds_alternative<ClassDeclStmt>(*decl.node)) {
             const auto& cls = std::get<ClassDeclStmt>(*decl.node);
             for (const MethodDecl& md : cls.methods) {
-                std::string mangledName = cls.name.lexeme + "_" + md.name.lexeme;
+                // Destructor is mangled as ClassName_dtor
+                std::string mangledName = md.isDestructor
+                    ? cls.name.lexeme + "_dtor"
+                    : cls.name.lexeme + "_" + md.name.lexeme;
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
@@ -94,6 +100,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     usedAllocaNames.clear();
     breakLabelStack.clear();
     continueLabelStack.clear();
+    dtorScopes_.clear();
 
     // Return type
     currentReturnType        = typeFromToken(function.returnType.type);
@@ -132,13 +139,17 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
         emitStore(irType, "%" + param.name.lexeme, ptrName);
     }
 
+    // Open outermost function dtor scope
+    dtorScopes_.push_back({});
+
     // Codegen body statements
     for (const auto& stmtPtr : function.body.body) {
         if (stmtPtr) genStmt(*stmtPtr);
     }
 
-    // Ensure each block is terminated
+    // Ensure each block is terminated — flush outermost dtor scope first
     if (currentBasicBlock && !currentBasicBlock->terminated) {
+        emitDtorsForScope(dtorScopes_.back());
         if (returnIrType == "void") {
             emit("ret void");
         } else {
@@ -147,6 +158,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
         }
         currentBasicBlock->terminated = true;
     }
+    dtorScopes_.pop_back();
 
     currentFunction   = nullptr;
     currentBasicBlock = nullptr;
@@ -197,12 +209,13 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     usedAllocaNames.clear();
     breakLabelStack.clear();
     continueLabelStack.clear();
+    dtorScopes_.clear();
     currentClassName_   = className;
 
     // Return type
     Type returnType;
     std::string returnIrType;
-    if (method.isConstructor) {
+    if (method.isConstructor || method.isDestructor) {
         returnType   = Type{TypeKind::Void};
         returnIrType = "void";
     } else {
@@ -211,8 +224,10 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     }
     currentReturnType = returnType;
 
-    // Build mangled name: ClassName_methodName
-    std::string mangledName = className + "_" + method.name.lexeme;
+    // Build mangled name: ClassName_methodName (destructor → ClassName_dtor)
+    std::string mangledName = method.isDestructor
+        ? className + "_dtor"
+        : className + "_" + method.name.lexeme;
 
     // Parameters: (ptr %self, param1, param2, ...)
     std::string parameterString = "ptr %self";
@@ -249,13 +264,17 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
         emitStore(irType, "%" + param.name.lexeme, ptrName);
     }
 
+    // Open outermost function dtor scope
+    dtorScopes_.push_back({});
+
     // Codegen body
     for (const auto& stmtPtr : method.body.body) {
         if (stmtPtr) genStmt(*stmtPtr);
     }
 
-    // Ensure termination
+    // Ensure termination — flush outermost dtor scope first
     if (currentBasicBlock && !currentBasicBlock->terminated) {
+        emitDtorsForScope(dtorScopes_.back());
         if (returnIrType == "void") {
             emit("ret void");
         } else {
@@ -263,6 +282,7 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
         }
         currentBasicBlock->terminated = true;
     }
+    dtorScopes_.pop_back();
 
     currentFunction   = nullptr;
     currentBasicBlock = nullptr;
@@ -295,9 +315,15 @@ void CodeGen::genBlock(const BlockStmt& blockStmt) {
     auto savedAllocas = allocaMap;
     auto savedTypes   = varTypeMap;
 
+    dtorScopes_.push_back({});   // open inner dtor scope
+
     for (const auto& stmtPtr : blockStmt.body) {
         if (stmtPtr) genStmt(*stmtPtr);
     }
+
+    // Emit destructor calls in reverse declaration order before the block ends.
+    emitDtorsForScope(dtorScopes_.back());
+    dtorScopes_.pop_back();      // close inner dtor scope
 
     // Restore: removes names added in this block and restores any shadowed names.
     allocaMap  = std::move(savedAllocas);
@@ -405,16 +431,30 @@ void CodeGen::genFor(const ForStmt& forStmt) {
 }
 
 void CodeGen::genReturn(const ReturnStmt& returnStmt) {
+    // Evaluate return value first (before cleanup that could clobber temps).
+    std::string retVal;
     if (returnStmt.value.has_value()) {
-        Type        returnValueType = exprType(*returnStmt.value);
-        std::string value           = genExpr(*returnStmt.value);
-        // Cast the value to the declared return type if needed
-        value = emitCast(value, returnValueType, currentReturnType);
-        emit("ret " + irTypeName(currentReturnType) + " " + value);
-    } else {
-        emit("ret void");
+        Type returnValueType = exprType(*returnStmt.value);
+        retVal               = genExpr(*returnStmt.value);
+        retVal               = emitCast(retVal, returnValueType, currentReturnType);
     }
+
+    // Flush all live destructor scopes (innermost first) before returning.
+    for (auto it = dtorScopes_.rbegin(); it != dtorScopes_.rend(); ++it)
+        emitDtorsForScope(*it);
+
+    if (returnStmt.value.has_value())
+        emit("ret " + irTypeName(currentReturnType) + " " + retVal);
+    else
+        emit("ret void");
+
     if (currentBasicBlock) currentBasicBlock->terminated = true;
+}
+
+void CodeGen::emitDtorsForScope(const std::vector<DtorEntry>& scope) {
+    // Emit in reverse declaration order (last declared → first destroyed).
+    for (auto it = scope.rbegin(); it != scope.rend(); ++it)
+        emit("call void @" + it->second + "_dtor(ptr " + it->first + ")");
 }
 
 void CodeGen::genBreak(const BreakStmt&) {
@@ -859,6 +899,13 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
 
         // Zero-initialise the struct
         emit("store %" + className + " zeroinitializer, ptr " + ptrName);
+
+        // If this class has a destructor, register the variable for scope-exit cleanup.
+        {
+            auto cgIt = cgClasses_.find(className);
+            if (cgIt != cgClasses_.end() && cgIt->second.hasDestructor && !dtorScopes_.empty())
+                dtorScopes_.back().push_back({ptrName, className});
+        }
 
         // If initializer is a constructor CallExpr, emit the constructor call
         if (varDecl.initializer) {

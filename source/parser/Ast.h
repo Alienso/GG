@@ -206,7 +206,8 @@ struct FieldDecl {
 struct MethodDecl {
     bool                   isPublic;
     bool                   isConstructor;  // true when name == class name
-    Token                  returnType;     // for constructors this is the class-name token
+    bool                   isDestructor;   // true for ~ClassName() — no params, no return type
+    Token                  returnType;     // for constructors/destructors: class-name token
     Token                  name;
     std::vector<ParamDecl> params;
     BlockStmt              body;

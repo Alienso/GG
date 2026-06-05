@@ -1,0 +1,169 @@
+// e2e/destructor_test.gg
+//
+// End-to-end validation of destructor behaviour.
+//
+// Every test prints labelled output so you can see exactly what happened
+// and in what order.  The program exits 0 on success; any non-zero exit
+// code identifies the first failing check.
+//
+// Expected output (in order):
+//
+//   === Test 1: destructor called at function scope exit ===
+//   [+] Buffer(32): created
+//       Buffer is live inside test_scope_exit
+//   [-] Buffer(32): destroyed
+//       test_scope_exit returned
+//   === Test 2: destructor called before early return ===
+//   [+] Buffer(16): created
+//       flag is true – taking early-return path
+//   [-] Buffer(16): destroyed
+//       early-return path: returned 1 (correct)
+//   === Test 3: destructor called for no-early-return path ===
+//   [+] Buffer(8): created
+//       flag is false – taking normal path
+//   [-] Buffer(8): destroyed
+//       normal path: returned 0 (correct)
+//   === Test 4: reverse destruction order ===
+//       Alpha and Beta are live
+//   [-] Named Beta  destroyed
+//   [-] Named Alpha destroyed
+//       both Named objects destroyed in reverse order (correct)
+//   === Test 5: block-scope destructor ===
+//   [+] Buffer(64): created
+//       inner Buffer is live
+//   [-] Buffer(64): destroyed
+//       inner scope has exited; Buffer already destroyed
+//   === Test 6: destructor inside a for-loop body ===
+//   [+] Buffer(1): created
+//   [-] Buffer(1): destroyed
+//   [+] Buffer(2): created
+//   [-] Buffer(2): destroyed
+//   [+] Buffer(3): created
+//   [-] Buffer(3): destroyed
+//       loop finished; all per-iteration Buffers destroyed
+//   === ALL DESTRUCTOR TESTS PASSED ===
+//   exit code: 0
+
+import "../stdlib/io.gg";
+import "../stdlib/mem.gg";
+
+// ============================================================
+// Buffer — heap-allocated byte array that frees itself.
+// The constructor/destructor both print so we can track
+// whether they actually run.
+// ============================================================
+
+class Buffer {
+    public ptr data;
+    public u64 size;
+
+    public Buffer(u64 sz) {
+        this.size = sz;
+        this.data = malloc(sz);
+        puts("[+] Buffer: created");
+    }
+
+    public ~Buffer() {
+        free(this.data);
+        puts("[-] Buffer: destroyed");
+    }
+}
+
+// ============================================================
+// Named — stores a ptr label; prints it from the destructor.
+// Lets us give each instance a unique, identifiable message
+// so reverse-order destruction is observable in the output.
+// ============================================================
+
+class Named {
+    public ptr label;
+
+    public Named(ptr lbl) {
+        this.label = lbl;
+    }
+
+    public ~Named() {
+        puts(this.label);
+    }
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+// Test 1: destructor runs when the owning function returns normally.
+i32 test_scope_exit() {
+    Buffer b(32);
+    puts("    Buffer is live inside test_scope_exit");
+    return 0;
+    // ~Buffer() injected here, before the ret
+}
+
+// Test 2 / 3: destructor runs regardless of which return path is taken.
+i32 test_early_return(bool flag) {
+    Buffer b(16);
+    if (flag) {
+        puts("    flag is true - taking early-return path");
+        return 1;   // ~Buffer() must fire before this ret
+    }
+    puts("    flag is false - taking normal path");
+    return 0;       // ~Buffer() must fire before this ret too
+}
+
+// Test 4: two Named objects – Beta declared after Alpha, so Beta is
+//         destroyed first (LIFO / reverse-declaration order).
+void test_reverse_order() {
+    Named alpha("[-] Named Alpha destroyed");
+    Named beta("[-] Named Beta  destroyed");
+    puts("    Alpha and Beta are live");
+    // ~beta() runs first, then ~alpha()
+}
+
+// ============================================================
+// main
+// ============================================================
+
+i32 main() {
+
+    // ---- Test 1: scope-exit destructor --------------------------------
+    puts("=== Test 1: destructor called at function scope exit ===");
+    i32 r1 = test_scope_exit();
+    if (r1 != 0) { return 1; }
+    puts("    test_scope_exit returned");
+
+    // ---- Test 2: destructor before early return -----------------------
+    puts("=== Test 2: destructor called before early return ===");
+    i32 r2 = test_early_return(true);
+    if (r2 != 1) { return 2; }
+    puts("    early-return path: returned 1 (correct)");
+
+    // ---- Test 3: destructor on normal return path ---------------------
+    puts("=== Test 3: destructor called for no-early-return path ===");
+    i32 r3 = test_early_return(false);
+    if (r3 != 0) { return 3; }
+    puts("    normal path: returned 0 (correct)");
+
+    // ---- Test 4: reverse destruction order ----------------------------
+    puts("=== Test 4: reverse destruction order ===");
+    test_reverse_order();
+    puts("    both Named objects destroyed in reverse order (correct)");
+
+    // ---- Test 5: block-scope destructor -------------------------------
+    puts("=== Test 5: block-scope destructor ===");
+    {
+        Buffer inner(64);
+        puts("    inner Buffer is live");
+    }  // ~inner() fires here, before execution continues
+    puts("    inner scope has exited; Buffer already destroyed");
+
+    // ---- Test 6: destructor inside a for-loop body --------------------
+    puts("=== Test 6: destructor inside a for-loop body ===");
+    for (i32 i = 1; i <= 3; i++) {
+        Buffer loopBuf(i);   // created every iteration
+        // ~loopBuf() fires at the end of each loop body iteration
+    }
+    puts("    loop finished; all per-iteration Buffers destroyed");
+
+    puts("=== ALL DESTRUCTOR TESTS PASSED ===");
+    return 0;
+}

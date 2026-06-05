@@ -332,3 +332,153 @@ TEST_CASE("Class - method call emitted with self pointer as first argument", "[c
     )");
     REQUIRE(ir.find("call i32 @Counter_get(ptr %c.addr)") != std::string::npos);
 }
+
+// ============================================================
+// Destructor tests
+// ============================================================
+
+TEST_CASE("Destructor - parser sets isDestructor=true on MethodDecl", "[class][destructor][parser]") {
+    auto prog = parseString(R"(
+        class Box {
+            public i32 value;
+            public Box(i32 v) { this.value = v; }
+            public ~Box() { }
+        }
+    )");
+    REQUIRE(prog.declarations.size() == 1);
+    const auto& cls = asStmt<ClassDeclStmt>(prog.declarations[0]);
+    // Should have 2 methods: constructor + destructor
+    REQUIRE(cls.methods.size() == 2);
+    bool foundDtor = false;
+    for (const auto& m : cls.methods) {
+        if (m.isDestructor) {
+            foundDtor = true;
+            REQUIRE_FALSE(m.isConstructor);
+            REQUIRE(m.params.empty());
+            REQUIRE(m.name.lexeme == "Box");
+        }
+    }
+    REQUIRE(foundDtor);
+}
+
+TEST_CASE("Destructor - class without destructor has no _dtor function in IR", "[class][destructor][codegen]") {
+    std::string ir = codegenString(R"(
+        class Counter {
+            public i32 value;
+            public i32 get() { return this.value; }
+        }
+        i32 main() {
+            Counter c;
+            return c.get();
+        }
+    )");
+    REQUIRE(ir.find("_dtor") == std::string::npos);
+}
+
+TEST_CASE("Destructor - @ClassName_dtor function is emitted", "[class][destructor][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            public i32 value;
+            public ~Box() { }
+        }
+        i32 main() {
+            Box b;
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("define void @Box_dtor(ptr %self)") != std::string::npos);
+}
+
+TEST_CASE("Destructor - called at end of enclosing block", "[class][destructor][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            public i32 value;
+            public ~Box() { }
+        }
+        i32 main() {
+            Box b;
+            return 0;
+        }
+    )");
+    // The dtor call must appear before the final ret
+    auto dtorPos = ir.find("call void @Box_dtor(ptr %b.addr)");
+    auto retPos  = ir.find("ret i32");
+    REQUIRE(dtorPos != std::string::npos);
+    REQUIRE(retPos  != std::string::npos);
+    REQUIRE(dtorPos < retPos);
+}
+
+TEST_CASE("Destructor - called before early return", "[class][destructor][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            public i32 value;
+            public ~Box() { }
+        }
+        i32 main() {
+            Box b;
+            return 1;
+        }
+    )");
+    auto dtorPos = ir.find("call void @Box_dtor(ptr %b.addr)");
+    auto retPos  = ir.find("ret i32 1");
+    REQUIRE(dtorPos != std::string::npos);
+    REQUIRE(retPos  != std::string::npos);
+    REQUIRE(dtorPos < retPos);
+}
+
+TEST_CASE("Destructor - multiple objects destroyed in reverse order", "[class][destructor][codegen]") {
+    std::string ir = codegenString(R"(
+        class A {
+            public i32 v;
+            public ~A() { }
+        }
+        class B {
+            public i32 v;
+            public ~B() { }
+        }
+        i32 main() {
+            A a;
+            B b;
+            return 0;
+        }
+    )");
+    auto dtorA = ir.find("call void @A_dtor(ptr %a.addr)");
+    auto dtorB = ir.find("call void @B_dtor(ptr %b.addr)");
+    REQUIRE(dtorA != std::string::npos);
+    REQUIRE(dtorB != std::string::npos);
+    // B declared after A, so B must be destroyed first (dtorB < dtorA)
+    REQUIRE(dtorB < dtorA);
+}
+
+TEST_CASE("Destructor - semantic error: duplicate destructor", "[class][destructor][semantic]") {
+    auto result = analyzeString(R"(
+        class Box {
+            public i32 value;
+            public ~Box() { }
+            public ~Box() { }
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Destructor - parser: destructor with params produces no destructor in class", "[class][destructor][parser]") {
+    // The parser enforces no-params for destructors via a ParseError that is then
+    // synchronised over.  The resulting ClassDeclStmt will therefore have no
+    // destructor MethodDecl (the partial parse is discarded during synchronize()).
+    auto prog = parseString(R"(
+        class Box {
+            public i32 value;
+            public ~Box(i32 x) { }
+        }
+    )");
+    // The class may not even be in the declarations (ParseError clears it).
+    // What matters is that no destructor with params made it through.
+    bool dtorWithParamsFound = false;
+    for (const auto& decl : prog.declarations) {
+        if (!std::holds_alternative<ClassDeclStmt>(*decl.node)) continue;
+        const auto& cls = std::get<ClassDeclStmt>(*decl.node);
+        for (const auto& m : cls.methods)
+            if (m.isDestructor && !m.params.empty()) dtorWithParamsFound = true;
+    }
+    REQUIRE_FALSE(dtorWithParamsFound);
+}

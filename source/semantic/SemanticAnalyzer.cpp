@@ -112,6 +112,24 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
                 ClassInfo::Field{fd.isPublic, fieldType, fieldIndex++, fd.name});
         }
         for (const MethodDecl& md : cls.methods) {
+            if (md.isDestructor) {
+                // Validate: no params, at most one destructor per class.
+                if (!md.params.empty()) {
+                    error(md.name, "destructor '" + cls.name.lexeme + "::~" + md.name.lexeme
+                          + "' must take no parameters");
+                    continue;
+                }
+                if (info.destructor.has_value()) {
+                    error(md.name, "class '" + cls.name.lexeme
+                          + "' already has a destructor (duplicate ~" + md.name.lexeme + ")");
+                    continue;
+                }
+                info.destructor.emplace(ClassInfo::Method{
+                    md.isPublic, /*isConstructor=*/false, /*isDestructor=*/true,
+                    Type{TypeKind::Void}, std::vector<Type>{}, md.name
+                });
+                continue;
+            }
             Type returnType = md.isConstructor
                 ? Type{TypeKind::Void}
                 : resolveTypeToken(md.returnType);
@@ -119,8 +137,8 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
             for (const ParamDecl& p : md.params)
                 paramTypes.push_back(resolveTypeToken(p.typeName));
             info.methods.emplace(md.name.lexeme,
-                ClassInfo::Method{md.isPublic, md.isConstructor, returnType,
-                                  std::move(paramTypes), md.name});
+                ClassInfo::Method{md.isPublic, md.isConstructor, /*isDestructor=*/false,
+                                  returnType, std::move(paramTypes), md.name});
         }
         classRegistry_.emplace(cls.name.lexeme, std::move(info));
     }
@@ -328,8 +346,9 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
 
-        currentReturnType = md.isConstructor ? Type{TypeKind::Void}
-                                             : resolveTypeToken(md.returnType);
+        currentReturnType = (md.isConstructor || md.isDestructor)
+                                ? Type{TypeKind::Void}
+                                : resolveTypeToken(md.returnType);
         loopDepth         = 0;
 
         enterScope();  // method scope
@@ -357,8 +376,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         // Analyse body
         for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
 
-        // Warn on missing return for non-void non-constructor methods
-        if (!md.isConstructor
+        // Warn on missing return for non-void non-constructor non-destructor methods
+        if (!md.isConstructor && !md.isDestructor
             && currentReturnType->kind != TypeKind::Void
             && !alwaysReturns(md.body)) {
             warn(md.name, "method '" + md.name.lexeme

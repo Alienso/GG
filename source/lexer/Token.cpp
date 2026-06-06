@@ -49,7 +49,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"public",  TokenType::PUBLIC},
     {"private", TokenType::PRIVATE},
     {"as",      TokenType::AS},
-    {"new",     TokenType::NEW}
+    {"new",     TokenType::NEW},
+    {"sizeof",  TokenType::SIZEOF}
 };
 
 TokenType lookupKeyword(const std::string& text) {

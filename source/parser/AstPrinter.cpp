@@ -150,6 +150,10 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const SizeofExpr& sizeofExpr) {
+            out("Sizeof '" + sizeofExpr.typeName.lexeme + "'");
+        },
+
     }, *expr.node);
 }
 

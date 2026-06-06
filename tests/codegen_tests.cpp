@@ -1173,3 +1173,34 @@ TEST_CASE("Generics - nested type argument in a generic function call", "[generi
     REQUIRE(irContains(ir, "define i32 @tag$Box$i32(ptr %x)"));
     REQUIRE(irContains(ir, "call i32 @tag$Box$i32("));
 }
+
+// ============================================================
+// sizeof(T)
+// ============================================================
+
+TEST_CASE("Sizeof - sizeof(primitive) lowers to the null-GEP trick", "[sizeof][codegen]") {
+    auto ir = codegenString(R"( void main() { u64 s = sizeof(i32); } )");
+    REQUIRE(irContains(ir, "getelementptr i32, ptr null, i32 1"));
+    REQUIRE(irContains(ir, "ptrtoint ptr"));
+}
+
+TEST_CASE("Sizeof - result type is u64", "[sizeof][semantic]") {
+    auto r = analyzeString(R"( void main() { u64 s = sizeof(i64); } )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Sizeof - sizeof(class) uses the struct type", "[sizeof][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public i32 y; }
+        void main() { u64 s = sizeof(Point); }
+    )");
+    REQUIRE(irContains(ir, "getelementptr %Point, ptr null, i32 1"));
+}
+
+TEST_CASE("Sizeof - sizeof(reference) is pointer-sized", "[sizeof][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; }
+        void main() { u64 s = sizeof(Point&); }
+    )");
+    REQUIRE(irContains(ir, "getelementptr ptr, ptr null, i32 1"));
+}

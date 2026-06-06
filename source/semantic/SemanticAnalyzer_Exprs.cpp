@@ -23,6 +23,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
+        [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;

@@ -120,6 +120,12 @@ struct NewExpr {
     std::vector<std::unique_ptr<Expr>> args;       // constructor arguments
 };
 
+// `sizeof(T)` — the size in bytes of a type. Evaluates to u64.
+struct SizeofExpr {
+    Token keyword;    // the 'sizeof' token
+    Token typeName;   // the (possibly synthesized) type token
+};
+
 // ---- Expr wrapper ----
 
 struct Expr {
@@ -140,7 +146,8 @@ struct Expr {
         MemberAssignExpr,
         MethodCallExpr,
         CastExpr,
-        NewExpr
+        NewExpr,
+        SizeofExpr
     >;
     std::unique_ptr<Variant> node;
 };

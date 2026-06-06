@@ -130,6 +130,7 @@ private:
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
     std::string genCast(const CastExpr& castExpr, const Type& toType);
     std::string genNew(const NewExpr& newExpr, const Type& resolvedType);
+    std::string genSizeof(const SizeofExpr& sizeofExpr);
 
     // ---- Destructor helpers ----
     // Emit destructor / release calls for all entries in one scope (reverse order).

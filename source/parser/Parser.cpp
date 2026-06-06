@@ -1057,6 +1057,16 @@ Expr Parser::parsePrimary() {
         return makeExpr(LiteralExpr{ previous() });
     }
 
+    // sizeof(Type) — size in bytes of a type, as u64.
+    if (match({ TokenType::SIZEOF })) {
+        Token keyword = previous();
+        consume(TokenType::LEFT_PAREN, "expected '(' after 'sizeof'");
+        if (!isTypeName()) throw error(peek(), "expected a type name in 'sizeof'");
+        Token typeName = consumeType();
+        consume(TokenType::RIGHT_PAREN, "expected ')' after 'sizeof' type");
+        return makeExpr(SizeofExpr{ keyword, typeName });
+    }
+
     if (match({ TokenType::IDENTIFIER })) {
         Token name = previous();
 

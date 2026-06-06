@@ -66,6 +66,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
+        [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
     }, *expr.node);
 }
 
@@ -682,6 +683,27 @@ std::string CodeGen::genCast(const CastExpr& castExpr, const Type& toType) {
 
     // Numeric / bool / char conversions — emitCast covers all remaining cases.
     return emitCast(value, fromType, toType);
+}
+
+// ---- sizeof ----
+
+std::string CodeGen::genSizeof(const SizeofExpr& sizeofExpr) {
+    const Token& tok = sizeofExpr.typeName;
+    // Resolve the type token to its IR type: Class& → ptr, class → %Class, else primitive.
+    std::string irType;
+    if (tok.type == TokenType::IDENTIFIER && !tok.lexeme.empty() && tok.lexeme.back() == '&')
+        irType = "ptr";
+    else if (tok.type == TokenType::IDENTIFIER && cgClasses_.count(tok.lexeme))
+        irType = "%" + tok.lexeme;
+    else
+        irType = irTypeName(typeFromToken(tok.type));
+
+    // sizeof via the null-GEP trick: address of element 1 of a null T-array, as i64.
+    std::string gep = freshTemp();
+    emit("%" + gep + " = getelementptr " + irType + ", ptr null, i32 1");
+    std::string sz = freshTemp();
+    emit("%" + sz + " = ptrtoint ptr %" + gep + " to i64");
+    return "%" + sz;
 }
 
 // ---- new (heap allocation) ----

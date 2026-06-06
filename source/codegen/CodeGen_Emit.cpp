@@ -173,6 +173,45 @@ Type CodeGen::resolveParamType(const ParamDecl& param) const {
     return typeFromToken(param.typeName.type);
 }
 
+Type CodeGen::resolveReturnType(const Token& typeToken) const {
+    // "Class&" → reference return (lowers to ptr). Bare class returns (by value) are
+    // unsupported and fall through to typeFromToken (Error); primitives/void resolve normally.
+    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
+        && typeToken.lexeme.back() == '&')
+        return makeReferenceType(typeToken.lexeme.substr(0, typeToken.lexeme.size() - 1));
+    return typeFromToken(typeToken.type);
+}
+
+// ============================================================
+// Reference-return / temporary lifetime helpers
+// ============================================================
+
+bool CodeGen::producesPlusOne(const Expr& e) const {
+    if (!e.node) return false;
+    if (std::holds_alternative<NewExpr>(*e.node)) return true;   // `new` → +1
+    if ((std::holds_alternative<CallExpr>(*e.node)
+         || std::holds_alternative<MethodCallExpr>(*e.node))
+        && exprType(e).kind == TypeKind::Reference)
+        return true;                                              // reference-returning call → +1
+    return false;
+}
+
+void CodeGen::claimTemp(const std::string& ptr) {
+    // The just-produced +1 temporary is the most recently registered one.
+    if (!pendingTemps_.empty() && pendingTemps_.back().ptr == ptr)
+        pendingTemps_.pop_back();
+}
+
+void CodeGen::flushTempReleases() {
+    for (const auto& t : pendingTemps_) {
+        auto it = cgClasses_.find(t.className);
+        std::string dtorArg = (it != cgClasses_.end() && it->second.needsDtor)
+                            ? ("@" + t.className + "_dtor") : "null";
+        emit("call void @gg_release(ptr " + t.ptr + ", ptr " + dtorArg + ")");
+    }
+    pendingTemps_.clear();
+}
+
 std::string CodeGen::emitCast(const std::string& value, const Type& from, const Type& to) {
     if (from == to) return value;
     if (isError(from) || isError(to)) return value;

@@ -21,14 +21,46 @@ public:
     explicit ParseError(const std::string& msg) : CompileError(msg) {}
 };
 
+// ---- Generics registry (shared across files for cross-file generics) ----
+// A generic declaration is captured as raw tokens; each use site records an
+// instantiation request. After all files are parsed, the worklist substitutes
+// the type arguments and re-parses each request into a concrete declaration,
+// so semantic analysis and codegen only ever see ordinary (mangled) decls.
+struct GenericTemplate {
+    std::vector<std::string> typeParams;
+    std::vector<Token>       tokens;   // decl tokens; tokens[1] is the name; <...> stripped
+};
+struct GenericInstantiation {
+    std::string                     templateName;
+    std::string                     mangledName;
+    std::vector<std::vector<Token>> args;     // each type argument's token slice
+};
+struct GenericRegistry {
+    std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
+    std::unordered_set<std::string>                  funcNames;     // generic function names
+    std::unordered_set<std::string>                  classNames;    // generic class names
+    std::vector<GenericInstantiation>                worklist;      // instantiation requests
+    std::unordered_set<std::string>                  instantiated;  // mangled names already queued
+};
+
 class Parser {
 public:
-    Parser() = default;
     // Pre-register class names from imported files so that cross-file constructor
-    // calls (e.g. "String s(...)") are recognised as VarDecl, not misidentified
-    // as a function declaration or expression.
-    explicit Parser(std::unordered_set<std::string> initialClassNames);
-    [[nodiscard]] Program parse(const std::vector<Token>& inputTokens, const std::string& filename = "");
+    // calls (e.g. "String s(...)") are recognised as VarDecl. A shared GenericRegistry
+    // (when provided) lets generics span files; otherwise an internal one is used.
+    explicit Parser(std::unordered_set<std::string> initialClassNames = {},
+                    GenericRegistry* sharedRegistry = nullptr);
+    // runMonomorphization=false defers expansion (the caller invokes monomorphize()
+    // once, after every file has been parsed into the shared registry).
+    [[nodiscard]] Program parse(const std::vector<Token>& inputTokens,
+                                const std::string& filename = "",
+                                bool runMonomorphization = true);
+
+    // Pre-register generic template names from a token stream so that use sites
+    // are recognised regardless of which file declares the template.
+    void prescanTemplateNames(const std::vector<Token>& inputTokens);
+    // Expand all pending instantiations, appending concrete declarations to `program`.
+    void monomorphize(Program& program);
 
 private:
     std::vector<Token>             tokens;
@@ -38,25 +70,11 @@ private:
     bool                           insideFunction = false;  // true when parsing a function/method body
 
     // ---- Generics (monomorphization) ----
-    // A generic declaration is captured as raw tokens; each use site records an
-    // instantiation request. After the main parse, the worklist substitutes the
-    // type arguments and re-parses each request into a concrete declaration, so
-    // semantic analysis and codegen only ever see ordinary (mangled) decls.
-    struct Template {
-        std::vector<std::string> typeParams;
-        std::vector<Token>       tokens;   // decl tokens; tokens[1] is the name; <...> stripped
-    };
-    std::unordered_map<std::string, Template> templates_;          // by template name (fn or class)
-    std::unordered_set<std::string>           templateFuncNames_;  // generic function names
-    std::unordered_set<std::string>           templateClassNames_; // generic class names
-
-    struct PendingInstantiation {
-        std::string                     templateName;
-        std::string                     mangledName;
-        std::vector<std::vector<Token>> args;     // each type argument's token slice
-    };
-    std::vector<PendingInstantiation> instantiationWorklist_;
-    std::unordered_set<std::string>   instantiated_;   // mangled names already queued
+    // Generic state lives in a registry that may be shared across files. By default
+    // each parser owns its own; ImportResolver passes a shared one for cross-file use.
+    GenericRegistry  ownedGenerics_;
+    GenericRegistry* gen_ = &ownedGenerics_;
+    int pendingCloseAngles_ = 0;       // virtual '>' tokens from splitting a '>>'
 
     // ---- Token stream navigation ----
     [[nodiscard]] const Token& peek() const;
@@ -86,6 +104,8 @@ private:
     // or 0 if `from` is not the start of a type. Used by declaration-detection lookahead.
     [[nodiscard]] size_t typeSpanAt(size_t from) const;
     std::vector<std::vector<Token>> parseTypeArgList();      // at '<', returns arg slices through '>'
+    std::vector<Token>              parseOneTypeArg();       // one arg; nested generics collapsed
+    void                            consumeCloseAngle();     // consume '>' (splitting a '>>')
     [[nodiscard]] std::string mangleInstantiation(const std::string& base,
                                   const std::vector<std::vector<Token>>& args) const;
     void recordInstantiation(const std::string& templateName, const std::string& mangled,

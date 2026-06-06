@@ -18,7 +18,52 @@ namespace fs = std::filesystem;
 
 Program ImportResolver::resolve(const std::string& rootFilePath) {
     processedPaths.clear();
-    return processFile(rootFilePath);
+    sharedGenerics_ = GenericRegistry{};
+
+    // Pass 1: pre-register every generic template name across all files so that
+    // use sites are recognised regardless of which file declares the template.
+    Parser seedParser({}, &sharedGenerics_);
+    std::unordered_set<std::string> tplVisited;
+    prescanTemplates(rootFilePath, tplVisited, seedParser);
+
+    // Pass 2: parse + flatten every file (monomorphization deferred — templates and
+    // instantiation requests accumulate in the shared registry).
+    Program program = processFile(rootFilePath);
+
+    // Pass 3: expand all instantiations once, with the union of templates/requests.
+    std::unordered_set<std::string> classVisited;
+    std::unordered_set<std::string> allClassNames = collectClassNames(rootFilePath, classVisited);
+    Parser monoParser(std::move(allClassNames), &sharedGenerics_);
+    monoParser.monomorphize(program);
+    return program;
+}
+
+void ImportResolver::prescanTemplates(const std::string& filePath,
+                                      std::unordered_set<std::string>& visitedPaths,
+                                      Parser& seedParser) {
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
+    if (ec || !fs::exists(canonical)) return;
+
+    std::string canonicalStr = canonical.string();
+    if (visitedPaths.count(canonicalStr)) return;
+    visitedPaths.insert(canonicalStr);
+
+    std::vector<std::string> paths{ canonicalStr };
+    Lexer lexer(paths);
+    lexer.lex();
+    const auto& tokens = lexer.tokens()[0];
+
+    seedParser.prescanTemplateNames(tokens);
+
+    fs::path parentDir = canonical.parent_path();
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type == TokenType::IMPORT && tokens[i + 1].type == TokenType::STRING) {
+            std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
+            std::string absPath = (parentDir / rawPath).string();
+            prescanTemplates(absPath, visitedPaths, seedParser);
+        }
+    }
 }
 
 // ============================================================
@@ -93,8 +138,10 @@ Program ImportResolver::processFile(const std::string& filePath) {
     std::vector<std::string> paths = { canonicalString };
     Lexer lexer(paths);
     lexer.lex();
-    Parser parser(std::move(allClassNames));
-    Program rawProgram = parser.parse(lexer.tokens()[0], canonicalString);
+    // Bind to the shared generics registry and defer monomorphization — resolve()
+    // expands all instantiations once after every file has been parsed.
+    Parser parser(std::move(allClassNames), &sharedGenerics_);
+    Program rawProgram = parser.parse(lexer.tokens()[0], canonicalString, /*runMonomorphization=*/false);
 
     fs::path parentDirectory = canonical.parent_path();
     Program result;

@@ -326,13 +326,12 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
     // retain-before-release keeps self-assignment (a = a) safe.
     if (lhsType.kind == TypeKind::Reference) {
         usesRefcount_ = true;
-        bool fromNew = assign.value->node
-                    && std::holds_alternative<NewExpr>(*assign.value->node);
+        bool plusOne = producesPlusOne(*assign.value);
         Type        rhsType = exprType(*assign.value);
         std::string newVal  = genExpr(*assign.value);
         newVal = emitCast(newVal, rhsType, lhsType);
-        if (!fromNew)
-            emit("call void @gg_retain(ptr " + newVal + ")");
+        if (plusOne) claimTemp(newVal);
+        else         emit("call void @gg_retain(ptr " + newVal + ")");
 
         std::string oldVal  = emitLoad("ptr", ptrName);
         auto        cgIt    = cgClasses_.find(lhsType.className);
@@ -433,6 +432,8 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     }
     std::string t = freshTemp();
     emit("%" + t + " = call " + returnIrType + " @" + call.callee.lexeme + "(" + argStr + ")");
+    if (resolvedType.kind == TypeKind::Reference)   // a reference-returning call hands back a +1
+        pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
 }
 
@@ -477,16 +478,15 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/true });
 
         if (varDecl.initializer) {
-            bool fromNew = varDecl.initializer->node
-                        && std::holds_alternative<NewExpr>(*varDecl.initializer->node);
+            bool plusOne = producesPlusOne(*varDecl.initializer);
             Type        initType = exprType(*varDecl.initializer);
             std::string value    = genExpr(*varDecl.initializer);
             value = emitCast(value, initType, refType);   // ref → ref: no-op
 
-            // Copying an existing reference co-owns it → retain. `new` already yields
-            // a +1 count, which this variable takes over without an extra retain.
-            if (!fromNew)
-                emit("call void @gg_retain(ptr " + value + ")");
+            // A +1 producer (`new` / reference-returning call) is taken over directly
+            // (claim its pending release). Copying an existing reference co-owns it → retain.
+            if (plusOne) claimTemp(value);
+            else         emit("call void @gg_retain(ptr " + value + ")");
 
             emitStore("ptr", value, ptrName);
         } else {
@@ -700,6 +700,9 @@ std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/
     std::string body = freshTemp();
     emit("%" + body + " = call ptr @gg_alloc(i64 %" + szInt + ")");
     emit("store %" + className + " zeroinitializer, ptr %" + body);
+
+    // `new` yields a +1 reference; register it for release unless a consumer claims it.
+    pendingTemps_.push_back({ "%" + body, className });
 
     // Copy construction: new Class(x) where x is a value/reference of the same class.
     // Deep-copy x's contents into the fresh allocation via @Class_clone.

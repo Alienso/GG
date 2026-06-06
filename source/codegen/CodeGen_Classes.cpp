@@ -61,12 +61,12 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
     // Reference field: co-ownership — retain the new target, release the old.
     if (fieldType.kind == TypeKind::Reference) {
         usesRefcount_ = true;
-        bool fromNew = ma.value->node && std::holds_alternative<NewExpr>(*ma.value->node);
+        bool plusOne = producesPlusOne(*ma.value);
         Type        valueType = exprType(*ma.value);
         std::string newVal    = genExpr(*ma.value);
         newVal = emitCast(newVal, valueType, fieldType);
-        if (!fromNew)
-            emit("call void @gg_retain(ptr " + newVal + ")");
+        if (plusOne) claimTemp(newVal);
+        else         emit("call void @gg_retain(ptr " + newVal + ")");
         std::string oldVal = emitLoad("ptr", gepReg);
         auto fcgIt = cgClasses_.find(fieldType.className);
         std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
@@ -106,5 +106,7 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
     }
     std::string t = freshTemp();
     emit("%" + t + " = call " + returnIrType + " @" + mangledName + "(" + fullArgs + ")");
+    if (resolvedType.kind == TypeKind::Reference)   // reference-returning method hands back a +1
+        pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
 }

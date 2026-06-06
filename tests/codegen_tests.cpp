@@ -1070,3 +1070,106 @@ TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen
     REQUIRE(irContains(ir, "%Node$i32 = type { i32, ptr }"));
     REQUIRE(irContains(ir, "define void @Node$i32_dtor(ptr %self)"));
 }
+
+// ============================================================
+// Reference returns (Tier B: +1 convention, leak-free)
+// ============================================================
+
+TEST_CASE("RefReturn - function returning a reference lowers to ptr", "[refreturn][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        Point& make(i32 v) { return new Point(v); }
+        void main() { Point& p = make(5); }
+    )");
+    REQUIRE(irContains(ir, "define ptr @make(i32 %v)"));
+}
+
+TEST_CASE("RefReturn - a 'new' factory never retains (binding consumes the +1)", "[refreturn][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        Point& make(i32 v) { return new Point(v); }
+        void main() { Point& p = make(5); }
+    )");
+    REQUIRE_FALSE(irContains(ir, "call void @gg_retain("));   // new is +1; bind consumes it
+    REQUIRE(irContains(ir, "call void @gg_release("));        // p released at scope exit
+}
+
+TEST_CASE("RefReturn - returning a borrowed reference retains it (+1)", "[refreturn][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        Point& id(Point& r) { return r; }
+        void main() { Point& a = new Point(1); Point& b = id(a); }
+    )");
+    REQUIRE(irContains(ir, "define ptr @id(ptr %r)"));
+    REQUIRE(irContains(ir, "call void @gg_retain("));   // id() retains its borrowed return value
+}
+
+TEST_CASE("RefReturn - an unbound reference temporary is released", "[refreturn][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        Point& make(i32 v) { return new Point(v); }
+        void main() { make(5); }
+    )");
+    auto mainPos = ir.find("define void @main()");
+    REQUIRE(mainPos != std::string::npos);
+    REQUIRE(ir.substr(mainPos).find("call void @gg_release(") != std::string::npos);
+}
+
+TEST_CASE("RefReturn - generic method returning T for a reference element type", "[refreturn][generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        i32 main() {
+            Point& p = new Point(7);
+            Box<Point&>& b = new Box<Point&>(p);
+            Point& got = b.get();
+            return got.x;
+        }
+    )");
+    REQUIRE(irContains(ir, "define ptr @Box$Point.ref_get(ptr %self)"));
+}
+
+// ============================================================
+// Generics — nested type arguments (Vec<Box<i32>>, '>>' split)
+// ============================================================
+
+TEST_CASE("Generics - nested generic argument with '>>' split", "[generics][nested][codegen]") {
+    auto ir = codegenString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        class Holder<T> { public T& item; }
+        void main() {
+            Box<i32>& b = new Box<i32>(42);
+            Holder<Box<i32>>& h = new Holder<Box<i32>>();
+        }
+    )");
+    REQUIRE(irContains(ir, "%Box$i32 = type { i32 }"));
+    REQUIRE(irContains(ir, "%Holder$Box$i32 = type { ptr }"));
+}
+
+TEST_CASE("Generics - '&' after '>>' binds to the outer type, not the argument", "[generics][nested][semantic]") {
+    // Holder<Box<i32>>& h : the trailing '&' makes 'h' a Holder reference; the
+    // argument is the value type Box<i32> (not Box<i32>&).
+    auto r = analyzeString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        class Holder<T> { public T& item; }
+        void main() {
+            Box<i32>& b = new Box<i32>(1);
+            Holder<Box<i32>>& h = new Holder<Box<i32>>();
+            h.item = b;
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Generics - nested type argument in a generic function call", "[generics][nested][codegen]") {
+    auto ir = codegenString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        i32 tag<T>(T& x) { return 1; }
+        void main() {
+            Box<i32>& b = new Box<i32>(7);
+            i32 r = tag<Box<i32>>(b);
+        }
+    )");
+    REQUIRE(irContains(ir, "define i32 @tag$Box$i32(ptr %x)"));
+    REQUIRE(irContains(ir, "call i32 @tag$Box$i32("));
+}

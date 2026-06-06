@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_set>
 #include "parser/Ast.h"
+#include "parser/Parser.h"
 
 // Resolves all import statements in a root file and returns a single flat
 // Program whose declarations are the union of the root file and every imported
@@ -24,8 +25,16 @@ public:
 
 private:
     std::unordered_set<std::string> processedPaths;
+    // Shared across every file so generic templates and their instantiations span files.
+    GenericRegistry sharedGenerics_;
 
     Program processFile(const std::string& filePath);
+
+    // Transitively pre-register generic template names (so cross-file use sites are
+    // recognised regardless of which file declares the template) into sharedGenerics_.
+    void prescanTemplates(const std::string& filePath,
+                          std::unordered_set<std::string>& visitedPaths,
+                          Parser& seedParser);
 
     // Collects all class names (transitively) reachable from filePath by lexing
     // each file and scanning for "class IDENTIFIER" tokens.  visitedPaths prevents

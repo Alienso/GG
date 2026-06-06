@@ -48,6 +48,12 @@ private:
     // copy with retain at reference-field boundaries). Populated on demand.
     std::unordered_set<std::string> clonesNeeded_;
 
+    // Reference values produced with a +1 count (from `new` or a reference-returning
+    // call) that are not yet owned by anyone. Released at the end of the enclosing
+    // full expression unless a consumer claims ownership first.
+    struct TempRelease { std::string ptr; std::string className; };
+    std::vector<TempRelease> pendingTemps_;
+
     // ---- Module-level state ----
     IRModule           module;
     const ExprTypeMap* typeMap        = nullptr;
@@ -177,6 +183,17 @@ private:
 
     // Resolve a ParamDecl type token — handles IDENTIFIER tokens naming a class.
     Type        resolveParamType(const ParamDecl& param) const;
+
+    // Resolve a return-type token. Decodes "Class&" → Reference; otherwise primitives/void.
+    Type        resolveReturnType(const Token& typeToken) const;
+
+    // ---- Reference-return / temporary lifetime helpers ----
+    // True if `e` yields a +1 reference (a `new` or a reference-returning call).
+    [[nodiscard]] bool producesPlusOne(const Expr& e) const;
+    // A consumer takes ownership of the +1 temporary `ptr` (drop its pending release).
+    void claimTemp(const std::string& ptr);
+    // Release every still-pending +1 reference temporary (end of a full expression).
+    void flushTempReleases();
 
     // IR type used to pass `type` as a function argument / parameter.
     // Objects are passed by reference (ptr); all other types by value.

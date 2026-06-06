@@ -51,8 +51,9 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     usedAllocaNames.clear();
     breakLabelStack.clear(); continueLabelStack.clear();
     dtorScopes_.clear();
+    pendingTemps_.clear();
 
-    currentReturnType        = typeFromToken(function.returnType.type);
+    currentReturnType        = resolveReturnType(function.returnType);
     std::string returnIrType = irTypeName(currentReturnType);
 
     std::string paramStr;
@@ -84,10 +85,11 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     usedAllocaNames.clear();
     breakLabelStack.clear(); continueLabelStack.clear();
     dtorScopes_.clear();
+    pendingTemps_.clear();
     currentClassName_ = className;
 
     bool isVoidLike = method.isConstructor || method.isDestructor;
-    currentReturnType        = isVoidLike ? Type{TypeKind::Void} : typeFromToken(method.returnType.type);
+    currentReturnType        = isVoidLike ? Type{TypeKind::Void} : resolveReturnType(method.returnType);
     std::string returnIrType = isVoidLike ? "void" : irTypeName(currentReturnType);
 
     std::string mangledName = method.isDestructor

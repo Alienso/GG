@@ -1,0 +1,40 @@
+// e2e/reference_returns_test.gg
+//
+// End-to-end validation of reference-returning functions/methods (leak-free):
+//   * a factory returns a fresh +1 reference (new)
+//   * a function returns a borrowed reference (param) — retained to +1
+//   * binding a reference-returning call consumes the +1 (no leak, no double free)
+//   * an unbound reference temporary is released at statement end
+//
+// Each check returns a unique number on failure; main returns 0 on success.
+//
+// Expected result: exit code 0
+
+class Counter {
+    public i32 n;
+    public Counter(i32 v) { this.n = v; }
+    public i32 get() { return this.n; }
+}
+
+Counter& make(i32 v) { return new Counter(v); }                       // fresh +1
+Counter& pick(Counter& a, Counter& b, bool first) {                   // borrowed return
+    if (first) { return a; }
+    return b;
+}
+
+i32 main() {
+    Counter& a = make(10);
+    if (a.get() != 10) { return 1; }
+
+    Counter& b = make(20);
+    Counter& chosen = pick(a, b, true);    // returns a (borrowed → retained → consumed)
+    if (chosen.get() != 10) { return 2; }
+
+    Counter& other = pick(a, b, false);    // returns b
+    if (other.get() != 20) { return 3; }
+
+    make(99);                              // unbound temporary → released at statement end
+
+    return 0;
+    // scope exit releases other, b, chosen, a — each object freed exactly once
+}

@@ -8,7 +8,7 @@
 
 void CodeGen::genStmt(const Stmt& stmt) {
     std::visit(overloaded{
-        [&](const ExprStmt& exprStmt)      { genExpr(exprStmt.expression); },
+        [&](const ExprStmt& exprStmt)      { genExpr(exprStmt.expression); flushTempReleases(); },
         [&](const BlockStmt& blockStmt)    { genBlock(blockStmt); },
         [&](const IfStmt& ifStmt)          { genIf(ifStmt); },
         [&](const WhileStmt& whileStmt)    { genWhile(whileStmt); },
@@ -52,6 +52,7 @@ void CodeGen::genIf(const IfStmt& ifStmt) {
     Type        conditionType  = exprType(ifStmt.condition);
     std::string conditionValue = genExpr(ifStmt.condition);
     std::string conditionBool  = emitToBool(conditionValue, conditionType);
+    flushTempReleases();   // release reference temporaries created in the condition
 
     if (ifStmt.elseBranch)
         emitCondBr(conditionBool, thenLabel, elseLabel);
@@ -86,6 +87,7 @@ void CodeGen::genWhile(const WhileStmt& whileStmt) {
     Type        conditionType  = exprType(whileStmt.condition);
     std::string conditionValue = genExpr(whileStmt.condition);
     std::string conditionBool  = emitToBool(conditionValue, conditionType);
+    flushTempReleases();
     emitCondBr(conditionBool, bodyLabel, mergeLabel);
 
     switchBlock(bodyLabel);
@@ -119,6 +121,7 @@ void CodeGen::genFor(const ForStmt& forStmt) {
         Type        conditionType  = exprType(*forStmt.condition);
         std::string conditionValue = genExpr(*forStmt.condition);
         std::string conditionBool  = emitToBool(conditionValue, conditionType);
+        flushTempReleases();
         emitCondBr(conditionBool, bodyLabel, mergeLabel);
     } else {
         emitBr(bodyLabel);  // for(;;)
@@ -133,7 +136,7 @@ void CodeGen::genFor(const ForStmt& forStmt) {
     if (!currentBasicBlock->terminated) emitBr(incLabel);
 
     switchBlock(incLabel);
-    if (forStmt.increment.has_value()) genExpr(*forStmt.increment);
+    if (forStmt.increment.has_value()) { genExpr(*forStmt.increment); flushTempReleases(); }
     emitBr(condLabel);
 
     switchBlock(mergeLabel);
@@ -150,9 +153,20 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
         Type returnValueType = exprType(*returnStmt.value);
         retVal               = genExpr(*returnStmt.value);
         retVal               = emitCast(retVal, returnValueType, currentReturnType);
+
+        // Reference return: hand the caller an owned (+1) reference.
+        //   +1 producer (new / ref-returning call) → take ownership of its pending release.
+        //   borrowed reference (variable / field / param) → retain to produce the +1.
+        if (currentReturnType.kind == TypeKind::Reference) {
+            if (producesPlusOne(*returnStmt.value)) claimTemp(retVal);
+            else                                    emit("call void @gg_retain(ptr " + retVal + ")");
+        }
     }
 
-    // Flush all live destructor scopes (innermost first) before returning.
+    // Release any leaked reference temporaries from the return expression, then
+    // release all live locals (innermost scope first). The returned reference was
+    // either claimed (removed from pending) or retained, so it survives both.
+    flushTempReleases();
     for (auto & dtorScope : std::ranges::reverse_view(dtorScopes_))
         emitDtorsForScope(dtorScope);
 

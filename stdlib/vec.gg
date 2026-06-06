@@ -1,0 +1,19 @@
+import "mem.gg";
+
+class Vec {
+
+    public ptr data;
+    public u64 size;
+    public u64 capacity;
+
+    public Vec() {
+        this.size = 0;
+        this.capacity = 8;
+        this.data = malloc(capacity);
+    }
+
+    public ~Vec(){
+        free(this.data);
+    }
+
+}

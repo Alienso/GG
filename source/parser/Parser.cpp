@@ -27,41 +27,50 @@ static std::string argMangle(const std::vector<Token>& arg) {
     return s;
 }
 
-Parser::Parser(std::unordered_set<std::string> initialClassNames)
-    : classNames(std::move(initialClassNames)) {}
+Parser::Parser(std::unordered_set<std::string> initialClassNames, GenericRegistry* sharedRegistry)
+    : classNames(std::move(initialClassNames)) {
+    if (sharedRegistry) gen_ = sharedRegistry;
+}
 
-Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& filenameStr) {
+void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
+    // Register class names defined in this token stream. A class followed by '<'
+    // is a generic template (its name goes to the generic class-name set instead).
+    for (size_t i = 0; i + 1 < toks.size(); ++i) {
+        if (toks[i].type == TokenType::CLASS && toks[i + 1].type == TokenType::IDENTIFIER) {
+            if (i + 2 < toks.size() && toks[i + 2].type == TokenType::LESS)
+                gen_->classNames.insert(toks[i + 1].lexeme);
+            else
+                classNames.insert(toks[i + 1].lexeme);
+        }
+    }
+    // Register generic function template names ( "<type|id> name < ... > (" )
+    // so call sites are recognised regardless of declaration order.
+    for (size_t i = 0; i + 2 < toks.size(); ++i) {
+        bool startsType = toks[i].type == TokenType::IDENTIFIER || isTypeKeyword(toks[i].type);
+        if (startsType && toks[i + 1].type == TokenType::IDENTIFIER
+            && toks[i + 2].type == TokenType::LESS) {
+            size_t j = i + 3; int depth = 1;
+            while (j < toks.size() && depth > 0) {
+                if (toks[j].type == TokenType::LESS)             depth++;
+                else if (toks[j].type == TokenType::GREATER)     depth--;
+                else if (toks[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
+                j++;
+            }
+            if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN)
+                gen_->funcNames.insert(toks[i + 1].lexeme);
+        }
+    }
+}
+
+void Parser::monomorphize(Program& program) { runMonomorphization(program); }
+
+Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& filenameStr,
+                      bool runMono) {
     tokens   = std::vector<Token>(inputTokens);
     current  = 0;
     filename = filenameStr;
-    // Do NOT clear classNames_ here — pre-registered names from imports must survive.
-    // Pre-pass: register class names defined in THIS file's token stream. A class
-    // followed by '<' is a generic template (goes to templateClassNames_ instead).
-    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-        if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER) {
-            if (i + 2 < tokens.size() && tokens[i + 2].type == TokenType::LESS)
-                templateClassNames_.insert(tokens[i + 1].lexeme);
-            else
-                classNames.insert(tokens[i + 1].lexeme);
-        }
-    }
-    // Pre-pass: register generic function template names ( "<type|id> name < ... > (" )
-    // so call sites are recognised regardless of declaration order.
-    for (size_t i = 0; i + 2 < tokens.size(); ++i) {
-        bool startsType = tokens[i].type == TokenType::IDENTIFIER || isTypeKeyword(tokens[i].type);
-        if (startsType && tokens[i + 1].type == TokenType::IDENTIFIER
-            && tokens[i + 2].type == TokenType::LESS) {
-            size_t j = i + 3; int depth = 1;
-            while (j < tokens.size() && depth > 0) {
-                if (tokens[j].type == TokenType::LESS)             depth++;
-                else if (tokens[j].type == TokenType::GREATER)     depth--;
-                else if (tokens[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
-                j++;
-            }
-            if (j < tokens.size() && tokens[j].type == TokenType::LEFT_PAREN)
-                templateFuncNames_.insert(tokens[i + 1].lexeme);
-        }
-    }
+    // Register this file's template/class names (idempotent if pre-seeded by the caller).
+    prescanTemplateNames(tokens);
 
     Program program;
     while (!isAtEnd()) {
@@ -70,7 +79,7 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
         program.declarations.push_back(parseDeclaration());
     }
 
-    runMonomorphization(program);   // expand all requested instantiations
+    if (runMono) runMonomorphization(program);   // expand instantiations now (single-file path)
     return program;
 }
 
@@ -123,8 +132,8 @@ bool Parser::tryCaptureFunctionTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[current + 1].lexeme;
-    templates_[name] = Template{ std::move(typeParams), std::move(captured) };
-    templateFuncNames_.insert(name);
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(captured) };
+    gen_->funcNames.insert(name);
     current = k;   // advance past the captured declaration
     return true;
 }
@@ -163,8 +172,8 @@ bool Parser::tryCaptureClassTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[current + 1].lexeme;
-    templates_[name] = Template{ std::move(typeParams), std::move(captured) };
-    templateClassNames_.insert(name);
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(captured) };
+    gen_->classNames.insert(name);
     current = k;
     return true;
 }
@@ -174,12 +183,12 @@ size_t Parser::typeSpanAt(size_t from) const {
     const Token& t = tokens[from];
     bool isType = isTypeKeyword(t.type)
                || (t.type == TokenType::IDENTIFIER
-                   && (classNames.count(t.lexeme) || templateClassNames_.count(t.lexeme)));
+                   && (classNames.count(t.lexeme) || gen_->classNames.count(t.lexeme)));
     if (!isType) return 0;
 
     size_t i = from + 1;
     // generic argument list: Name<...>
-    if (t.type == TokenType::IDENTIFIER && templateClassNames_.count(t.lexeme)
+    if (t.type == TokenType::IDENTIFIER && gen_->classNames.count(t.lexeme)
         && i < tokens.size() && tokens[i].type == TokenType::LESS) {
         int depth = 1; ++i;
         while (i < tokens.size() && depth > 0) {
@@ -197,18 +206,44 @@ size_t Parser::typeSpanAt(size_t from) const {
 std::vector<std::vector<Token>> Parser::parseTypeArgList() {
     consume(TokenType::LESS, "expected '<'");
     std::vector<std::vector<Token>> args;
-    std::vector<Token> cur;
-    int depth = 1;
-    while (!isAtEnd() && depth > 0) {
-        TokenType tt = peek().type;
-        if (tt == TokenType::LESS)              { depth++; cur.push_back(advance()); }
-        else if (tt == TokenType::GREATER)      { depth--; if (depth == 0) { advance(); break; } cur.push_back(advance()); }
-        else if (tt == TokenType::SHIFT_RIGHT)  { depth -= 2; advance(); if (depth <= 0) break; }
-        else if (tt == TokenType::COMMA && depth == 1) { args.push_back(cur); cur.clear(); advance(); }
-        else                                    { cur.push_back(advance()); }
+    if (!check(TokenType::GREATER) && !check(TokenType::SHIFT_RIGHT)) {
+        do { args.push_back(parseOneTypeArg()); } while (match({ TokenType::COMMA }));
     }
-    if (!cur.empty()) args.push_back(cur);
+    consumeCloseAngle();
     return args;
+}
+
+// Parse a single type argument. A nested generic instantiation (Name<...>) is
+// collapsed into one mangled token (and its instantiation recorded); a trailing
+// '&' is kept as a separate token so argMangle can render it as ".ref".
+std::vector<Token> Parser::parseOneTypeArg() {
+    std::vector<Token> cur;
+    Token base = advance();
+    if (base.type == TokenType::IDENTIFIER && gen_->classNames.count(base.lexeme)
+        && check(TokenType::LESS)) {
+        std::vector<std::vector<Token>> nested = parseTypeArgList();
+        std::string mangled = mangleInstantiation(base.lexeme, nested);
+        recordInstantiation(base.lexeme, mangled, std::move(nested));
+        classNames.insert(mangled);
+        cur.push_back(Token{ TokenType::IDENTIFIER, mangled, base.line });
+    } else {
+        cur.push_back(base);
+    }
+    // A trailing '&' belongs to THIS argument only when no outer close-angles are
+    // pending: a '>>' that closed this arg also closes an enclosing level, so any
+    // '&' following it applies to the outer type, not this argument.
+    if (pendingCloseAngles_ == 0 && check(TokenType::AMPERSAND))
+        cur.push_back(advance());
+    return cur;
+}
+
+// Consume one closing '>'. A '>>' (SHIFT_RIGHT) closes two levels: consume it once
+// and leave a virtual '>' pending for the enclosing list (the classic C++ fix).
+void Parser::consumeCloseAngle() {
+    if (pendingCloseAngles_ > 0) { --pendingCloseAngles_; return; }
+    if (check(TokenType::GREATER))     { advance(); return; }
+    if (check(TokenType::SHIFT_RIGHT)) { advance(); pendingCloseAngles_ = 1; return; }
+    throw error(peek(), "expected '>' to close type arguments");
 }
 
 std::string Parser::mangleInstantiation(const std::string& base,
@@ -220,21 +255,25 @@ std::string Parser::mangleInstantiation(const std::string& base,
 
 void Parser::recordInstantiation(const std::string& templateName, const std::string& mangled,
                                  std::vector<std::vector<Token>> args) {
-    if (instantiated_.count(mangled)) return;
-    instantiated_.insert(mangled);
-    instantiationWorklist_.push_back(PendingInstantiation{ templateName, mangled, std::move(args) });
+    if (gen_->instantiated.count(mangled)) return;
+    gen_->instantiated.insert(mangled);
+    gen_->worklist.push_back(GenericInstantiation{ templateName, mangled, std::move(args) });
 }
 
 void Parser::runMonomorphization(Program& program) {
-    while (!instantiationWorklist_.empty()) {
-        PendingInstantiation inst = std::move(instantiationWorklist_.back());
-        instantiationWorklist_.pop_back();
+    // Every queued instantiation's mangled name is a concrete class name during
+    // re-parse (the per-file parsers that recorded them are gone, so seed here).
+    for (const auto& mangled : gen_->instantiated) classNames.insert(mangled);
 
-        auto it = templates_.find(inst.templateName);
-        if (it == templates_.end())
+    while (!gen_->worklist.empty()) {
+        GenericInstantiation inst = std::move(gen_->worklist.back());
+        gen_->worklist.pop_back();
+
+        auto it = gen_->templates.find(inst.templateName);
+        if (it == gen_->templates.end())
             throw error(tokens.empty() ? Token{TokenType::END_OF_FILE, "", 0} : tokens.back(),
                         "no generic template named '" + inst.templateName + "'");
-        const Template& tmpl = it->second;
+        const GenericTemplate& tmpl = it->second;
 
         // Map each type parameter to its argument token slice (emplace = copy-construct;
         // Token is not copy-assignable due to its const members).
@@ -381,7 +420,7 @@ bool Parser::isTypeName() const {
         case TokenType::PTR:
             return true;
         case TokenType::IDENTIFIER:
-            return classNames.count(peek().lexeme) > 0 || templateClassNames_.count(peek().lexeme) > 0;
+            return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
         default:
             return false;
     }
@@ -394,7 +433,7 @@ Token Parser::consumeType() {
     bool        classLike = base.type == TokenType::IDENTIFIER;  // class / mangled instantiation
 
     // Generic class instantiation: Name<args> -> mangled concrete class name.
-    if (base.type == TokenType::IDENTIFIER && templateClassNames_.count(base.lexeme)
+    if (base.type == TokenType::IDENTIFIER && gen_->classNames.count(base.lexeme)
         && check(TokenType::LESS)) {
         std::vector<std::vector<Token>> args = parseTypeArgList();
         std::string mangled = mangleInstantiation(base.lexeme, args);
@@ -449,7 +488,7 @@ Stmt Parser::parseDeclaration() {
         && tokens[current + funcSpan + 1].type == TokenType::LEFT_PAREN
         && !(insideFunction
              && peek().type == TokenType::IDENTIFIER
-             && (classNames.count(peek().lexeme) || templateClassNames_.count(peek().lexeme)))) {
+             && (classNames.count(peek().lexeme) || gen_->classNames.count(peek().lexeme)))) {
         Token returnType = consumeType();
         Token name       = advance();
         return parseFunctionDecl(returnType, name);
@@ -994,7 +1033,7 @@ Expr Parser::parsePrimary() {
             throw error(peek(), "expected class name after 'new'");
         Token rawName  = advance();
         std::string clsLex = rawName.lexeme;
-        if (templateClassNames_.count(rawName.lexeme) && check(TokenType::LESS)) {
+        if (gen_->classNames.count(rawName.lexeme) && check(TokenType::LESS)) {
             std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
             std::string mangled = mangleInstantiation(rawName.lexeme, typeArgs);
             recordInstantiation(rawName.lexeme, mangled, std::move(typeArgs));
@@ -1022,7 +1061,7 @@ Expr Parser::parsePrimary() {
         Token name = previous();
 
         // Generic function call: name<typeArgs>(args)  →  mangled concrete call.
-        if (templateFuncNames_.count(name.lexeme) && check(TokenType::LESS)) {
+        if (gen_->funcNames.count(name.lexeme) && check(TokenType::LESS)) {
             std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
             std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
             recordInstantiation(name.lexeme, mangled, std::move(typeArgs));

@@ -1,0 +1,21 @@
+// Generic free functions (monomorphized).
+
+T   addT<T>(T a, T b)        { return a + b; }
+T   maxT<T>(T a, T b)        { if (a > b) { return a; } return b; }
+K   firstOf<K, V>(K a, V b)  { return a; }
+
+i32 main() {
+    i32 r = addT<i32>(3, 4);            // 7  (instantiates addT$i32)
+    if (r != 7) { return 1; }
+
+    i32 m = maxT<i32>(10, 20);          // 20
+    if (m != 20) { return 2; }
+
+    i64 big = addT<i64>(1000, 2000);    // 3000 (separate instantiation addT$i64)
+    if (big != 3000) { return 3; }
+
+    i32 f = firstOf<i32, i64>(42, 99);  // 42 (multiple type params)
+    if (f != 42) { return 4; }
+
+    return 0;
+}

@@ -1,0 +1,87 @@
+// e2e/new_reference_test.gg
+//
+// End-to-end validation of the `new` operator and heap references (Class&).
+//   * new allocates a refcounted heap instance and runs its constructor
+//   * Class& holds a reference; member/method access dereferences it
+//   * a reference owner is released at scope exit (dtor runs, memory freed)
+//   * references passed to functions are borrows (caller keeps ownership)
+//
+// Each check returns a unique number on failure; main returns 0 on success.
+//
+// Expected result: exit code 0
+
+class Point {
+    public i32 x;
+    public i32 y;
+    public Point(i32 a, i32 b) { this.x = a; this.y = b; }
+    public i32  sum()        { return this.x + this.y; }
+    public void scale(i32 k) { this.x = this.x * k; this.y = this.y * k; }
+}
+
+// A class with a destructor — exercises the dtor-on-release path
+// (gg_release receives @Logged_dtor instead of null).
+class Logged {
+    public i32 id;
+    public Logged(i32 i) { this.id = i; }
+    public ~Logged() { }
+    public i32 get() { return this.id; }
+}
+
+// Borrowed reference (read only).
+i32 readX(Point& q) { return q.x; }
+
+// Borrowed reference (mutates the shared object).
+void bump(Point& q) { q.x = q.x + 1; }
+
+i32 main() {
+
+    // ---- 1-2: new + member read --------------------------------------
+    Point& p = new Point(3, 4);
+    if (p.x != 3) { return 1; }
+    if (p.y != 4) { return 2; }
+
+    // ---- 3: member mutation through a reference -----------------------
+    p.x = 10;
+    if (p.x != 10) { return 3; }
+
+    // ---- 4: method call through a reference --------------------------
+    if (p.sum() != 14) { return 4; }
+
+    // ---- 5-6: a method mutating self through a reference --------------
+    p.scale(2);
+    if (p.x != 20) { return 5; }
+    if (p.y != 8)  { return 6; }
+
+    // ---- 7: pass a reference to a function (borrow, read) ------------
+    Point& q = new Point(7, 0);
+    if (readX(q) != 7) { return 7; }
+
+    // ---- 8: mutate through a borrowed reference; visible to caller ----
+    bump(q);
+    if (q.x != 8) { return 8; }
+
+    // ---- 9: multiple independent heap objects ------------------------
+    Point& a = new Point(1, 1);
+    Point& b = new Point(2, 2);
+    if (a.sum() + b.sum() != 6) { return 9; }
+
+    // ---- 10: new inside a loop — allocate + release each iteration ----
+    i32 total = 0;
+    for (i32 i = 1; i <= 3; i++) {
+        Point& t = new Point(i, i);
+        total = total + t.sum();          // 2 + 4 + 6 = 12
+    }                                     // t released at end of each iteration
+    if (total != 12) { return 10; }
+
+    // ---- 11: dtor-on-release path (class with a destructor) ----------
+    Logged& lg = new Logged(99);
+    if (lg.get() != 99) { return 11; }
+
+    // ---- 12: nested scope releases its reference at block end ---------
+    {
+        Point& inner = new Point(5, 5);
+        if (inner.sum() != 10) { return 12; }
+    }                                     // inner released here
+
+    return 0;
+}

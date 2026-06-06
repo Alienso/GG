@@ -940,3 +940,133 @@ TEST_CASE("CodeGen - ptr returned from extern can be stored and passed", "[codeg
     REQUIRE(irContains(ir, "call ptr @malloc"));
     REQUIRE(irContains(ir, "call void @free(ptr"));
 }
+
+// ============================================================
+// Reference type representation (Phase 0 — Ref<T> foundation)
+// ============================================================
+
+TEST_CASE("Reference type - typeName renders as Ref<Class>", "[type][reference]") {
+    Type r = makeReferenceType("Point");
+    REQUIRE(r.kind == TypeKind::Reference);
+    REQUIRE(r.className == "Point");
+    REQUIRE(typeName(r) == "Ref<Point>");
+}
+
+TEST_CASE("Reference type - lowers to an opaque ptr in IR", "[type][reference]") {
+    REQUIRE(irTypeName(makeReferenceType("Point")) == "ptr");
+}
+
+TEST_CASE("Reference type - is distinct from the value object type", "[type][reference]") {
+    Type value = makeObjectType("Point");
+    Type ref   = makeReferenceType("Point");
+    REQUIRE(value != ref);                 // same class name, different kind
+    REQUIRE(irTypeName(value) == "%Point");
+    REQUIRE(irTypeName(ref)   == "ptr");
+}
+
+// ============================================================
+// Generics — monomorphized generic functions
+// ============================================================
+
+TEST_CASE("Generics - generic function instantiates to a mangled concrete function", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        T addT<T>(T a, T b) { return a + b; }
+        i32 main() { return addT<i32>(3, 4); }
+    )");
+    REQUIRE(irContains(ir, "define i32 @addT$i32(i32 %a, i32 %b)"));
+    REQUIRE(irContains(ir, "call i32 @addT$i32("));
+    REQUIRE_FALSE(irContains(ir, "@addT("));   // the template itself is never emitted
+}
+
+TEST_CASE("Generics - distinct type arguments produce distinct instantiations", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        T addT<T>(T a, T b) { return a + b; }
+        i64 main() { i32 a = addT<i32>(1, 2); return addT<i64>(10, 20); }
+    )");
+    REQUIRE(irContains(ir, "define i32 @addT$i32("));
+    REQUIRE(irContains(ir, "define i64 @addT$i64("));
+}
+
+TEST_CASE("Generics - multiple type parameters mangle in order", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        K firstOf<K, V>(K a, V b) { return a; }
+        i32 main() { return firstOf<i32, i64>(42, 99); }
+    )");
+    REQUIRE(irContains(ir, "define i32 @firstOf$i32$i64(i32 %a, i64 %b)"));
+}
+
+TEST_CASE("Generics - the same instantiation is emitted only once", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        T idT<T>(T x) { return x; }
+        i32 main() { i32 a = idT<i32>(1); i32 b = idT<i32>(2); return a + b; }
+    )");
+    auto first = ir.find("define i32 @idT$i32(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @idT$i32(", first + 1) == std::string::npos);
+}
+
+TEST_CASE("Generics - generic function call type-checks", "[generics][semantic]") {
+    auto r = analyzeString(R"(
+        T addT<T>(T a, T b) { return a + b; }
+        i32 main() { return addT<i32>(3, 4); }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+// ============================================================
+// Generics — monomorphized generic classes
+// ============================================================
+
+TEST_CASE("Generics - generic class instantiates to a mangled struct and methods", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        i32 main() { Box<i32>& b = new Box<i32>(42); return b.get(); }
+    )");
+    REQUIRE(irContains(ir, "%Box$i32 = type { i32 }"));
+    REQUIRE(irContains(ir, "define void @Box$i32_Box$i32(ptr %self, i32 %v)"));
+    REQUIRE(irContains(ir, "define i32 @Box$i32_get(ptr %self)"));
+    REQUIRE_FALSE(irContains(ir, "%Box ="));   // the template itself is never emitted
+}
+
+TEST_CASE("Generics - distinct class instantiations produce distinct structs", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        void main() { Box<i32>& a = new Box<i32>(1); Box<i64>& b = new Box<i64>(2); }
+    )");
+    REQUIRE(irContains(ir, "%Box$i32 = type { i32 }"));
+    REQUIRE(irContains(ir, "%Box$i64 = type { i64 }"));
+}
+
+TEST_CASE("Generics - generic class with multiple type parameters", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Pair<K, V> { public K first; public V second; public Pair(K a, V b){ this.first=a; this.second=b; } }
+        void main() { Pair<i32, i64>& p = new Pair<i32, i64>(7, 99); }
+    )");
+    REQUIRE(irContains(ir, "%Pair$i32$i64 = type { i32, i64 }"));
+}
+
+TEST_CASE("Generics - reference element type lowers to a ptr field", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Cell<T> { public T value; public Cell(T v){ this.value=v; } }
+        void main() { Point& p = new Point(5); Cell<Point&>& c = new Cell<Point&>(p); }
+    )");
+    REQUIRE(irContains(ir, "%Cell$Point.ref = type { ptr }"));
+}
+
+TEST_CASE("Generics - generic class type-checks", "[generics][semantic]") {
+    auto r = analyzeString(R"(
+        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        i32 main() { Box<i32>& b = new Box<i32>(7); return b.get(); }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen]") {
+    auto ir = codegenString(R"(
+        class Node<T> { public T value; public Node<T>& next; public Node(T v){ this.value=v; } }
+        void main() { Node<i32>& n = new Node<i32>(1); n.next = new Node<i32>(2); }
+    )");
+    REQUIRE(irContains(ir, "%Node$i32 = type { i32, ptr }"));
+    REQUIRE(irContains(ir, "define void @Node$i32_dtor(ptr %self)"));
+}

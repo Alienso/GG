@@ -64,6 +64,13 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
         (f == TypeKind::U32  && t == TypeKind::Char))
         return CastResult::Silent;
 
+    // Heap reference → value of the same class: permitted. In an assignment or
+    // initializer this performs a deep copy (clone); when passed to a value
+    // parameter it borrows. (The reverse, value → reference, requires explicit
+    // `new Class(value)`.)
+    if (f == TypeKind::Reference && t == TypeKind::Object && from.className == to.className)
+        return CastResult::Silent;
+
     // Any integer → float (silent widening)
     if (isInteger(f) && isFloat(t))          return CastResult::Silent;
 
@@ -184,6 +191,7 @@ std::string typeName(const Type& t) {
         case TypeKind::Ptr:    return "ptr";
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
+        case TypeKind::Reference: return "Ref<" + t.className + ">";
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "<error>";
     }

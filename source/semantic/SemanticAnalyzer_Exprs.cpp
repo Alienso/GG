@@ -22,6 +22,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const MemberAssignExpr& ma)               { return analyzeMemberAssign(ma); },
         [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
+        [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -204,11 +205,14 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return Type{TypeKind::Error};
     }
 
-    // Object parameters are immutable references: you may mutate their fields
-    // (obj.field = ...) but you may not rebind the reference itself (obj = ...).
-    if (sym->isParameter && sym->type.kind == TypeKind::Object) {
-        error(assign.name, "cannot reassign object parameter '" + assign.name.lexeme
-              + "': object references are immutable");
+    // Object/reference parameters are immutable bindings: you may mutate their
+    // fields (obj.field = ...) but you may not rebind the parameter (obj = ...).
+    // A reference parameter is a borrow, so rebinding it would corrupt refcounts.
+    if (sym->isParameter
+        && (sym->type.kind == TypeKind::Object || sym->type.kind == TypeKind::Reference)) {
+        std::string kindWord = sym->type.kind == TypeKind::Object ? "object" : "reference";
+        error(assign.name, "cannot reassign " + kindWord + " parameter '" + assign.name.lexeme
+              + "': it is an immutable binding");
         analyzeExpr(*assign.value);
         return sym->type;
     }
@@ -339,14 +343,8 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
 }
 
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
-    Type elementType;
-    // If the type token is an IDENTIFIER that names a class, resolve to Object type
-    if (varDecl.typeName.type == TokenType::IDENTIFIER
-        && classRegistry.count(varDecl.typeName.lexeme)) {
-        elementType = makeObjectType(varDecl.typeName.lexeme);
-    } else {
-        elementType = typeFromToken(varDecl.typeName.type);
-    }
+    // Resolve the declared type — handles class names (Object) and Class& (Reference).
+    Type elementType = resolveTypeToken(varDecl.typeName);
     Type declaredType = varDecl.arraySize > 0
         ? makeArrayType(elementType.kind, varDecl.arraySize)
         : elementType;
@@ -601,4 +599,56 @@ Type SemanticAnalyzer::analyzeCast(const CastExpr& castExpr) {
     error(castExpr.targetType,
           "cannot cast '" + typeName(fromType) + "' to '" + typeName(toType) + "'");
     return Type{TypeKind::Error};
+}
+
+// ============================================================
+// new expression analysis — allocates a heap instance (Class&)
+// ============================================================
+
+Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
+    const std::string& className = newExpr.className.lexeme;
+
+    auto it = classRegistry.find(className);
+    if (it == classRegistry.end()) {
+        error(newExpr.className, "unknown class '" + className + "' in 'new' expression");
+        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    const ClassInfo& cls = it->second;
+
+    // Copy construction: new Class(x) where x is a value/reference of the same
+    // class. Deep-copies x; bypasses regular constructor matching.
+    if (newExpr.args.size() == 1) {
+        Type argType = analyzeExpr(*newExpr.args[0]);
+        if (!isError(argType)
+            && (argType.kind == TypeKind::Object || argType.kind == TypeKind::Reference)
+            && argType.className == className) {
+            return makeReferenceType(className);
+        }
+        // Not a copy — fall through to regular constructor matching.
+    }
+
+    auto ctorIt = cls.methods.find(className);
+    if (ctorIt == cls.methods.end()) {
+        // No explicit constructor — only a zero-argument `new` is allowed.
+        if (!newExpr.args.empty())
+            error(newExpr.className, "class '" + className
+                  + "' has no constructor but 'new' was given arguments");
+        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
+        return makeReferenceType(className);
+    }
+
+    const ClassInfo::Method& ctor = ctorIt->second;
+    if (newExpr.args.size() != ctor.paramTypes.size()) {
+        error(newExpr.className, "constructor '" + className + "' expects "
+              + std::to_string(ctor.paramTypes.size()) + " argument(s), got "
+              + std::to_string(newExpr.args.size()));
+        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
+        return makeReferenceType(className);
+    }
+
+    analyzeCallArgs(newExpr.args, ctor.paramTypes, newExpr.className,
+                    "constructor '" + className + "'");
+    return makeReferenceType(className);
 }

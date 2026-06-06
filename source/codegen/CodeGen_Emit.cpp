@@ -28,6 +28,76 @@ void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {
 }
 
 // ============================================================
+// Reference-counting runtime (emitted once, when `new` is used)
+// ============================================================
+
+void CodeGen::emitRefcountRuntime() {
+    // Ensure malloc/free are declared, deduplicating against extern-imported decls.
+    const std::string mallocDecl = "declare ptr @malloc(i64)";
+    const std::string freeDecl   = "declare void @free(ptr)";
+    bool haveMalloc = false, haveFree = false;
+    for (const auto& d : module.declares) {
+        if (d == mallocDecl) haveMalloc = true;
+        if (d == freeDecl)   haveFree = true;
+    }
+    if (!haveMalloc) module.declares.push_back(mallocDecl);
+    if (!haveFree)   module.declares.push_back(freeDecl);
+
+    // Intrusive header layout: [ i64 refcount ][ object body ].
+    // gg_alloc returns a pointer to the body; the count lives at body-8.
+    module.runtime.push_back(
+        "define ptr @gg_alloc(i64 %size) {\n"
+        "entry:\n"
+        "  %total = add i64 %size, 8\n"
+        "  %raw = call ptr @malloc(i64 %total)\n"
+        "  store i64 1, ptr %raw\n"
+        "  %body = getelementptr i8, ptr %raw, i64 8\n"
+        "  ret ptr %body\n"
+        "}\n");
+
+    // retain/release are null-safe so uninitialised/null reference slots are harmless.
+    module.runtime.push_back(
+        "define void @gg_retain(ptr %obj) {\n"
+        "entry:\n"
+        "  %isnull = icmp eq ptr %obj, null\n"
+        "  br i1 %isnull, label %done, label %inc\n"
+        "inc:\n"
+        "  %hdr = getelementptr i8, ptr %obj, i64 -8\n"
+        "  %cnt = load i64, ptr %hdr\n"
+        "  %n = add i64 %cnt, 1\n"
+        "  store i64 %n, ptr %hdr\n"
+        "  br label %done\n"
+        "done:\n"
+        "  ret void\n"
+        "}\n");
+
+    module.runtime.push_back(
+        "define void @gg_release(ptr %obj, ptr %dtor) {\n"
+        "entry:\n"
+        "  %isnull = icmp eq ptr %obj, null\n"
+        "  br i1 %isnull, label %done, label %dec\n"
+        "dec:\n"
+        "  %hdr = getelementptr i8, ptr %obj, i64 -8\n"
+        "  %cnt = load i64, ptr %hdr\n"
+        "  %n = sub i64 %cnt, 1\n"
+        "  store i64 %n, ptr %hdr\n"
+        "  %zero = icmp eq i64 %n, 0\n"
+        "  br i1 %zero, label %dealloc, label %done\n"
+        "dealloc:\n"
+        "  %hasdtor = icmp ne ptr %dtor, null\n"
+        "  br i1 %hasdtor, label %calldtor, label %freeit\n"
+        "calldtor:\n"
+        "  call void %dtor(ptr %obj)\n"
+        "  br label %freeit\n"
+        "freeit:\n"
+        "  call void @free(ptr %hdr)\n"
+        "  br label %done\n"
+        "done:\n"
+        "  ret void\n"
+        "}\n");
+}
+
+// ============================================================
 // Low-level emit helpers
 // ============================================================
 
@@ -94,6 +164,10 @@ Type CodeGen::exprType(const Expr& expression) const {
 }
 
 Type CodeGen::resolveParamType(const ParamDecl& param) const {
+    // Reference type: a synthesized "<Class>&" token from the parser.
+    if (param.typeName.type == TokenType::IDENTIFIER && !param.typeName.lexeme.empty()
+        && param.typeName.lexeme.back() == '&')
+        return makeReferenceType(param.typeName.lexeme.substr(0, param.typeName.lexeme.size() - 1));
     if (param.typeName.type == TokenType::IDENTIFIER && cgClasses_.count(param.typeName.lexeme))
         return makeObjectType(param.typeName.lexeme);
     return typeFromToken(param.typeName.type);

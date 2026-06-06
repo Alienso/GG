@@ -65,6 +65,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
         [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
+        [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
     }, *expr.node);
 }
 
@@ -321,6 +322,37 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
     std::string irType  = irTypeName(lhsType);
     std::string ptrName = allocaIt->second;
 
+    // Reference rebind: retain the new target, release the old, then store.
+    // retain-before-release keeps self-assignment (a = a) safe.
+    if (lhsType.kind == TypeKind::Reference) {
+        usesRefcount_ = true;
+        bool fromNew = assign.value->node
+                    && std::holds_alternative<NewExpr>(*assign.value->node);
+        Type        rhsType = exprType(*assign.value);
+        std::string newVal  = genExpr(*assign.value);
+        newVal = emitCast(newVal, rhsType, lhsType);
+        if (!fromNew)
+            emit("call void @gg_retain(ptr " + newVal + ")");
+
+        std::string oldVal  = emitLoad("ptr", ptrName);
+        auto        cgIt    = cgClasses_.find(lhsType.className);
+        std::string dtorArg = (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
+                            ? ("@" + lhsType.className + "_dtor") : "null";
+        emit("call void @gg_release(ptr " + oldVal + ", ptr " + dtorArg + ")");
+
+        emitStore("ptr", newVal, ptrName);
+        return newVal;
+    }
+
+    // Value-object copy assignment: deep-copy via clone (handles value = value
+    // and value = ref). clone releases the destination's old reference fields.
+    if (lhsType.kind == TypeKind::Object) {
+        std::string src = genExpr(*assign.value);   // Object→alloca; Reference→loaded heap ptr
+        clonesNeeded_.insert(lhsType.className);
+        emit("call void @" + lhsType.className + "_clone(ptr " + ptrName + ", ptr " + src + ")");
+        return ptrName;
+    }
+
     Type        rhsType = exprType(*assign.value);
     std::string value   = genExpr(*assign.value);
     value = emitCast(value, rhsType, lhsType);
@@ -426,6 +458,44 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         return ptrName;
     }
 
+    // ---- Reference (Class&) declaration ----
+    if (varDecl.typeName.type == TokenType::IDENTIFIER
+        && !varDecl.typeName.lexeme.empty() && varDecl.typeName.lexeme.back() == '&') {
+        usesRefcount_ = true;
+        std::string className = varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size() - 1);
+        Type        refType   = makeReferenceType(className);
+        std::string name      = varDecl.name.lexeme;
+        std::string ptrName   = freshAllocaName(name);
+
+        emitAlloca(ptrName, "ptr");
+        allocaMap[name]  = ptrName;
+        varTypeMap[name] = refType;
+
+        // Every reference variable co-owns its target and is released at scope exit
+        // (release is null-safe, so an uninitialised slot is harmless).
+        if (!dtorScopes_.empty())
+            dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/true });
+
+        if (varDecl.initializer) {
+            bool fromNew = varDecl.initializer->node
+                        && std::holds_alternative<NewExpr>(*varDecl.initializer->node);
+            Type        initType = exprType(*varDecl.initializer);
+            std::string value    = genExpr(*varDecl.initializer);
+            value = emitCast(value, initType, refType);   // ref → ref: no-op
+
+            // Copying an existing reference co-owns it → retain. `new` already yields
+            // a +1 count, which this variable takes over without an extra retain.
+            if (!fromNew)
+                emit("call void @gg_retain(ptr " + value + ")");
+
+            emitStore("ptr", value, ptrName);
+        } else {
+            emitStore("ptr", "null", ptrName);   // uninitialised reference → null
+        }
+
+        return ptrName;
+    }
+
     // ---- Object (class) declaration ----
     if (varDecl.typeName.type == TokenType::IDENTIFIER) {
         // Class type — varDecl.typeName.lexeme is the class name
@@ -445,11 +515,11 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         // If this class has a destructor, register the variable for scope-exit cleanup.
         {
             auto cgIt = cgClasses_.find(className);
-            if (cgIt != cgClasses_.end() && cgIt->second.hasDestructor && !dtorScopes_.empty())
-                dtorScopes_.back().emplace_back(ptrName, className);
+            if (cgIt != cgClasses_.end() && cgIt->second.needsDtor && !dtorScopes_.empty())
+                dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/false });
         }
 
-        // If initializer is a constructor CallExpr, emit the constructor call
+        // Initializer: a constructor call, or a copy from a value/reference.
         if (varDecl.initializer) {
             if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
                 const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
@@ -460,6 +530,11 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
                 std::string argStr = buildArgString(ctorCall.args, ctorParams);
                 emit("call void @" + mangledCtor + "(ptr " + ptrName
                      + (argStr.empty() ? "" : ", " + argStr) + ")");
+            } else {
+                // Copy initialisation: Point p = <value/ref of same class> — deep copy.
+                std::string src = genExpr(*varDecl.initializer);
+                clonesNeeded_.insert(className);
+                emit("call void @" + className + "_clone(ptr " + ptrName + ", ptr " + src + ")");
             }
         }
 
@@ -607,4 +682,46 @@ std::string CodeGen::genCast(const CastExpr& castExpr, const Type& toType) {
 
     // Numeric / bool / char conversions — emitCast covers all remaining cases.
     return emitCast(value, fromType, toType);
+}
+
+// ---- new (heap allocation) ----
+
+std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/) {
+    usesRefcount_ = true;
+    const std::string& className = newExpr.className.lexeme;
+
+    // sizeof(%Class) via the null-GEP trick.
+    std::string szPtr = freshTemp();
+    emit("%" + szPtr + " = getelementptr %" + className + ", ptr null, i32 1");
+    std::string szInt = freshTemp();
+    emit("%" + szInt + " = ptrtoint ptr %" + szPtr + " to i64");
+
+    // Allocate header+body on the heap (refcount = 1) and zero-initialise the body.
+    std::string body = freshTemp();
+    emit("%" + body + " = call ptr @gg_alloc(i64 %" + szInt + ")");
+    emit("store %" + className + " zeroinitializer, ptr %" + body);
+
+    // Copy construction: new Class(x) where x is a value/reference of the same class.
+    // Deep-copy x's contents into the fresh allocation via @Class_clone.
+    if (newExpr.args.size() == 1) {
+        Type argType = exprType(*newExpr.args[0]);
+        if ((argType.kind == TypeKind::Object || argType.kind == TypeKind::Reference)
+            && argType.className == className) {
+            std::string src = genExpr(*newExpr.args[0]);  // Object→alloca; Reference→loaded heap ptr
+            clonesNeeded_.insert(className);
+            emit("call void @" + className + "_clone(ptr %" + body + ", ptr " + src + ")");
+            return "%" + body;
+        }
+    }
+
+    // Run the constructor if the class defines one.
+    std::string mangledCtor = className + "_" + className;
+    auto funcIt = funcParamTypes.find(mangledCtor);
+    if (funcIt != funcParamTypes.end()) {
+        std::string argStr = buildArgString(newExpr.args, &funcIt->second);
+        emit("call void @" + mangledCtor + "(ptr %" + body
+             + (argStr.empty() ? "" : ", " + argStr) + ")");
+    }
+
+    return "%" + body;
 }

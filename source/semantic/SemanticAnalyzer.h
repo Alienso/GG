@@ -98,6 +98,7 @@ private:
     [[nodiscard]] Type analyzeMemberAssign(const MemberAssignExpr& memberAssign);
     [[nodiscard]] Type analyzeMethodCall(const MethodCallExpr& methodCall);
     [[nodiscard]] Type analyzeCast(const CastExpr& castExpr);
+    [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);
 
     // Helpers
     void          enterScope();

@@ -5,6 +5,28 @@
 #include "Parser.h"
 #include <iostream>
 
+static bool isTypeKeyword(TokenType t) {
+    switch (t) {
+        case TokenType::I8:  case TokenType::I16: case TokenType::I32: case TokenType::I64:
+        case TokenType::U8:  case TokenType::U16: case TokenType::U32: case TokenType::U64:
+        case TokenType::F32: case TokenType::F64:
+        case TokenType::BOOL: case TokenType::CHAR_TYPE: case TokenType::VOID: case TokenType::PTR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Mangle one type-argument token slice into an LLVM-safe name fragment.
+static std::string argMangle(const std::vector<Token>& arg) {
+    std::string s;
+    for (const Token& t : arg) {
+        if (t.type == TokenType::AMPERSAND) s += ".ref";   // Class&  ->  Class.ref
+        else                                s += t.lexeme;
+    }
+    return s;
+}
+
 Parser::Parser(std::unordered_set<std::string> initialClassNames)
     : classNames(std::move(initialClassNames)) {}
 
@@ -13,17 +35,240 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
     current  = 0;
     filename = filenameStr;
     // Do NOT clear classNames_ here — pre-registered names from imports must survive.
-    // Pre-pass: also register class names defined in THIS file's token stream.
+    // Pre-pass: register class names defined in THIS file's token stream. A class
+    // followed by '<' is a generic template (goes to templateClassNames_ instead).
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-        if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER)
-            classNames.insert(tokens[i + 1].lexeme);
+        if (tokens[i].type == TokenType::CLASS && tokens[i + 1].type == TokenType::IDENTIFIER) {
+            if (i + 2 < tokens.size() && tokens[i + 2].type == TokenType::LESS)
+                templateClassNames_.insert(tokens[i + 1].lexeme);
+            else
+                classNames.insert(tokens[i + 1].lexeme);
+        }
+    }
+    // Pre-pass: register generic function template names ( "<type|id> name < ... > (" )
+    // so call sites are recognised regardless of declaration order.
+    for (size_t i = 0; i + 2 < tokens.size(); ++i) {
+        bool startsType = tokens[i].type == TokenType::IDENTIFIER || isTypeKeyword(tokens[i].type);
+        if (startsType && tokens[i + 1].type == TokenType::IDENTIFIER
+            && tokens[i + 2].type == TokenType::LESS) {
+            size_t j = i + 3; int depth = 1;
+            while (j < tokens.size() && depth > 0) {
+                if (tokens[j].type == TokenType::LESS)             depth++;
+                else if (tokens[j].type == TokenType::GREATER)     depth--;
+                else if (tokens[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
+                j++;
+            }
+            if (j < tokens.size() && tokens[j].type == TokenType::LEFT_PAREN)
+                templateFuncNames_.insert(tokens[i + 1].lexeme);
+        }
     }
 
     Program program;
     while (!isAtEnd()) {
+        if (tryCaptureClassTemplate())    continue;   // generic decls produce no AST node
+        if (tryCaptureFunctionTemplate()) continue;
         program.declarations.push_back(parseDeclaration());
     }
+
+    runMonomorphization(program);   // expand all requested instantiations
     return program;
+}
+
+// ============================================================
+// Generics (monomorphization)
+// ============================================================
+
+bool Parser::tryCaptureFunctionTemplate() {
+    if (!((isTypeName() || peek().type == TokenType::IDENTIFIER)
+          && peekNext().type == TokenType::IDENTIFIER
+          && current + 2 < tokens.size() && tokens[current + 2].type == TokenType::LESS))
+        return false;
+
+    // Collect type-parameter names between '<' and '>'; verify the decl continues with '('.
+    std::vector<std::string> typeParams;
+    size_t j = current + 3; int depth = 1;
+    while (j < tokens.size() && depth > 0) {
+        if (tokens[j].type == TokenType::LESS)            { depth++; }
+        else if (tokens[j].type == TokenType::GREATER)    { depth--; if (depth == 0) break; }
+        else if (tokens[j].type == TokenType::SHIFT_RIGHT){ depth -= 2; if (depth <= 0) break; }
+        else if (tokens[j].type == TokenType::IDENTIFIER && depth == 1) typeParams.push_back(tokens[j].lexeme);
+        j++;
+    }
+    if (j >= tokens.size() || tokens[j].type != TokenType::GREATER) return false;
+    size_t afterGt = j + 1;
+    if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_PAREN) return false;
+    if (typeParams.empty()) return false;
+
+    // Capture: retType, name, then the parameter list and body verbatim.
+    std::vector<Token> captured;
+    captured.push_back(tokens[current]);       // return type
+    captured.push_back(tokens[current + 1]);   // function name
+
+    size_t k = afterGt;
+    int parenDepth = 0;
+    do {
+        if (tokens[k].type == TokenType::LEFT_PAREN)  parenDepth++;
+        else if (tokens[k].type == TokenType::RIGHT_PAREN) parenDepth--;
+        captured.push_back(tokens[k]);
+        ++k;
+    } while (k < tokens.size() && parenDepth > 0);
+
+    if (k >= tokens.size() || tokens[k].type != TokenType::LEFT_BRACE) return false;
+    int braceDepth = 0;
+    do {
+        if (tokens[k].type == TokenType::LEFT_BRACE)  braceDepth++;
+        else if (tokens[k].type == TokenType::RIGHT_BRACE) braceDepth--;
+        captured.push_back(tokens[k]);
+        ++k;
+    } while (k < tokens.size() && braceDepth > 0);
+
+    const std::string& name = tokens[current + 1].lexeme;
+    templates_[name] = Template{ std::move(typeParams), std::move(captured) };
+    templateFuncNames_.insert(name);
+    current = k;   // advance past the captured declaration
+    return true;
+}
+
+bool Parser::tryCaptureClassTemplate() {
+    if (!(peek().type == TokenType::CLASS
+          && peekNext().type == TokenType::IDENTIFIER
+          && current + 2 < tokens.size() && tokens[current + 2].type == TokenType::LESS))
+        return false;
+
+    std::vector<std::string> typeParams;
+    size_t j = current + 3; int depth = 1;
+    while (j < tokens.size() && depth > 0) {
+        if (tokens[j].type == TokenType::LESS)             { depth++; }
+        else if (tokens[j].type == TokenType::GREATER)     { depth--; if (depth == 0) break; }
+        else if (tokens[j].type == TokenType::SHIFT_RIGHT) { depth -= 2; if (depth <= 0) break; }
+        else if (tokens[j].type == TokenType::IDENTIFIER && depth == 1) typeParams.push_back(tokens[j].lexeme);
+        j++;
+    }
+    if (j >= tokens.size() || tokens[j].type != TokenType::GREATER) return false;
+    size_t afterGt = j + 1;
+    if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_BRACE) return false;
+    if (typeParams.empty()) return false;
+
+    std::vector<Token> captured;
+    captured.push_back(tokens[current]);       // 'class'
+    captured.push_back(tokens[current + 1]);   // class name
+
+    size_t k = afterGt;
+    int braceDepth = 0;
+    do {
+        if (tokens[k].type == TokenType::LEFT_BRACE)  braceDepth++;
+        else if (tokens[k].type == TokenType::RIGHT_BRACE) braceDepth--;
+        captured.push_back(tokens[k]);
+        ++k;
+    } while (k < tokens.size() && braceDepth > 0);
+
+    const std::string& name = tokens[current + 1].lexeme;
+    templates_[name] = Template{ std::move(typeParams), std::move(captured) };
+    templateClassNames_.insert(name);
+    current = k;
+    return true;
+}
+
+size_t Parser::typeSpanAt(size_t from) const {
+    if (from >= tokens.size()) return 0;
+    const Token& t = tokens[from];
+    bool isType = isTypeKeyword(t.type)
+               || (t.type == TokenType::IDENTIFIER
+                   && (classNames.count(t.lexeme) || templateClassNames_.count(t.lexeme)));
+    if (!isType) return 0;
+
+    size_t i = from + 1;
+    // generic argument list: Name<...>
+    if (t.type == TokenType::IDENTIFIER && templateClassNames_.count(t.lexeme)
+        && i < tokens.size() && tokens[i].type == TokenType::LESS) {
+        int depth = 1; ++i;
+        while (i < tokens.size() && depth > 0) {
+            if (tokens[i].type == TokenType::LESS)             depth++;
+            else if (tokens[i].type == TokenType::GREATER)     depth--;
+            else if (tokens[i].type == TokenType::SHIFT_RIGHT) depth -= 2;
+            ++i;
+        }
+    }
+    // reference suffix
+    if (i < tokens.size() && tokens[i].type == TokenType::AMPERSAND) ++i;
+    return i - from;
+}
+
+std::vector<std::vector<Token>> Parser::parseTypeArgList() {
+    consume(TokenType::LESS, "expected '<'");
+    std::vector<std::vector<Token>> args;
+    std::vector<Token> cur;
+    int depth = 1;
+    while (!isAtEnd() && depth > 0) {
+        TokenType tt = peek().type;
+        if (tt == TokenType::LESS)              { depth++; cur.push_back(advance()); }
+        else if (tt == TokenType::GREATER)      { depth--; if (depth == 0) { advance(); break; } cur.push_back(advance()); }
+        else if (tt == TokenType::SHIFT_RIGHT)  { depth -= 2; advance(); if (depth <= 0) break; }
+        else if (tt == TokenType::COMMA && depth == 1) { args.push_back(cur); cur.clear(); advance(); }
+        else                                    { cur.push_back(advance()); }
+    }
+    if (!cur.empty()) args.push_back(cur);
+    return args;
+}
+
+std::string Parser::mangleInstantiation(const std::string& base,
+                                        const std::vector<std::vector<Token>>& args) const {
+    std::string m = base;
+    for (const auto& a : args) m += "$" + argMangle(a);
+    return m;
+}
+
+void Parser::recordInstantiation(const std::string& templateName, const std::string& mangled,
+                                 std::vector<std::vector<Token>> args) {
+    if (instantiated_.count(mangled)) return;
+    instantiated_.insert(mangled);
+    instantiationWorklist_.push_back(PendingInstantiation{ templateName, mangled, std::move(args) });
+}
+
+void Parser::runMonomorphization(Program& program) {
+    while (!instantiationWorklist_.empty()) {
+        PendingInstantiation inst = std::move(instantiationWorklist_.back());
+        instantiationWorklist_.pop_back();
+
+        auto it = templates_.find(inst.templateName);
+        if (it == templates_.end())
+            throw error(tokens.empty() ? Token{TokenType::END_OF_FILE, "", 0} : tokens.back(),
+                        "no generic template named '" + inst.templateName + "'");
+        const Template& tmpl = it->second;
+
+        // Map each type parameter to its argument token slice (emplace = copy-construct;
+        // Token is not copy-assignable due to its const members).
+        std::unordered_map<std::string, std::vector<Token>> sub;
+        for (size_t i = 0; i < tmpl.typeParams.size() && i < inst.args.size(); ++i)
+            sub.emplace(tmpl.typeParams[i], inst.args[i]);
+
+        // Substitute. Rename the declaration name and any constructor/destructor name
+        // (a token == templateName that is NOT followed by '<'); self-references like
+        // "Name<...>" are left for re-parse to mangle. Replace type-parameter tokens.
+        std::vector<Token> out;
+        for (size_t idx = 0; idx < tmpl.tokens.size(); ++idx) {
+            const Token& t = tmpl.tokens[idx];
+            if (t.type == TokenType::IDENTIFIER && t.lexeme == inst.templateName
+                && (idx + 1 >= tmpl.tokens.size() || tmpl.tokens[idx + 1].type != TokenType::LESS)) {
+                out.push_back(Token{ TokenType::IDENTIFIER, inst.mangledName, t.line });
+                continue;
+            }
+            if (t.type == TokenType::IDENTIFIER) {
+                auto sit = sub.find(t.lexeme);
+                if (sit != sub.end()) {
+                    for (const Token& a : sit->second) out.push_back(a);
+                    continue;
+                }
+            }
+            out.push_back(t);
+        }
+        out.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
+
+        // Re-parse the concrete declaration (may enqueue further instantiations).
+        tokens  = std::move(out);
+        current = 0;
+        program.declarations.push_back(parseDeclaration());
+    }
 }
 
 // ============================================================
@@ -136,10 +381,40 @@ bool Parser::isTypeName() const {
         case TokenType::PTR:
             return true;
         case TokenType::IDENTIFIER:
-            return classNames.count(peek().lexeme) > 0;
+            return classNames.count(peek().lexeme) > 0 || templateClassNames_.count(peek().lexeme) > 0;
         default:
             return false;
     }
+}
+
+Token Parser::consumeType() {
+    Token base = advance();  // caller has verified isTypeName()
+    std::string lexeme = base.lexeme;
+    int         line   = base.line;
+    bool        classLike = base.type == TokenType::IDENTIFIER;  // class / mangled instantiation
+
+    // Generic class instantiation: Name<args> -> mangled concrete class name.
+    if (base.type == TokenType::IDENTIFIER && templateClassNames_.count(base.lexeme)
+        && check(TokenType::LESS)) {
+        std::vector<std::vector<Token>> args = parseTypeArgList();
+        std::string mangled = mangleInstantiation(base.lexeme, args);
+        recordInstantiation(base.lexeme, mangled, std::move(args));
+        classNames.insert(mangled);   // the instantiation is now a concrete class name
+        lexeme    = mangled;
+        classLike = true;
+    }
+
+    if (check(TokenType::AMPERSAND)) {
+        if (!(classLike && classNames.count(lexeme) > 0))
+            throw error(peek(), "'&' reference type is only allowed on class types, not '" + lexeme + "'");
+        advance();  // consume '&'
+        // Synthesize a single reference-type token; resolvers decode the trailing '&'.
+        return Token{ TokenType::IDENTIFIER, lexeme + "&", line };
+    }
+
+    if (lexeme != base.lexeme)  // a generic instantiation was mangled
+        return Token{ TokenType::IDENTIFIER, lexeme, line };
+    return base;
 }
 
 // ============================================================
@@ -167,14 +442,15 @@ Stmt Parser::parseDeclaration() {
     // name (an IDENTIFIER in classNames_), then "ClassName varName(args)" is a
     // constructor call (VarDecl with ctor initializer), not a function decl.
     // Keyword-typed patterns like "void inner() { ... }" are always function decls.
-    if (isTypeName()
-        && peekNext().type == TokenType::IDENTIFIER
-        && current + 2 < tokens.size()
-        && tokens[current + 2].type == TokenType::LEFT_PAREN
+    size_t funcSpan = typeSpanAt(current);
+    if (funcSpan > 0
+        && current + funcSpan + 1 < tokens.size()
+        && tokens[current + funcSpan].type == TokenType::IDENTIFIER
+        && tokens[current + funcSpan + 1].type == TokenType::LEFT_PAREN
         && !(insideFunction
              && peek().type == TokenType::IDENTIFIER
-             && classNames.count(peek().lexeme))) {
-        Token returnType = advance();
+             && (classNames.count(peek().lexeme) || templateClassNames_.count(peek().lexeme)))) {
+        Token returnType = consumeType();
         Token name       = advance();
         return parseFunctionDecl(returnType, name);
     }
@@ -192,7 +468,7 @@ Stmt Parser::parseExternFuncDecl(const Token& keyword) {
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
             if (!isTypeName()) throw error(peek(), "expected parameter type");
-            Token paramType = advance();
+            Token paramType = consumeType();
             Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
             params.push_back(ParamDecl{ paramType, paramName });
         } while (match({ TokenType::COMMA }));
@@ -216,7 +492,7 @@ Stmt Parser::parseFunctionDecl(const Token& returnType, const Token& name) {
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
             if (!isTypeName()) throw error(peek(), "expected parameter type");
-            Token paramType = advance();
+            Token paramType = consumeType();
             Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
             params.push_back(ParamDecl{ paramType, paramName });
         } while (match({ TokenType::COMMA }));
@@ -284,7 +560,7 @@ Stmt Parser::parseClassDecl() {
             if (!check(TokenType::RIGHT_PAREN)) {
                 do {
                     if (!isTypeName()) throw error(peek(), "expected parameter type");
-                    Token paramType = advance();
+                    Token paramType = consumeType();
                     Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
                     params.push_back(ParamDecl{ paramType, paramName });
                 } while (match({ TokenType::COMMA }));
@@ -305,9 +581,9 @@ Stmt Parser::parseClassDecl() {
             continue;
         }
 
-        // Regular method or field: typeName IDENTIFIER
+        // Regular method or field: typeName[&] IDENTIFIER
         if (!isTypeName()) throw error(peek(), "expected type name for class member");
-        Token memberType = advance();
+        Token memberType = consumeType();
         Token memberName = consume(TokenType::IDENTIFIER, "expected member name");
 
         if (check(TokenType::LEFT_PAREN)) {
@@ -317,7 +593,7 @@ Stmt Parser::parseClassDecl() {
             if (!check(TokenType::RIGHT_PAREN)) {
                 do {
                     if (!isTypeName()) throw error(peek(), "expected parameter type");
-                    Token paramType = advance();
+                    Token paramType = consumeType();
                     Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
                     params.push_back(ParamDecl{ paramType, paramName });
                 } while (match({ TokenType::COMMA }));
@@ -472,9 +748,12 @@ Expr Parser::parseExpression() {
         return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize });
     }
 
-    // Scalar variable declaration: typeName IDENTIFIER ( = expr | (args) )?
-    if (isTypeName() && peekNext().type == TokenType::IDENTIFIER) {
-        Token typeName = advance();
+    // Variable declaration of any type form: <type> IDENTIFIER ...
+    //   where <type> is  Base | Base& | Vec<args> | Vec<args>&
+    size_t declSpan = typeSpanAt(current);
+    if (declSpan > 0 && current + declSpan < tokens.size()
+        && tokens[current + declSpan].type == TokenType::IDENTIFIER) {
+        Token typeName = consumeType();   // consumes <args> and/or trailing '&'
         Token name     = advance();
         std::unique_ptr<Expr> initializer = nullptr;
         if (match({ TokenType::EQUAL })) {
@@ -708,6 +987,32 @@ Expr Parser::parsePrimary() {
         return makeExpr(ThisExpr{ previous() });
     }
 
+    // Heap allocation operator: new ClassName(args)  /  new Vec<args>(args)
+    if (match({ TokenType::NEW })) {
+        Token keyword = previous();
+        if (!check(TokenType::IDENTIFIER))
+            throw error(peek(), "expected class name after 'new'");
+        Token rawName  = advance();
+        std::string clsLex = rawName.lexeme;
+        if (templateClassNames_.count(rawName.lexeme) && check(TokenType::LESS)) {
+            std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
+            std::string mangled = mangleInstantiation(rawName.lexeme, typeArgs);
+            recordInstantiation(rawName.lexeme, mangled, std::move(typeArgs));
+            classNames.insert(mangled);
+            clsLex = mangled;
+        } else if (classNames.count(rawName.lexeme) == 0) {
+            throw error(rawName, "expected class name after 'new'");
+        }
+        Token className = Token{ TokenType::IDENTIFIER, clsLex, rawName.line };  // construct, not assign
+        consume(TokenType::LEFT_PAREN, "expected '(' after class name in 'new' expression");
+        std::vector<std::unique_ptr<Expr>> args;
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+        }
+        consume(TokenType::RIGHT_PAREN, "expected ')' after constructor arguments");
+        return makeExpr(NewExpr{ keyword, className, std::move(args) });
+    }
+
     if (match({ TokenType::TRUE, TokenType::FALSE,
                 TokenType::NUMBER, TokenType::STRING, TokenType::CHAR })) {
         return makeExpr(LiteralExpr{ previous() });
@@ -715,6 +1020,21 @@ Expr Parser::parsePrimary() {
 
     if (match({ TokenType::IDENTIFIER })) {
         Token name = previous();
+
+        // Generic function call: name<typeArgs>(args)  →  mangled concrete call.
+        if (templateFuncNames_.count(name.lexeme) && check(TokenType::LESS)) {
+            std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
+            std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
+            recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
+            consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
+            std::vector<std::unique_ptr<Expr>> genArgs;
+            if (!check(TokenType::RIGHT_PAREN)) {
+                do { genArgs.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+            }
+            consume(TokenType::RIGHT_PAREN, "expected ')' after arguments");
+            return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line }, std::move(genArgs) });
+        }
+
         // Function call: IDENTIFIER ( args )
         if (match({ TokenType::LEFT_PAREN })) {
             std::vector<std::unique_ptr<Expr>> args;

@@ -14,6 +14,8 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;
+    usesRefcount_    = false;
+    clonesNeeded_.clear();
     funcParamTypes.clear();
     cgClasses_.clear();
 
@@ -24,13 +26,22 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         const auto& cls = std::get<ClassDeclStmt>(*decl.node);
         CGClassInfo cgi;
         cgi.irTypeName = "%" + cls.name.lexeme;
+        bool hasRefField = false;
         for (const FieldDecl& fd : cls.fields) {
-            Type fieldType = typeFromToken(fd.typeName.type);
+            const std::string& lex = fd.typeName.lexeme;
+            Type fieldType;
+            if (fd.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
+                fieldType   = makeReferenceType(lex.substr(0, lex.size() - 1));
+                hasRefField = true;
+            } else {
+                fieldType = typeFromToken(fd.typeName.type);
+            }
             cgi.fields.emplace_back(fd.name.lexeme, fieldType);
         }
-        // Check whether this class declares a destructor
+        // A class needs a destructor if it declares one or owns reference fields.
         for (const MethodDecl& md : cls.methods)
             if (md.isDestructor) { cgi.hasDestructor = true; break; }
+        cgi.needsDtor = cgi.hasDestructor || hasRefField;
         cgClasses_[cls.name.lexeme] = std::move(cgi);
     }
 
@@ -78,5 +89,12 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node))
             genExternDecl(std::get<ExternFuncDeclStmt>(*decl.node));
     }
+
+    // Emit any clone helpers requested during codegen (may set usesRefcount_).
+    for (const auto& cn : clonesNeeded_) genCloneFunction(cn);
+
+    // Emit the refcount runtime if any `new`/retain/release was lowered.
+    if (usesRefcount_) emitRefcountRuntime();
+
     return std::move(module);
 }

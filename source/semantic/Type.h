@@ -18,7 +18,8 @@ enum class TypeKind {
     Bool, Char,
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
     Array,  // fixed-size stack array: element type + count stored in Type struct
-    Object, // class instance — stack-allocated; className stores the class name
+    Object, // class instance — value, lives with its owner; className stores the class name
+    Reference, // heap reference to a class instance (Ref<Class>, refcounted); className stores the pointee class
     Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
@@ -55,6 +56,15 @@ inline Type makeArrayType(TypeKind elementKind, size_t size) {
 inline Type makeObjectType(const std::string& name) {
     Type t;
     t.kind      = TypeKind::Object;
+    t.className = name;
+    return t;
+}
+
+// Convenience constructor for heap reference types — Ref<Class>.
+// Internally a refcounted pointer to a heap-allocated instance of `name`.
+inline Type makeReferenceType(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::Reference;
     t.className = name;
     return t;
 }

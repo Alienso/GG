@@ -166,8 +166,19 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
 
 void CodeGen::emitDtorsForScope(const std::vector<DtorEntry>& scope) {
     // Emit in reverse declaration order (last declared → first destroyed).
-    for (const auto & it : std::ranges::reverse_view(scope))
-        emit("call void @" + it.second + "_dtor(ptr " + it.first + ")");
+    for (const auto& entry : std::ranges::reverse_view(scope)) {
+        if (entry.isReference) {
+            // Reference variable: load the heap pointer and release it.
+            std::string ref = emitLoad("ptr", entry.allocaPtr);
+            auto cgIt = cgClasses_.find(entry.className);
+            std::string dtorArg = (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
+                                ? ("@" + entry.className + "_dtor") : "null";
+            emit("call void @gg_release(ptr " + ref + ", ptr " + dtorArg + ")");
+        } else {
+            // Value object living in its alloca: run its destructor directly.
+            emit("call void @" + entry.className + "_dtor(ptr " + entry.allocaPtr + ")");
+        }
+    }
 }
 
 void CodeGen::genBreak(const BreakStmt&) {

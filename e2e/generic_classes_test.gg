@@ -1,0 +1,55 @@
+// Generic classes (monomorphized).
+
+class Box<T> {
+    public T value;
+    public Box(T v) { this.value = v; }
+    public T get()  { return this.value; }
+}
+
+class Pair<K, V> {
+    public K first;
+    public V second;
+    public Pair(K a, V b) { this.first = a; this.second = b; }
+}
+
+class Point { public i32 x; public Point(i32 v) { this.x = v; } }
+
+// A generic class without a T-returning method (so reference element types work).
+class Cell<T> {
+    public T value;
+    public Cell(T v) { this.value = v; }
+}
+
+// Generic self-referential linked node.
+class Node<T> {
+    public T       value;
+    public Node<T>& next;
+    public Node(T v) { this.value = v; }
+}
+
+i32 main() {
+    // primitive element + method returning T
+    Box<i32>& b = new Box<i32>(42);
+    if (b.get() != 42) { return 1; }
+
+    Box<i64>& big = new Box<i64>(1000);     // distinct instantiation
+    if (big.get() != 1000) { return 2; }
+
+    // multiple type parameters
+    Pair<i32, i64>& p = new Pair<i32, i64>(7, 99);
+    if (p.first  != 7)  { return 3; }
+    if (p.second != 99) { return 4; }
+
+    // reference element type (object container) — field access, no T-return
+    Point& pt = new Point(5);
+    Cell<Point&>& c = new Cell<Point&>(pt);
+    if (c.value.x != 5) { return 5; }
+
+    // generic self-referential linked list
+    Node<i32>& n = new Node<i32>(1);
+    n.next = new Node<i32>(2);
+    n.next.next = new Node<i32>(3);
+    if (n.value + n.next.value + n.next.next.value != 6) { return 6; }
+
+    return 0;
+}

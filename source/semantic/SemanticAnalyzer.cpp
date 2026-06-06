@@ -44,7 +44,19 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
         ClassInfo info;
         int fieldIndex = 0;
         for (const FieldDecl& fd : cls.fields) {
-            Type fieldType = typeFromToken(fd.typeName.type);
+            const std::string& lex = fd.typeName.lexeme;
+            Type fieldType;
+            if (fd.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
+                // Reference field: Class&
+                fieldType = makeReferenceType(lex.substr(0, lex.size() - 1));
+            } else if (fd.typeName.type == TokenType::IDENTIFIER) {
+                // Bare class name → value-object field (embedding) — not supported yet.
+                error(fd.name, "object value fields are not supported; declare it as a reference '"
+                      + lex + "& " + fd.name.lexeme + "'");
+                fieldType = Type{TypeKind::Error};
+            } else {
+                fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
+            }
             info.fieldOrder.push_back(fd.name.lexeme);
             // emplace constructs in-place, avoiding copy/move-assignment of Token
             info.fields.emplace(fd.name.lexeme,
@@ -167,6 +179,10 @@ void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
 }
 
 Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
+    // Reference type: a synthesized "<Class>&" token from the parser.
+    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
+        && typeToken.lexeme.back() == '&')
+        return makeReferenceType(typeToken.lexeme.substr(0, typeToken.lexeme.size() - 1));
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
     return typeFromToken(typeToken.type);
@@ -191,7 +207,9 @@ void SemanticAnalyzer::checkCast(const Type& from, const Type& to,
 }
 
 const ClassInfo* SemanticAnalyzer::lookupObjectClass(Type objectType, const Token& site) {
-    if (objectType.kind != TypeKind::Object) {
+    // Both value objects (Point) and heap references (Point&) carry a className
+    // and support member/method access.
+    if (objectType.kind != TypeKind::Object && objectType.kind != TypeKind::Reference) {
         error(site, "member access on non-class type '" + typeName(objectType) + "'");
         return nullptr;
     }

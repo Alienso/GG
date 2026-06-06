@@ -142,6 +142,14 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const NewExpr& newExpr) {
+            out("New '" + newExpr.className.lexeme + "'");
+            indent++;
+            for (const auto& arg : newExpr.args) printExpr(*arg);
+            if (newExpr.args.empty()) out("(no args)");
+            indent--;
+        },
+
     }, *expr.node);
 }
 

@@ -23,15 +23,30 @@ private:
     struct CGClassInfo {
         std::string                             irTypeName;      // "%Point"
         std::vector<std::pair<std::string,Type>> fields;        // ordered: (name, type)
-        bool                                    hasDestructor = false;
+        bool                                    hasDestructor = false;  // user-written ~Class()
+        bool                                    needsDtor     = false;  // user dtor OR has reference fields
     };
     std::unordered_map<std::string, CGClassInfo>      cgClasses_;
 
-    // ---- Destructor scope tracking ----
-    // Each entry: (allocaPtr, className) — pushed when an Object variable with a
-    // destructor enters scope, popped and flushed (in reverse order) at scope exit.
-    using DtorEntry = std::pair<std::string, std::string>;
+    // ---- Scope-exit cleanup tracking ----
+    // One entry per object/reference that needs cleanup when its scope ends.
+    //   isReference == false : a value object living in `allocaPtr`
+    //                          → call <className>_dtor(allocaPtr)
+    //   isReference == true  : a reference variable whose slot `allocaPtr` holds a
+    //                          heap pointer → load it and gg_release(ptr, dtor)
+    struct DtorEntry {
+        std::string allocaPtr;
+        std::string className;
+        bool        isReference = false;
+    };
     std::vector<std::vector<DtorEntry>> dtorScopes_;
+
+    // Set true the first time `new` is lowered; triggers emission of the refcount runtime.
+    bool usesRefcount_ = false;
+
+    // Classes that need a generated @Class_clone helper (deep copy: memberwise
+    // copy with retain at reference-field boundaries). Populated on demand.
+    std::unordered_set<std::string> clonesNeeded_;
 
     // ---- Module-level state ----
     IRModule           module;
@@ -72,6 +87,13 @@ private:
     void genExternDecl(const ExternFuncDeclStmt& ext);
     void genClassDecl(const ClassDeclStmt& classDecl);
     void genMethod(const std::string& className, const MethodDecl& method);
+    // Generate @Class_dtor: runs the user destructor body (if any), then releases
+    // each reference field in reverse declaration order. Emitted for any class that
+    // has a user destructor or any reference field.
+    void genDestructor(const ClassDeclStmt& classDecl);
+    // Generate @Class_clone(ptr %dest, ptr %src): memberwise deep copy — copy
+    // primitive fields, copy+retain reference fields, releasing dest's old targets.
+    void genCloneFunction(const std::string& className);
 
     // ---- Statement codegen ----
     void genStmt(const Stmt& stmt);
@@ -101,10 +123,14 @@ private:
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
     std::string genCast(const CastExpr& castExpr, const Type& toType);
+    std::string genNew(const NewExpr& newExpr, const Type& resolvedType);
 
     // ---- Destructor helpers ----
-    // Emit destructor calls for all entries in one scope (in reverse declaration order).
+    // Emit destructor / release calls for all entries in one scope (reverse order).
     void emitDtorsForScope(const std::vector<DtorEntry>& scope);
+
+    // Emit the refcount runtime (gg_alloc/gg_retain/gg_release) + malloc/free decls.
+    void emitRefcountRuntime();
 
     // ---- Shared codegen helpers ----
     // Returns a unique alloca pointer name for `varName` (e.g. "%x.addr" or "%x.addr.1")

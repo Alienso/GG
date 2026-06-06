@@ -112,6 +112,14 @@ struct CastExpr {
     Token                 targetType;   // type keyword token (i32, f32, ptr, …)
 };
 
+// Heap allocation operator: `new ClassName(args)` — allocates a refcounted
+// heap instance and runs its constructor. Evaluates to a reference (Class&).
+struct NewExpr {
+    Token                              keyword;    // the 'new' token
+    Token                              className;  // class being allocated
+    std::vector<std::unique_ptr<Expr>> args;       // constructor arguments
+};
+
 // ---- Expr wrapper ----
 
 struct Expr {
@@ -131,7 +139,8 @@ struct Expr {
         MemberAccessExpr,
         MemberAssignExpr,
         MethodCallExpr,
-        CastExpr
+        CastExpr,
+        NewExpr
     >;
     std::unique_ptr<Variant> node;
 };

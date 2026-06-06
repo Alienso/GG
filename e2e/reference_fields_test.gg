@@ -1,0 +1,41 @@
+// e2e/reference_fields_test.gg
+//
+// End-to-end validation of reference fields (Class& fields) and the
+// refcounted lifetime that comes with them:
+//   * a class may hold Class& fields (incl. self-referential — linked lists)
+//   * storing into a reference field retains; overwriting releases the old target
+//   * destroying an object releases its reference fields (recursively / cascading)
+//
+// Each check returns a unique number on failure; main returns 0 on success.
+//
+// Expected result: exit code 0
+
+class Node {
+    public i32   val;
+    public Node& next;                 // self-referential reference field
+    public Node(i32 v) { this.val = v; }
+}
+
+i32 main() {
+
+    // ---- build a 3-element chain -------------------------------------
+    Node& a = new Node(1);
+    a.next = new Node(2);
+    a.next.next = new Node(3);
+
+    // ---- 1-3: read values through the chain --------------------------
+    if (a.val           != 1) { return 1; }
+    if (a.next.val      != 2) { return 2; }
+    if (a.next.next.val != 3) { return 3; }
+
+    // ---- 4: mutate a value field deep in the chain -------------------
+    a.next.val = 20;
+    if (a.next.val != 20) { return 4; }
+
+    // ---- 5: reassign a reference field (releases the old sub-chain) --
+    a.next = new Node(99);             // old node(2)->node(3) chain is released here
+    if (a.next.val != 99) { return 5; }
+
+    return 0;
+    // scope exit: release a -> frees the remaining chain (a, node(99))
+}

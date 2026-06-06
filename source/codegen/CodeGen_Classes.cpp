@@ -43,7 +43,7 @@ std::string CodeGen::genThis(const ThisExpr&) {
 std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
-    if (objType.kind != TypeKind::Object) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
     return emitLoad(irTypeName(fieldType), gepReg);
@@ -54,9 +54,28 @@ std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
 std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
-    if (objType.kind != TypeKind::Object) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
+
+    // Reference field: co-ownership — retain the new target, release the old.
+    if (fieldType.kind == TypeKind::Reference) {
+        usesRefcount_ = true;
+        bool fromNew = ma.value->node && std::holds_alternative<NewExpr>(*ma.value->node);
+        Type        valueType = exprType(*ma.value);
+        std::string newVal    = genExpr(*ma.value);
+        newVal = emitCast(newVal, valueType, fieldType);
+        if (!fromNew)
+            emit("call void @gg_retain(ptr " + newVal + ")");
+        std::string oldVal = emitLoad("ptr", gepReg);
+        auto fcgIt = cgClasses_.find(fieldType.className);
+        std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
+                            ? ("@" + fieldType.className + "_dtor") : "null";
+        emit("call void @gg_release(ptr " + oldVal + ", ptr " + dtorArg + ")");
+        emitStore("ptr", newVal, gepReg);
+        return newVal;
+    }
+
     Type        valueType = exprType(*ma.value);
     std::string value     = genExpr(*ma.value);
     value = emitCast(value, valueType, fieldType);
@@ -69,7 +88,7 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
     std::string objPtr = genExpr(*mc.object);
     Type objType = exprType(*mc.object);
-    if (objType.kind != TypeKind::Object) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
 
     std::string mangledName  = objType.className + "_" + mc.method.lexeme;
     std::string returnIrType = irTypeName(resolvedType);

@@ -172,3 +172,13 @@ TEST_CASE("Lexer - identifier that starts like a keyword is not a keyword", "[le
     REQUIRE(tokens[0].type   == TokenType::IDENTIFIER);
     REQUIRE(tokens[0].lexeme == "i32value");
 }
+
+// ============================================================
+// new keyword (Phase 0 — reference/heap-allocation foundation)
+// ============================================================
+
+TEST_CASE("Lexer - 'new' is a keyword token", "[lexer][new]") {
+    auto tokens = lexString("new");
+    REQUIRE(tokens[0].type   == TokenType::NEW);
+    REQUIRE(tokens[0].lexeme == "new");
+}

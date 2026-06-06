@@ -23,6 +23,7 @@ static const Token& firstToken(const Expr& expr) {
         const Token& operator()(const MemberAssignExpr& ma)            const { return firstToken(*ma.object); }
         const Token& operator()(const MethodCallExpr& mc)              const { return firstToken(*mc.object); }
         const Token& operator()(const CastExpr& castExpr)              const { return firstToken(*castExpr.operand); }
+        const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -166,6 +167,11 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
             error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
             paramType = Type{TypeKind::Error};  // suppress cascading errors in the body
         }
+        if (paramType.kind == TypeKind::Object) {
+            error(param.typeName, "object parameter '" + param.name.lexeme
+                  + "' must be passed by reference; declare it as '" + paramType.className + "&'");
+            paramType = Type{TypeKind::Error};
+        }
         Symbol sym{
             Symbol::Kind::Variable,
             paramType,
@@ -234,6 +240,11 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
             Type paramType = resolveTypeToken(param.typeName);
             if (paramType.kind == TypeKind::Void) {
                 error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (paramType.kind == TypeKind::Object) {
+                error(param.typeName, "object parameter '" + param.name.lexeme
+                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
                 paramType = Type{TypeKind::Error};
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{

@@ -44,4 +44,8 @@ void IRPrinter::print(const IRModule& module, std::ostream& out) {
 
         out << "}\n\n";
     }
+
+    // Runtime helper definitions (refcount alloc/retain/release), emitted verbatim.
+    for (const auto& def : module.runtime)
+        out << def << "\n";
 }

@@ -46,7 +46,6 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"var",    TokenType::VAR},
     {"super",  TokenType::SUPER},
     {"this",    TokenType::THIS},
-    {"public",  TokenType::PUBLIC},
     {"private", TokenType::PRIVATE},
     {"as",      TokenType::AS},
     {"new",     TokenType::NEW},

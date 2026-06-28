@@ -83,6 +83,7 @@ for compound types that don't map to a single keyword:
 | `"ptr<i32>"`        | Typed raw pointer, primitive element      |
 | `"ptr<Class>"`      | Typed raw pointer, object element         |
 | `"ptr<Class.ref>"`  | Typed raw pointer, reference element      |
+| `"ptr<void>"`       | Alias for opaque `ptr` (`TypeKind::Ptr`)  |
 
 Decoded by `decodeSynthesizedType(const Token&)` in `Type.cpp`.
 Both the semantic resolver (`resolveTypeToken`) and codegen resolvers
@@ -147,12 +148,17 @@ vector-reallocation copy-fallback that would hit the deleted assignment operator
   (e.g. `make(99);`) are released at the full-expression boundary.
 
 ### ptr<T> — typed raw pointer
-- `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) is a low-level raw pointer; lowers to
-  LLVM `ptr`. Intended for container internals (malloc'd buffers). **No bounds check.**
+- `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
+  lower to LLVM `ptr`. Intended for stdlib/CRT container internals. **No bounds check.**
+- `ptr<void>` is an alias for `ptr` (same `TypeKind::Ptr`); decoded in `decodeSynthesizedType`.
 - `buf[i]` on a `ptr<T>`: one-index GEP — `getelementptr <elemIR>, ptr buf, i64 i`.
 - `arr[i]` on a fixed-size array: two-index GEP into the alloca + runtime bounds check.
 - `[]` is generalized: works on any expression, so `this.data[i]` works when `data`
   is a `ptr<T>` field.
+- **Gated behind `--unsafe-ptr`**: the semantic analyser rejects any variable declaration,
+  function return type, or parameter of type `ptr`/`ptr<T>` unless `CompilerOptions::allowRawPtr`
+  is true. `extern` declarations are always exempt.
+- `compile.ps1` always passes `--unsafe-ptr`; test helpers default to `allowRawPtr = true`.
 
 ### Destructors
 - Declared as `~ClassName()` (no params, implicitly void). At most one per class.
@@ -167,7 +173,7 @@ vector-reallocation copy-fallback that would hit the deleted assignment operator
 - Generated on demand when a value-copy initialisation is encountered.
 
 ## Test baseline
-**362 test cases / 735 assertions** (as of `ptr<T>` + generalized `[]` indexing).
+**369 test cases / 745 assertions** (as of `--unsafe-ptr` flag + `ptr<void>` alias).
 
 ## Keeping CLAUDE.md current
 

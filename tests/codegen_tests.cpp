@@ -1019,7 +1019,7 @@ TEST_CASE("Generics - generic function call type-checks", "[generics][semantic]"
 
 TEST_CASE("Generics - generic class instantiates to a mangled struct and methods", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        class Box<T> { T value; Box(T v){ this.value=v; } T get(){ return this.value; } }
         i32 main() { Box<i32>& b = new Box<i32>(42); return b.get(); }
     )");
     REQUIRE(irContains(ir, "%Box$i32 = type { i32 }"));
@@ -1030,7 +1030,7 @@ TEST_CASE("Generics - generic class instantiates to a mangled struct and methods
 
 TEST_CASE("Generics - distinct class instantiations produce distinct structs", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        class Box<T> { T value; Box(T v){ this.value=v; } }
         void main() { Box<i32>& a = new Box<i32>(1); Box<i64>& b = new Box<i64>(2); }
     )");
     REQUIRE(irContains(ir, "%Box$i32 = type { i32 }"));
@@ -1039,7 +1039,7 @@ TEST_CASE("Generics - distinct class instantiations produce distinct structs", "
 
 TEST_CASE("Generics - generic class with multiple type parameters", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Pair<K, V> { public K first; public V second; public Pair(K a, V b){ this.first=a; this.second=b; } }
+        class Pair<K, V> { K first; V second; Pair(K a, V b){ this.first=a; this.second=b; } }
         void main() { Pair<i32, i64>& p = new Pair<i32, i64>(7, 99); }
     )");
     REQUIRE(irContains(ir, "%Pair$i32$i64 = type { i32, i64 }"));
@@ -1047,8 +1047,8 @@ TEST_CASE("Generics - generic class with multiple type parameters", "[generics][
 
 TEST_CASE("Generics - reference element type lowers to a ptr field", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
-        class Cell<T> { public T value; public Cell(T v){ this.value=v; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
+        class Cell<T> { T value; Cell(T v){ this.value=v; } }
         void main() { Point& p = new Point(5); Cell<Point&>& c = new Cell<Point&>(p); }
     )");
     REQUIRE(irContains(ir, "%Cell$Point.ref = type { ptr }"));
@@ -1056,7 +1056,7 @@ TEST_CASE("Generics - reference element type lowers to a ptr field", "[generics]
 
 TEST_CASE("Generics - generic class type-checks", "[generics][semantic]") {
     auto r = analyzeString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        class Box<T> { T value; Box(T v){ this.value=v; } T get(){ return this.value; } }
         i32 main() { Box<i32>& b = new Box<i32>(7); return b.get(); }
     )");
     REQUIRE_FALSE(r.hadError);
@@ -1064,7 +1064,7 @@ TEST_CASE("Generics - generic class type-checks", "[generics][semantic]") {
 
 TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Node<T> { public T value; public Node<T>& next; public Node(T v){ this.value=v; } }
+        class Node<T> { T value; Node<T>& next; Node(T v){ this.value=v; } }
         void main() { Node<i32>& n = new Node<i32>(1); n.next = new Node<i32>(2); }
     )");
     REQUIRE(irContains(ir, "%Node$i32 = type { i32, ptr }"));
@@ -1077,7 +1077,7 @@ TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen
 
 TEST_CASE("RefReturn - function returning a reference lowers to ptr", "[refreturn][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
         Point& make(i32 v) { return new Point(v); }
         void main() { Point& p = make(5); }
     )");
@@ -1086,7 +1086,7 @@ TEST_CASE("RefReturn - function returning a reference lowers to ptr", "[refretur
 
 TEST_CASE("RefReturn - a 'new' factory never retains (binding consumes the +1)", "[refreturn][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
         Point& make(i32 v) { return new Point(v); }
         void main() { Point& p = make(5); }
     )");
@@ -1096,7 +1096,7 @@ TEST_CASE("RefReturn - a 'new' factory never retains (binding consumes the +1)",
 
 TEST_CASE("RefReturn - returning a borrowed reference retains it (+1)", "[refreturn][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
         Point& id(Point& r) { return r; }
         void main() { Point& a = new Point(1); Point& b = id(a); }
     )");
@@ -1106,7 +1106,7 @@ TEST_CASE("RefReturn - returning a borrowed reference retains it (+1)", "[refret
 
 TEST_CASE("RefReturn - an unbound reference temporary is released", "[refreturn][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
         Point& make(i32 v) { return new Point(v); }
         void main() { make(5); }
     )");
@@ -1117,8 +1117,8 @@ TEST_CASE("RefReturn - an unbound reference temporary is released", "[refreturn]
 
 TEST_CASE("RefReturn - generic method returning T for a reference element type", "[refreturn][generics][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public Point(i32 v){ this.x=v; } }
-        class Box<T> { public T value; public Box(T v){ this.value=v; } public T get(){ return this.value; } }
+        class Point { i32 x; Point(i32 v){ this.x=v; } }
+        class Box<T> { T value; Box(T v){ this.value=v; } T get(){ return this.value; } }
         i32 main() {
             Point& p = new Point(7);
             Box<Point&>& b = new Box<Point&>(p);
@@ -1135,8 +1135,8 @@ TEST_CASE("RefReturn - generic method returning T for a reference element type",
 
 TEST_CASE("Generics - nested generic argument with '>>' split", "[generics][nested][codegen]") {
     auto ir = codegenString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } }
-        class Holder<T> { public T& item; }
+        class Box<T> { T value; Box(T v){ this.value=v; } }
+        class Holder<T> { T& item; }
         void main() {
             Box<i32>& b = new Box<i32>(42);
             Holder<Box<i32>>& h = new Holder<Box<i32>>();
@@ -1150,8 +1150,8 @@ TEST_CASE("Generics - '&' after '>>' binds to the outer type, not the argument",
     // Holder<Box<i32>>& h : the trailing '&' makes 'h' a Holder reference; the
     // argument is the value type Box<i32> (not Box<i32>&).
     auto r = analyzeString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } }
-        class Holder<T> { public T& item; }
+        class Box<T> { T value; Box(T v){ this.value=v; } }
+        class Holder<T> { T& item; }
         void main() {
             Box<i32>& b = new Box<i32>(1);
             Holder<Box<i32>>& h = new Holder<Box<i32>>();
@@ -1163,7 +1163,7 @@ TEST_CASE("Generics - '&' after '>>' binds to the outer type, not the argument",
 
 TEST_CASE("Generics - nested type argument in a generic function call", "[generics][nested][codegen]") {
     auto ir = codegenString(R"(
-        class Box<T> { public T value; public Box(T v){ this.value=v; } }
+        class Box<T> { T value; Box(T v){ this.value=v; } }
         i32 tag<T>(T& x) { return 1; }
         void main() {
             Box<i32>& b = new Box<i32>(7);
@@ -1191,7 +1191,7 @@ TEST_CASE("Sizeof - result type is u64", "[sizeof][semantic]") {
 
 TEST_CASE("Sizeof - sizeof(class) uses the struct type", "[sizeof][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; public i32 y; }
+        class Point { i32 x; i32 y; }
         void main() { u64 s = sizeof(Point); }
     )");
     REQUIRE(irContains(ir, "getelementptr %Point, ptr null, i32 1"));
@@ -1199,7 +1199,7 @@ TEST_CASE("Sizeof - sizeof(class) uses the struct type", "[sizeof][codegen]") {
 
 TEST_CASE("Sizeof - sizeof(reference) is pointer-sized", "[sizeof][codegen]") {
     auto ir = codegenString(R"(
-        class Point { public i32 x; }
+        class Point { i32 x; }
         void main() { u64 s = sizeof(Point&); }
     )");
     REQUIRE(irContains(ir, "getelementptr ptr, ptr null, i32 1"));
@@ -1249,10 +1249,10 @@ TEST_CASE("TypedPtr - ptr<T> field indexed through this", "[typedptr][codegen]")
     auto ir = codegenString(R"(
         extern ptr malloc(u64 n);
         class Vec {
-            public ptr<i32> data;
-            public Vec() { this.data = malloc(16); }
-            public void set(i32 i, i32 v) { this.data[i] = v; }
-            public i32 get(i32 i) { return this.data[i]; }
+            ptr<i32> data;
+            Vec() { this.data = malloc(16); }
+            void set(i32 i, i32 v) { this.data[i] = v; }
+            i32 get(i32 i) { return this.data[i]; }
         }
         void main() {
             Vec v();
@@ -1277,7 +1277,7 @@ TEST_CASE("TypedPtr - generalized [] still works on a fixed-size array", "[typed
 
 TEST_CASE("TypedPtr - element type can be a reference (ptr<Point&>)", "[typedptr][semantic]") {
     auto r = analyzeString(R"(
-        class Point { public i32 x; }
+        class Point { i32 x; }
         extern ptr malloc(u64 n);
         void main() {
             ptr<Point&> buf = malloc(8);

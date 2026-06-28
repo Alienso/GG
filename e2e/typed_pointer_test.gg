@@ -13,24 +13,24 @@ extern ptr malloc(u64 n);
 extern void free(ptr p);
 
 class IntVec {
-    public ptr<i32> data;
-    public i32 len;
+    ptr<i32> data;
+    i32 len;
 
-    public IntVec(i32 capacity) {
+    IntVec(i32 capacity) {
         this.data = malloc(sizeof(i32) * capacity);
         this.len  = 0;
     }
 
-    public void push(i32 v) {
+    void push(i32 v) {
         this.data[this.len] = v;
         this.len = this.len + 1;
     }
 
-    public i32 get(i32 i) {
+    i32 get(i32 i) {
         return this.data[i];
     }
 
-    public ~IntVec() {
+    ~IntVec() {
         free(this.data);
     }
 }

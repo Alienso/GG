@@ -163,7 +163,7 @@ TEST_CASE("Cast - ptr to int is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - Object to ptr is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        class Box { public i32 val; }
+        class Box { i32 val; }
         void main() {
             Box b;
             ptr p = b as ptr;
@@ -220,7 +220,7 @@ TEST_CASE("Cast - cannot cast to void", "[cast][semantic]") {
 
 TEST_CASE("Cast - cannot cast Object to numeric", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        class Box { public i32 val; }
+        class Box { i32 val; }
         void main() {
             Box b;
             i32 x = b as i32;
@@ -377,7 +377,7 @@ TEST_CASE("Cast - i32 as u32 emits no instruction (same IR type)", "[cast][codeg
 
 TEST_CASE("Cast - Object as ptr returns alloca pointer (no extra instruction)", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        class Box { public i32 val; }
+        class Box { i32 val; }
         void main() {
             Box b;
             ptr p = b as ptr;

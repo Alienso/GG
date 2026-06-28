@@ -14,27 +14,27 @@
 // ============================================================
 
 class Point {
-    public f32 x;
-    public f32 y;
+    f32 x;
+    f32 y;
 
-    public Point(f32 x, f32 y) {
+    Point(f32 x, f32 y) {
         this.x = x;
         this.y = y;
     }
 
-    public f32 getX() { return this.x; }
-    public f32 getY() { return this.y; }
+    f32 getX() { return this.x; }
+    f32 getY() { return this.y; }
 
-    public void setX(f32 v) { this.x = v; }
-    public void setY(f32 v) { this.y = v; }
+    void setX(f32 v) { this.x = v; }
+    void setY(f32 v) { this.y = v; }
 
     // x² + y²
-    public f32 squaredLen() {
+    f32 squaredLen() {
         return this.x * this.x + this.y * this.y;
     }
 
     // Calls squaredLen() on this — tests method-to-method dispatch
-    public f32 twiceSquaredLen() {
+    f32 twiceSquaredLen() {
         f32 len = this.squaredLen();
         return len + len;
     }
@@ -46,58 +46,58 @@ class Point {
 // ============================================================
 
 class Counter {
-    public i32 count;
+    i32 count;
 
-    public Counter(i32 n) {
+    Counter(i32 n) {
         this.count = n;
     }
 
-    public void increment() {
+    void increment() {
         this.count = this.count + 1;
     }
 
-    public void decrement() {
+    void decrement() {
         this.count = this.count - 1;
     }
 
-    public void addN(i32 n) {
+    void addN(i32 n) {
         this.count = this.count + n;
     }
 
-    public i32 get() {
+    i32 get() {
         return this.count;
     }
 
-    public bool isPositive() {
+    bool isPositive() {
         return this.count > 0;
     }
 
     // Delegates to get() — tests method-to-method dispatch on this
-    public i32 doubled() {
+    i32 doubled() {
         return this.get() * 2;
     }
 }
 
 // ============================================================
-// Box — private field accessed only through public methods
+// Box — private field accessed only through methods
 // ============================================================
 
 class Box {
     private i32 value;
 
-    public Box(i32 v) {
+    Box(i32 v) {
         this.value = v;
     }
 
-    public i32 get() {
+    i32 get() {
         return this.value;
     }
 
-    public void set(i32 v) {
+    void set(i32 v) {
         this.value = v;
     }
 
-    public void doubleIt() {
+    void doubleIt() {
         this.value = this.value * 2;
     }
 }
@@ -107,17 +107,17 @@ class Box {
 // ============================================================
 
 class Flag {
-    public bool active;
+    bool active;
 
-    public Flag(bool b) {
+    Flag(bool b) {
         this.active = b;
     }
 
-    public bool isActive() {
+    bool isActive() {
         return this.active;
     }
 
-    public void toggle() {
+    void toggle() {
         this.active = !this.active;
     }
 }
@@ -128,20 +128,20 @@ class Flag {
 // ============================================================
 
 class Accumulator {
-    public i32 steps;
-    public f64 total;
+    i32 steps;
+    f64 total;
 
-    public Accumulator(i32 s, f64 t) {
+    Accumulator(i32 s, f64 t) {
         this.steps = s;
         this.total = t;
     }
 
-    public void add(f64 v) {
+    void add(f64 v) {
         this.steps = this.steps + 1;
         this.total = this.total + v;
     }
 
-    public f64 average() {
+    f64 average() {
         return this.total / this.steps;
     }
 }
@@ -266,7 +266,7 @@ i32 main() {
 
     // ==== Box =================================================================
 
-    // 31: Private field accessible through public getter
+    // 31: Private field accessible through getter
     Box box(42);
     if (box.get() != 42)       { return 31; }
 

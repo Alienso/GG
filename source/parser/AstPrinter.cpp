@@ -285,8 +285,8 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             out("ClassDecl '" + classDecl.name.lexeme + "'");
             indent++;
             for (const FieldDecl& fd : classDecl.fields) {
-                out(std::string(fd.isPublic ? "public" : "private")
-                    + " field " + fd.typeName.lexeme + " '" + fd.name.lexeme + "'");
+                out(std::string(fd.isPublic ? "" : "private ")
+                    + "field " + fd.typeName.lexeme + " '" + fd.name.lexeme + "'");
             }
             for (const MethodDecl& md : classDecl.methods) {
                 std::string params;
@@ -296,8 +296,8 @@ void AstPrinter::printStmt(const Stmt& stmt) {
                     first = false;
                     params += param.typeName.lexeme + " " + param.name.lexeme;
                 }
-                std::string prefix = std::string(md.isPublic ? "public" : "private")
-                                   + (md.isConstructor ? " ctor " : " method ");
+                std::string prefix = std::string(md.isPublic ? "" : "private ")
+                                   + (md.isConstructor ? "ctor " : "method ");
                 out(prefix + "'" + md.name.lexeme + "' (" + params + ")");
                 indent++;
                 printBlock(md.body);

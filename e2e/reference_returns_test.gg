@@ -11,9 +11,9 @@
 // Expected result: exit code 0
 
 class Counter {
-    public i32 n;
-    public Counter(i32 v) { this.n = v; }
-    public i32 get() { return this.n; }
+    i32 n;
+    Counter(i32 v) { this.n = v; }
+    i32 get() { return this.n; }
 }
 
 Counter& make(i32 v) { return new Counter(v); }                       // fresh +1

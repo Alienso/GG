@@ -11,9 +11,9 @@
 // Expected result: exit code 0
 
 class Node {
-    public i32   val;
-    public Node& next;                 // self-referential reference field
-    public Node(i32 v) { this.val = v; }
+    i32   val;
+    Node& next;                 // self-referential reference field
+    Node(i32 v) { this.val = v; }
 }
 
 i32 main() {

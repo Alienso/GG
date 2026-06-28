@@ -11,9 +11,9 @@
 // Expected result: exit code 0
 
 class Point {
-    public i32 x;
-    public i32 y;
-    public Point(i32 a, i32 b) { this.x = a; this.y = b; }
+    i32 x;
+    i32 y;
+    Point(i32 a, i32 b) { this.x = a; this.y = b; }
 }
 
 i32 main() {

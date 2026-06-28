@@ -54,16 +54,16 @@ import "../stdlib/mem.gg";
 // ============================================================
 
 class Buffer {
-    public ptr data;
-    public u64 size;
+    ptr data;
+    u64 size;
 
-    public Buffer(u64 sz) {
+    Buffer(u64 sz) {
         this.size = sz;
         this.data = malloc(sz);
         puts("[+] Buffer: created");
     }
 
-    public ~Buffer() {
+    ~Buffer() {
         free(this.data);
         puts("[-] Buffer: destroyed");
     }
@@ -76,13 +76,13 @@ class Buffer {
 // ============================================================
 
 class Named {
-    public ptr label;
+    ptr label;
 
-    public Named(ptr lbl) {
+    Named(ptr lbl) {
         this.label = lbl;
     }
 
-    public ~Named() {
+    ~Named() {
         puts(this.label);
     }
 }

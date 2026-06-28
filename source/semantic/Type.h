@@ -19,6 +19,7 @@ enum class TypeKind {
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
     Array,  // fixed-size stack array: element type + count stored in Type struct
     Object, // class instance — value, lives with its owner; className stores the class name
+    Enum,   // enum value — a pointer to a global singleton variant; className stores the enum name
     Reference, // heap reference to a class instance (Ref<Class>, refcounted); className stores the pointee class
     TypedPtr,  // typed raw pointer ptr<T> (internal); elementKind (+ className) describe the element
     Void,   // for functions that return nothing
@@ -57,6 +58,15 @@ inline Type makeArrayType(TypeKind elementKind, size_t size) {
 inline Type makeObjectType(const std::string& name) {
     Type t;
     t.kind      = TypeKind::Object;
+    t.className = name;
+    return t;
+}
+
+// Convenience constructor for enum value types. An enum value is a pointer to a
+// global singleton variant; className stores the enum name.
+inline Type makeEnumType(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::Enum;
     t.className = name;
     return t;
 }

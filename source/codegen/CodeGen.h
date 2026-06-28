@@ -28,6 +28,10 @@ private:
     };
     std::unordered_map<std::string, CGClassInfo>      cgClasses_;
 
+    // Names of all enum types (used to detect static variant access EnumName.VARIANT
+    // and enum variable declarations). Enum field/method info is stored in cgClasses_.
+    std::unordered_set<std::string>                   cgEnumNames_;
+
     // ---- Scope-exit cleanup tracking ----
     // One entry per object/reference that needs cleanup when its scope ends.
     //   isReference == false : a value object living in `allocaPtr`
@@ -92,6 +96,11 @@ private:
     void genFunction(const FunctionDeclStmt& function);
     void genExternDecl(const ExternFuncDeclStmt& ext);
     void genClassDecl(const ClassDeclStmt& classDecl);
+    // Emit an enum: %Enum type, @Enum$VARIANT global singletons, ctor + methods.
+    void genEnumDecl(const EnumDeclStmt& enumDecl);
+    // Emit @gg_enum_init (constructs every variant singleton) and register it in
+    // @llvm.global_ctors. Called once after all enums are emitted.
+    void genEnumInit(const Program& program);
     void genMethod(const std::string& className, const MethodDecl& method);
     // Generate @Class_dtor: runs the user destructor body (if any), then releases
     // each reference field in reverse declaration order. Emitted for any class that

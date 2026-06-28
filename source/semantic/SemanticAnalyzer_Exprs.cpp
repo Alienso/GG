@@ -172,6 +172,17 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
         // Equality comparisons
         case TokenType::EQUAL_EQUAL:
         case TokenType::BANG_EQUAL: {
+            // Enum identity comparison: both operands must be the same enum type.
+            if (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum) {
+                bool sameEnum = leftType.kind == TypeKind::Enum
+                             && rightType.kind == TypeKind::Enum
+                             && leftType.className == rightType.className;
+                if (!sameEnum) {
+                    error(binary.operatorToken, "incompatible types for '" + binary.operatorToken.lexeme + "': "
+                          + typeName(leftType) + " and " + typeName(rightType));
+                }
+                return Type{TypeKind::Bool};
+            }
             bool compatible =
                 (leftType.kind == rightType.kind) ||
                 (isNumeric(leftType.kind) && isNumeric(rightType.kind));
@@ -312,6 +323,13 @@ Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
 }
 
 Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
+    // Enums cannot be constructed directly — variants are the only instances.
+    if (enumRegistry.count(call.callee.lexeme)) {
+        error(call.callee, "cannot construct enum '" + call.callee.lexeme
+              + "' directly; use one of its variants");
+        for (const auto& arg : call.args) analyzeExpr(*arg);
+        return makeEnumType(call.callee.lexeme);
+    }
     // Constructor call: callee is a class name
     if (classRegistry.count(call.callee.lexeme)) {
         const ClassInfo& cls = classRegistry.at(call.callee.lexeme);
@@ -490,10 +508,27 @@ Type SemanticAnalyzer::analyzeThis(const ThisExpr& thisExpr) {
         error(thisExpr.keyword, "'this' used outside of a class method");
         return Type{TypeKind::Error};
     }
+    if (currentClassIsEnum)
+        return makeEnumType(currentClassName);
     return makeObjectType(currentClassName);
 }
 
 Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess) {
+    // Static enum variant access: EnumName.VARIANT
+    if (std::holds_alternative<IdentifierExpr>(*memberAccess.object->node)) {
+        const auto& ident = std::get<IdentifierExpr>(*memberAccess.object->node);
+        auto enumIt = enumRegistry.find(ident.name.lexeme);
+        if (enumIt != enumRegistry.end()) {
+            // It's an enum name — the member must be a declared variant.
+            if (!enumIt->second.variantSet.count(memberAccess.field.lexeme)) {
+                error(memberAccess.field, "enum '" + ident.name.lexeme
+                      + "' has no variant '" + memberAccess.field.lexeme + "'");
+                return Type{TypeKind::Error};
+            }
+            return makeEnumType(ident.name.lexeme);
+        }
+    }
+
     Type objectType = analyzeExpr(*memberAccess.object);
     if (isError(objectType)) return Type{TypeKind::Error};
 
@@ -539,6 +574,18 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
     }
 
     const ClassInfo::Field& field = fieldIt->second;
+    // Enum fields are immutable: only assignable via 'this.field' inside the
+    // enum's own constructor.
+    if (objectType.kind == TypeKind::Enum) {
+        bool isThis = std::holds_alternative<ThisExpr>(*memberAssign.object->node);
+        if (!inEnumConstructor || !isThis) {
+            error(memberAssign.field, "cannot assign to field '" + memberAssign.field.lexeme
+                  + "' of enum '" + objectType.className
+                  + "'; enum fields are immutable");
+            analyzeExpr(*memberAssign.value);
+            return field.type;
+        }
+    }
     if (!field.isPublic && currentClassName != objectType.className) {
         warn(memberAssign.field, "field '" + memberAssign.field.lexeme
              + "' is private in class '" + objectType.className + "'");
@@ -644,6 +691,13 @@ Type SemanticAnalyzer::analyzeCast(const CastExpr& castExpr) {
 
 Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
     const std::string& className = newExpr.className.lexeme;
+
+    if (enumRegistry.count(className)) {
+        error(newExpr.className, "cannot 'new' an enum '" + className
+              + "'; use one of its variants");
+        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
 
     auto it = classRegistry.find(className);
     if (it == classRegistry.end()) {

@@ -41,6 +41,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"for",    TokenType::FOR},
     {"while",  TokenType::WHILE},
     {"class",  TokenType::CLASS},
+    {"enum",   TokenType::ENUM},
     {"true",   TokenType::TRUE},
     {"false",  TokenType::FALSE},
     {"var",    TokenType::VAR},

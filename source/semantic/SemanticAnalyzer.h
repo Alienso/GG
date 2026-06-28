@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "SymbolTable.h"
 #include "Type.h"
@@ -44,10 +45,21 @@ struct ClassInfo {
     std::optional<Method>                   destructor; // at most one per class
 };
 
+// ---- EnumInfo: semantic information about a Java-style enum ----
+// An enum reuses ClassInfo (stored in classRegistry) for its fields, constructor
+// and methods. EnumInfo tracks the variant list and marks the name as an enum so
+// that type resolution yields TypeKind::Enum and direct construction is rejected.
+struct EnumInfo {
+    std::vector<std::string>        variantOrder;  // declaration / ordinal order
+    std::unordered_set<std::string> variantSet;    // membership test
+    Token                           decl;          // enum name token
+};
+
 struct SemanticResult {
     bool        hadError = false;
     ExprTypeMap typeMap;
     std::unordered_map<std::string, ClassInfo> classRegistry;
+    std::unordered_map<std::string, EnumInfo>  enumRegistry;
 };
 
 class SemanticAnalyzer {
@@ -64,11 +76,20 @@ private:
     std::optional<Type> currentReturnType; // nullopt = top-level (not inside a function)
     int                 loopDepth         = 0;  // > 0 while inside a while/for loop
     std::string         currentClassName;       // set while analysing a class body
+    bool                currentClassIsEnum = false; // true while analysing an enum body
+    bool                inEnumConstructor  = false; // true while analysing an enum's constructor body
     std::unordered_map<std::string, ClassInfo> classRegistry;
+    std::unordered_map<std::string, EnumInfo>  enumRegistry;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);
+    // Build the shared ClassInfo (fields + methods + optional destructor) for a
+    // class or enum body. allowDestructor is false for enums.
+    [[nodiscard]] ClassInfo buildClassInfo(const std::string& ownerName,
+                                           const std::vector<FieldDecl>& fields,
+                                           const std::deque<MethodDecl>& methods,
+                                           bool allowDestructor);
 
     // Pass 1: hoist top-level function signatures into the global scope
     void collectFunctions(const Program& program);
@@ -85,6 +106,7 @@ private:
     void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
     void analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl);
     void analyzeClassDecl(const ClassDeclStmt& classDecl);
+    void analyzeEnumDecl(const EnumDeclStmt& enumDecl);
 
     // Expression analysis — returns resolved Type and records it in typeMap.
     // Not [[nodiscard]] because it is intentionally called for side effects

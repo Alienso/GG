@@ -19,7 +19,10 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     currentReturnType = std::nullopt;
     loopDepth         = 0;
     currentClassName  = "";
+    currentClassIsEnum = false;
+    inEnumConstructor  = false;
     classRegistry.clear();
+    enumRegistry.clear();
     allowRawPtr_      = options.allowRawPtr;
 
     symbolTable.enterScope();   // global scope
@@ -32,67 +35,103 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
 
     symbolTable.exitScope();
 
-    return SemanticResult{hadError, std::move(typeMap), classRegistry };
+    return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry };
 }
 
 // ============================================================
 // Pass 0 — collect class declarations into classRegistry_
 // ============================================================
 
+// Build a ClassInfo (fields + methods + optional destructor) shared by classes and
+// enums. `ownerName` is used in error messages; `allowDestructor` is false for enums.
+ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
+                                           const std::vector<FieldDecl>& fields,
+                                           const std::deque<MethodDecl>& methods,
+                                           bool allowDestructor) {
+    ClassInfo info;
+    int fieldIndex = 0;
+    for (const FieldDecl& fd : fields) {
+        const std::string& lex = fd.typeName.lexeme;
+        Type fieldType;
+        Type synth = decodeSynthesizedType(fd.typeName);
+        if (!isError(synth)) {
+            // Reference field (Class&) or typed-pointer field (ptr<T>).
+            fieldType = synth;
+        } else if (fd.typeName.type == TokenType::IDENTIFIER) {
+            // Bare class name → value-object field (embedding) — not supported yet.
+            error(fd.name, "object value fields are not supported; declare it as a reference '"
+                  + lex + "& " + fd.name.lexeme + "'");
+            fieldType = Type{TypeKind::Error};
+        } else {
+            fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
+        }
+        info.fieldOrder.push_back(fd.name.lexeme);
+        // emplace constructs in-place, avoiding copy/move-assignment of Token
+        info.fields.emplace(fd.name.lexeme,
+            ClassInfo::Field{fd.isPublic, fieldType, fieldIndex++, fd.name});
+    }
+    for (const MethodDecl& md : methods) {
+        if (md.isDestructor) {
+            if (!allowDestructor) {
+                error(md.name, "enums cannot declare a destructor");
+                continue;
+            }
+            // Validate: no params, at most one destructor per class.
+            if (!md.params.empty()) {
+                error(md.name, "destructor '" + ownerName + "::~" + md.name.lexeme
+                      + "' must take no parameters");
+                continue;
+            }
+            if (info.destructor.has_value()) {
+                error(md.name, "class '" + ownerName
+                      + "' already has a destructor (duplicate ~" + md.name.lexeme + ")");
+                continue;
+            }
+            info.destructor.emplace(ClassInfo::Method{
+                md.isPublic, Type{TypeKind::Void}, std::vector<Type>{}, md.name
+            });
+            continue;
+        }
+        Type returnType = md.isConstructor
+            ? Type{TypeKind::Void}
+            : resolveTypeToken(md.returnType);
+        std::vector<Type> paramTypes;
+        for (const ParamDecl& p : md.params)
+            paramTypes.push_back(resolveTypeToken(p.typeName));
+        info.methods.emplace(md.name.lexeme,
+            ClassInfo::Method{md.isPublic, returnType, std::move(paramTypes), md.name});
+    }
+    return info;
+}
+
 void SemanticAnalyzer::collectClasses(const Program& program) {
+    // Enums are registered first so that a class field/param of an enum type
+    // resolves correctly, and vice-versa (both share classRegistry).
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<EnumDeclStmt>(*stmt.node)) continue;
+        const auto& en = std::get<EnumDeclStmt>(*stmt.node);
+
+        EnumInfo einfo{ {}, {}, en.name };
+        for (const EnumVariant& v : en.variants) {
+            if (!einfo.variantSet.insert(v.name.lexeme).second) {
+                error(v.name, "duplicate enum variant '" + v.name.lexeme
+                      + "' in enum '" + en.name.lexeme + "'");
+                continue;
+            }
+            einfo.variantOrder.push_back(v.name.lexeme);
+        }
+        enumRegistry.emplace(en.name.lexeme, std::move(einfo));
+
+        ClassInfo info = buildClassInfo(en.name.lexeme, en.fields, en.methods,
+                                        /*allowDestructor=*/false);
+        classRegistry.emplace(en.name.lexeme, std::move(info));
+    }
+
     for (const Stmt& stmt : program.declarations) {
         if (!std::holds_alternative<ClassDeclStmt>(*stmt.node)) continue;
         const auto& cls = std::get<ClassDeclStmt>(*stmt.node);
-
-        ClassInfo info;
-        int fieldIndex = 0;
-        for (const FieldDecl& fd : cls.fields) {
-            const std::string& lex = fd.typeName.lexeme;
-            Type fieldType;
-            Type synth = decodeSynthesizedType(fd.typeName);
-            if (!isError(synth)) {
-                // Reference field (Class&) or typed-pointer field (ptr<T>).
-                fieldType = synth;
-            } else if (fd.typeName.type == TokenType::IDENTIFIER) {
-                // Bare class name → value-object field (embedding) — not supported yet.
-                error(fd.name, "object value fields are not supported; declare it as a reference '"
-                      + lex + "& " + fd.name.lexeme + "'");
-                fieldType = Type{TypeKind::Error};
-            } else {
-                fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
-            }
-            info.fieldOrder.push_back(fd.name.lexeme);
-            // emplace constructs in-place, avoiding copy/move-assignment of Token
-            info.fields.emplace(fd.name.lexeme,
-                ClassInfo::Field{fd.isPublic, fieldType, fieldIndex++, fd.name});
-        }
-        for (const MethodDecl& md : cls.methods) {
-            if (md.isDestructor) {
-                // Validate: no params, at most one destructor per class.
-                if (!md.params.empty()) {
-                    error(md.name, "destructor '" + cls.name.lexeme + "::~" + md.name.lexeme
-                          + "' must take no parameters");
-                    continue;
-                }
-                if (info.destructor.has_value()) {
-                    error(md.name, "class '" + cls.name.lexeme
-                          + "' already has a destructor (duplicate ~" + md.name.lexeme + ")");
-                    continue;
-                }
-                info.destructor.emplace(ClassInfo::Method{
-                    md.isPublic, Type{TypeKind::Void}, std::vector<Type>{}, md.name
-                });
-                continue;
-            }
-            Type returnType = md.isConstructor
-                ? Type{TypeKind::Void}
-                : resolveTypeToken(md.returnType);
-            std::vector<Type> paramTypes;
-            for (const ParamDecl& p : md.params)
-                paramTypes.push_back(resolveTypeToken(p.typeName));
-            info.methods.emplace(md.name.lexeme,
-                ClassInfo::Method{md.isPublic, returnType, std::move(paramTypes), md.name});
-        }
+        ClassInfo info = buildClassInfo(cls.name.lexeme, cls.fields, cls.methods,
+                                        /*allowDestructor=*/true);
         classRegistry.emplace(cls.name.lexeme, std::move(info));
     }
 }
@@ -195,6 +234,8 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
     // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
     Type synth = decodeSynthesizedType(typeToken);
     if (!isError(synth)) return synth;
+    if (typeToken.type == TokenType::IDENTIFIER && enumRegistry.count(typeToken.lexeme))
+        return makeEnumType(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
     return typeFromToken(typeToken.type);
@@ -219,9 +260,10 @@ void SemanticAnalyzer::checkCast(const Type& from, const Type& to,
 }
 
 const ClassInfo* SemanticAnalyzer::lookupObjectClass(Type objectType, const Token& site) {
-    // Both value objects (Point) and heap references (Point&) carry a className
-    // and support member/method access.
-    if (objectType.kind != TypeKind::Object && objectType.kind != TypeKind::Reference) {
+    // Value objects (Point), heap references (Point&) and enum values all carry a
+    // className and support member/method access.
+    if (objectType.kind != TypeKind::Object && objectType.kind != TypeKind::Reference
+        && objectType.kind != TypeKind::Enum) {
         error(site, "member access on non-class type '" + typeName(objectType) + "'");
         return nullptr;
     }

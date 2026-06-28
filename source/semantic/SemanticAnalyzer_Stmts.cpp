@@ -62,6 +62,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ExternFuncDeclStmt&)  { return false; },
         [](const ImportStmt&)          { return false; },
         [](const ClassDeclStmt&)       { return false; },
+        [](const EnumDeclStmt&)        { return false; },
     }, *stmt.node);
 }
 
@@ -83,6 +84,7 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },
         [&](const ImportStmt&)                       { /* resolved before semantic pass */ },
         [&](const ClassDeclStmt& classDecl)          { analyzeClassDecl(classDecl); },
+        [&](const EnumDeclStmt& enumDecl)            { analyzeEnumDecl(enumDecl); },
     }, *stmt.node);
 }
 
@@ -324,4 +326,150 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     }
 
     currentClassName = savedClassName;
+}
+
+// ============================================================
+// Enum analysis
+// ============================================================
+
+// Collect the names of fields assigned via `this.field = ...` anywhere in a
+// statement/expression tree. Used to verify an enum constructor initialises every
+// field. Conditional assignments count (a loose but useful phase-1 check).
+static void collectThisAssignedFields(const Stmt& stmt, std::unordered_set<std::string>& out);
+
+static void collectThisAssignedFields(const BlockStmt& block, std::unordered_set<std::string>& out) {
+    for (const auto& s : block.body) if (s) collectThisAssignedFields(*s, out);
+}
+
+static void collectThisAssignedFields(const Expr& e, std::unordered_set<std::string>& out) {
+    if (!e.node) return;
+    if (const auto* ma = std::get_if<MemberAssignExpr>(e.node.get())) {
+        if (ma->object && ma->object->node
+            && std::holds_alternative<ThisExpr>(*ma->object->node))
+            out.insert(ma->field.lexeme);
+    }
+}
+
+static void collectThisAssignedFields(const Stmt& stmt, std::unordered_set<std::string>& out) {
+    std::visit(overloaded{
+        [&](const ExprStmt& s)  { collectThisAssignedFields(s.expression, out); },
+        [&](const BlockStmt& s) { collectThisAssignedFields(s, out); },
+        [&](const IfStmt& s)    {
+            if (s.thenBranch) collectThisAssignedFields(*s.thenBranch, out);
+            if (s.elseBranch) collectThisAssignedFields(*s.elseBranch, out);
+        },
+        [&](const WhileStmt& s) { if (s.body) collectThisAssignedFields(*s.body, out); },
+        [&](const ForStmt& s)   { if (s.body) collectThisAssignedFields(*s.body, out); },
+        [&](const auto&)        { },
+    }, *stmt.node);
+}
+
+void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
+    const std::string& enumName = enumDecl.name.lexeme;
+
+    std::string savedClassName = currentClassName;
+    bool        savedIsEnum    = currentClassIsEnum;
+    currentClassName   = enumName;
+    currentClassIsEnum = true;
+
+    // Gate raw pointer field types behind --unsafe-ptr.
+    for (const FieldDecl& fd : enumDecl.fields)
+        checkRawPtrAllowed(fd.typeName, fd.name);
+
+    // Locate the constructor (if any) and resolve its parameter types.
+    const MethodDecl* ctor = nullptr;
+    for (const MethodDecl& md : enumDecl.methods)
+        if (md.isConstructor) { ctor = &md; break; }
+
+    std::vector<Type> ctorParamTypes;
+    if (ctor)
+        for (const ParamDecl& p : ctor->params)
+            ctorParamTypes.push_back(resolveTypeToken(p.typeName));
+
+    // An enum with fields must have a constructor to initialise them.
+    if (!enumDecl.fields.empty() && !ctor)
+        error(enumDecl.name, "enum '" + enumName
+              + "' has fields but no constructor to initialise them");
+
+    // Validate each variant's argument list against the constructor, and
+    // type-check the argument expressions (evaluated at static-init time).
+    for (const EnumVariant& v : enumDecl.variants) {
+        size_t expected = ctorParamTypes.size();
+        if (v.args.size() != expected)
+            error(v.name, "enum variant '" + v.name.lexeme + "' passes "
+                  + std::to_string(v.args.size()) + " argument(s) but the constructor expects "
+                  + std::to_string(expected));
+        for (size_t i = 0; i < v.args.size(); ++i) {
+            Type argType = analyzeExpr(*v.args[i]);
+            if (i < expected)
+                checkCast(argType, ctorParamTypes[i], v.name,
+                          "argument " + std::to_string(i + 1)
+                          + " of enum variant '" + v.name.lexeme + "'");
+        }
+    }
+
+    // Verify the constructor initialises every field.
+    if (ctor && !enumDecl.fields.empty()) {
+        std::unordered_set<std::string> assigned;
+        collectThisAssignedFields(ctor->body, assigned);
+        for (const FieldDecl& fd : enumDecl.fields)
+            if (!assigned.count(fd.name.lexeme))
+                error(fd.name, "enum field '" + fd.name.lexeme
+                      + "' is not initialised in the constructor of '" + enumName + "'");
+    }
+
+    // Analyse method bodies (constructor + regular methods).
+    for (const MethodDecl& md : enumDecl.methods) {
+        std::optional<Type> savedReturnType = currentReturnType;
+        int                 savedLoopDepth  = loopDepth;
+        bool                savedInCtor     = inEnumConstructor;
+
+        currentReturnType = md.isConstructor ? Type{TypeKind::Void}
+                                             : resolveTypeToken(md.returnType);
+        loopDepth         = 0;
+        inEnumConstructor = md.isConstructor;
+
+        if (!md.isConstructor)
+            checkRawPtrAllowed(md.returnType, md.name);
+        for (const ParamDecl& param : md.params)
+            checkRawPtrAllowed(param.typeName, param.name);
+
+        enterScope();  // method scope
+
+        // 'this' inside an enum method is the enum value itself (a pointer to the singleton).
+        symbolTable.declare("this", Symbol{
+            Symbol::Kind::Variable, makeEnumType(enumName), enumDecl.name, {},
+            /*isParameter=*/false, /*isInitialized=*/true});
+
+        for (const ParamDecl& param : md.params) {
+            Type paramType = resolveTypeToken(param.typeName);
+            if (paramType.kind == TypeKind::Void) {
+                error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (paramType.kind == TypeKind::Object) {
+                error(param.typeName, "object parameter '" + param.name.lexeme
+                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (!symbolTable.declare(param.name.lexeme, Symbol{
+                    Symbol::Kind::Variable, paramType, param.name, {},
+                    /*isParameter=*/true, /*isInitialized=*/true}))
+                error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
+        }
+
+        for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
+
+        if (!md.isConstructor && currentReturnType->kind != TypeKind::Void
+            && !alwaysReturns(md.body))
+            warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+
+        exitScope();
+        currentReturnType = savedReturnType;
+        loopDepth         = savedLoopDepth;
+        inEnumConstructor = savedInCtor;
+    }
+
+    currentClassName   = savedClassName;
+    currentClassIsEnum = savedIsEnum;
 }

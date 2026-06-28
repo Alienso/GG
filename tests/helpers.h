@@ -108,7 +108,7 @@ inline SemanticResult analyzeString(const std::string& source,
         return analyzer.analyze(ast, "", options);
     } catch (const CompileError& e) {
         std::cerr << e.what() << '\n';
-        return SemanticResult{true, {}, {}};
+        return SemanticResult{true, {}, {}, {}};
     }
 }
 

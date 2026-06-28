@@ -1,0 +1,78 @@
+// enum_test.gg
+// Java-style enums in GG: variants are global singletons, fields are immutable
+// and set in the constructor, methods dispatch on the variant, and ==/!= compare
+// identity.
+//
+// Returns 0 on success, or the number of the first failing test.
+// Expected exit code: 0
+
+// ============================================================
+// Planet — fields (mass, radius), constructor, computed method
+// ============================================================
+
+enum Planet {
+    MERCURY(3.303, 2.4397),
+    EARTH(5.976, 6.37814),
+    JUPITER(1898.0, 71.492);
+
+    f64 mass;
+    f64 radius;
+
+    Planet(f64 mass, f64 radius) {
+        this.mass = mass;
+        this.radius = radius;
+    }
+
+    f64 getMass()   { return this.mass; }
+    f64 getRadius() { return this.radius; }
+
+    // surface gravity proxy: mass / (radius * radius)
+    f64 gravity() {
+        return this.mass / (this.radius * this.radius);
+    }
+}
+
+// ============================================================
+// Color — fieldless enum (pure identity markers)
+// ============================================================
+
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+i32 main() {
+    // 1-2: field access on a variant singleton
+    if (Planet.EARTH.mass != 5.976)        { return 1; }
+    if (Planet.JUPITER.radius != 71.492)   { return 2; }
+
+    // 3-4: method dispatch
+    if (Planet.MERCURY.getMass() != 3.303) { return 3; }
+    if (Planet.EARTH.getRadius() != 6.37814) { return 4; }
+
+    // 5: computed method
+    f64 g = Planet.EARTH.gravity();
+    if (g < 0.14 || g > 0.15)              { return 5; }
+
+    // 6-7: enum variable binding + field read through it
+    Planet p = Planet.JUPITER;
+    if (p.mass != 1898.0)                  { return 6; }
+    if (p.getRadius() != 71.492)           { return 7; }
+
+    // 8-9: identity equality
+    if (p != Planet.JUPITER)               { return 8; }
+    if (p == Planet.EARTH)                 { return 9; }
+
+    // 10: rebinding the variable
+    p = Planet.MERCURY;
+    if (p != Planet.MERCURY)               { return 10; }
+
+    // 11-13: fieldless enum identity
+    Color c = Color.GREEN;
+    if (c != Color.GREEN)                  { return 11; }
+    if (c == Color.RED)                    { return 12; }
+    if (Color.BLUE == Color.RED)           { return 13; }
+
+    return 0;
+}

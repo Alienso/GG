@@ -177,6 +177,10 @@ Type CodeGen::resolveReturnType(const Token& typeToken) const {
     // Bare class returns (by value) are unsupported and fall through to typeFromToken.
     Type synth = decodeSynthesizedType(typeToken);
     if (!isError(synth)) return synth;
+    // Enum return-by-value: an enum value is a pointer to a singleton, so a bare
+    // enum return type lowers to `ptr` (unlike bare class-by-value, which is rejected).
+    if (typeToken.type == TokenType::IDENTIFIER && cgEnumNames_.count(typeToken.lexeme))
+        return makeEnumType(typeToken.lexeme);
     return typeFromToken(typeToken.type);
 }
 

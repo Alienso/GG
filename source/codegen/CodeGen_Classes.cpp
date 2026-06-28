@@ -41,9 +41,17 @@ std::string CodeGen::genThis(const ThisExpr&) {
 // ---- Member access (field read) ----
 
 std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
+    // Static enum variant access: EnumName.VARIANT → address of the global singleton.
+    if (std::holds_alternative<IdentifierExpr>(*ma.object->node)) {
+        const auto& id = std::get<IdentifierExpr>(*ma.object->node);
+        if (cgEnumNames_.count(id.name.lexeme))
+            return "@" + id.name.lexeme + "$" + ma.field.lexeme;
+    }
+
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
-    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference
+        && objType.kind != TypeKind::Enum) return "0";
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
     return emitLoad(irTypeName(fieldType), gepReg);
@@ -54,7 +62,8 @@ std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
 std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
-    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference
+        && objType.kind != TypeKind::Enum) return "0";
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
 
@@ -88,7 +97,8 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
     std::string objPtr = genExpr(*mc.object);
     Type objType = exprType(*mc.object);
-    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return "0";
+    if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference
+        && objType.kind != TypeKind::Enum) return "0";
 
     std::string mangledName  = objType.className + "_" + mc.method.lexeme;
     std::string returnIrType = irTypeName(resolvedType);

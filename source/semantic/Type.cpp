@@ -198,6 +198,7 @@ std::string typeName(const Type& t) {
         case TypeKind::Ptr:    return "ptr";
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
+        case TypeKind::Enum:   return t.className;
         case TypeKind::Reference: return "Ref<" + t.className + ">";
         case TypeKind::TypedPtr: {
             Type elem = typedPtrElement(t);

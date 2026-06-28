@@ -89,6 +89,7 @@ add_executable(GG_tests
         tests/stdlib_tests.cpp
         tests/array_tests.cpp
         tests/class_tests.cpp
+        tests/enum_tests.cpp
         tests/cast_tests.cpp
         ${GG_SOURCES}
 )

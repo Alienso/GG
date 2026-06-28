@@ -115,6 +115,14 @@ private:
     // ---- Statement parsers ----
     [[nodiscard]] Stmt      parseDeclaration();
     [[nodiscard]] Stmt      parseClassDecl();
+    [[nodiscard]] Stmt      parseEnumDecl();
+    // Parse the member list (fields, methods, optional constructor/destructor) of a
+    // class or enum body until the closing '}'. `typeName` is used to detect the
+    // constructor (a method whose name matches). Destructors are only valid for classes.
+    void                    parseMemberList(const Token& typeName,
+                                            std::vector<FieldDecl>& fields,
+                                            std::deque<MethodDecl>& methods,
+                                            bool allowDestructor);
     [[nodiscard]] Stmt      parseFunctionDecl(const Token& returnType, const Token& name);
     [[nodiscard]] Stmt      parseExternFuncDecl(const Token& keyword);
     [[nodiscard]] Stmt      parseImportStmt(const Token& keyword);

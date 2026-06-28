@@ -287,6 +287,17 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
     Type leftType  = exprType(*binary.left);
     Type rightType = exprType(*binary.right);
 
+    // Enum identity comparison (==/!=): both operands are `ptr` to a singleton.
+    if (isComparison
+        && (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum)) {
+        std::string l = genExpr(*binary.left);
+        std::string r = genExpr(*binary.right);
+        std::string t = freshTemp();
+        std::string op = (operatorType == TokenType::EQUAL_EQUAL) ? "eq" : "ne";
+        emit("%" + t + " = icmp " + op + " ptr " + l + ", " + r);
+        return "%" + t;
+    }
+
     // Determine the arithmetic type for the operation
     Type operandType = isComparison
                      ? commonArithmeticType(leftType, rightType)
@@ -516,6 +527,30 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             }
             return ptrName;
         }
+    }
+
+    // ---- Enum variable declaration ----
+    // An enum variable holds a `ptr` to a global singleton variant.
+    if (varDecl.typeName.type == TokenType::IDENTIFIER
+        && cgEnumNames_.count(varDecl.typeName.lexeme)) {
+        const std::string& enumName = varDecl.typeName.lexeme;
+        Type        enumType = makeEnumType(enumName);
+        std::string name     = varDecl.name.lexeme;
+        std::string ptrName  = freshAllocaName(name);
+
+        emitAlloca(ptrName, "ptr");
+        allocaMap[name]  = ptrName;
+        varTypeMap[name] = enumType;
+
+        if (varDecl.initializer) {
+            Type        initType = exprType(*varDecl.initializer);
+            std::string value    = genExpr(*varDecl.initializer);
+            value = emitCast(value, initType, enumType);   // enum → enum: no-op
+            emitStore("ptr", value, ptrName);
+        } else {
+            emitStore("ptr", "null", ptrName);
+        }
+        return ptrName;
     }
 
     // ---- Object (class) declaration ----

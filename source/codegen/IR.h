@@ -30,6 +30,7 @@ inline std::string irTypeName(const Type& t) {
         case TypeKind::Ptr:    return "ptr";
         case TypeKind::Array:  return "[" + std::to_string(t.arraySize) + " x " + irTypeName(Type{t.elementKind}) + "]";
         case TypeKind::Object: return "%" + t.className;
+        case TypeKind::Enum:   return "ptr";   // enum value — a pointer to a global singleton variant
         case TypeKind::Reference: return "ptr";   // refcounted heap reference — an opaque pointer to the object body
         case TypeKind::TypedPtr:  return "ptr";   // typed raw pointer ptr<T> — an opaque pointer at the IR level
         case TypeKind::Void:   return "void";

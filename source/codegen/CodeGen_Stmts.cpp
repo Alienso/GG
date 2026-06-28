@@ -20,6 +20,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
         [&](const ImportStmt&)               { /* resolved before codegen pass */ },
         [&](const ClassDeclStmt&)            { /* handled at module level in generate() */ },
+        [&](const EnumDeclStmt&)             { /* handled at module level in generate() */ },
     }, *stmt.node);
 }
 

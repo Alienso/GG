@@ -44,6 +44,92 @@ void CodeGen::genClassDecl(const ClassDeclStmt& classDecl) {
         genDestructor(classDecl);
 }
 
+void CodeGen::genEnumDecl(const EnumDeclStmt& enumDecl) {
+    const std::string& enumName = enumDecl.name.lexeme;
+
+    // Emit struct type declaration: %Enum = type { irType1, ... }
+    auto cgIt = cgClasses_.find(enumName);
+    if (cgIt != cgClasses_.end()) {
+        std::string typeBody;
+        bool first = true;
+        for (const auto& [fieldName, fieldType] : cgIt->second.fields) {
+            if (!first) typeBody += ", ";
+            first = false;
+            typeBody += irTypeName(fieldType);
+        }
+        // A fieldless enum would lower to a zero-sized struct; distinct singletons
+        // could then share one address (defeating identity comparison). Give it a
+        // single padding byte so every variant gets a unique address.
+        if (typeBody.empty()) typeBody = "i8";
+        module.typeDecls.push_back("%" + enumName + " = type { " + typeBody + " }");
+    }
+
+    // Emit one global singleton per variant: @Enum$VARIANT = global %Enum zeroinitializer
+    for (const EnumVariant& v : enumDecl.variants) {
+        module.globals.push_back(
+            "@" + enumName + "$" + v.name.lexeme
+            + " = global %" + enumName + " zeroinitializer");
+    }
+
+    // Emit constructor + regular methods (mangled exactly like class methods).
+    for (const MethodDecl& md : enumDecl.methods)
+        genMethod(enumName, md);
+}
+
+void CodeGen::genEnumInit(const Program& program) {
+    // Collect every (enum, variant) pair that needs a constructor call.
+    struct InitCall { const EnumDeclStmt* en; const EnumVariant* variant; };
+    std::vector<InitCall> calls;
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (!std::holds_alternative<EnumDeclStmt>(*decl.node)) continue;
+        const auto& en = std::get<EnumDeclStmt>(*decl.node);
+        bool hasCtor = funcParamTypes.count(en.name.lexeme + "_" + en.name.lexeme) > 0;
+        if (!hasCtor) continue;   // fieldless enum: zeroinitializer is the final value
+        for (const EnumVariant& v : en.variants)
+            calls.push_back({ &en, &v });
+    }
+    if (calls.empty()) return;
+
+    // Reset per-function state and emit @gg_enum_init.
+    tempCounter = 0; labelCounter = 0;
+    allocaMap.clear(); varTypeMap.clear();
+    usedAllocaNames.clear();
+    breakLabelStack.clear(); continueLabelStack.clear();
+    dtorScopes_.clear();
+    pendingTemps_.clear();
+    currentClassName_ = "";
+    currentReturnType = Type{TypeKind::Void};
+
+    IRFunction irFunc;
+    irFunc.signature = "define void @gg_enum_init()";
+    module.functions.push_back(std::move(irFunc));
+    currentFunction = &module.functions.back();
+    currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
+    currentBasicBlock = &currentFunction->blocks.back();
+
+    for (const InitCall& c : calls) {
+        const std::string& enumName = c.en->name.lexeme;
+        std::string mangledCtor = enumName + "_" + enumName;
+        auto funcIt = funcParamTypes.find(mangledCtor);
+        const std::vector<Type>* ctorParams =
+            funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
+        std::string argStr = buildArgString(c.variant->args, ctorParams);
+        std::string self   = "@" + enumName + "$" + c.variant->name.lexeme;
+        emit("call void @" + mangledCtor + "(ptr " + self
+             + (argStr.empty() ? "" : ", " + argStr) + ")");
+    }
+    emit("ret void");
+    currentBasicBlock->terminated = true;
+    currentFunction   = nullptr;
+    currentBasicBlock = nullptr;
+
+    // Register the initializer to run before main.
+    module.globals.push_back(
+        "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] "
+        "[{ i32, ptr, ptr } { i32 65535, ptr @gg_enum_init, ptr null }]");
+}
+
 void CodeGen::genFunction(const FunctionDeclStmt& function) {
     // Reset per-function state
     tempCounter = 0; labelCounter = 0;
@@ -109,7 +195,9 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     currentBasicBlock = &currentFunction->blocks.back();
 
     allocaMap["this"]  = "%self";
-    varTypeMap["this"] = makeObjectType(className);
+    varTypeMap["this"] = cgEnumNames_.count(className)
+                       ? makeEnumType(className)
+                       : makeObjectType(className);
 
     spillParamsToAllocas(method.params);
     emitFunctionBody(method.body, returnIrType);

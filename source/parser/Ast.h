@@ -244,6 +244,21 @@ struct ClassDeclStmt {
     std::deque<MethodDecl> methods;
 };
 
+// A single enum variant: the name plus the constructor arguments used to
+// initialise its singleton instance (e.g. EARTH(5.976e24, 6.37814e6)).
+struct EnumVariant {
+    Token                              name;
+    std::vector<std::unique_ptr<Expr>> args;   // empty for fieldless variants
+};
+
+struct EnumDeclStmt {
+    Token                    name;
+    std::deque<EnumVariant>  variants;   // declaration order = ordinal order
+    std::vector<FieldDecl>   fields;
+    // std::deque for the same reason as ClassDeclStmt::methods.
+    std::deque<MethodDecl>   methods;
+};
+
 // ---- Stmt wrapper ----
 
 struct Stmt {
@@ -259,7 +274,8 @@ struct Stmt {
         FunctionDeclStmt,
         ExternFuncDeclStmt,
         ImportStmt,
-        ClassDeclStmt
+        ClassDeclStmt,
+        EnumDeclStmt
     >;
     std::unique_ptr<Variant> node;
 };

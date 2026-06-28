@@ -42,6 +42,9 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
             else
                 classNames.insert(toks[i + 1].lexeme);
         }
+        // Enum names are also type names (no generic enums for now).
+        if (toks[i].type == TokenType::ENUM && toks[i + 1].type == TokenType::IDENTIFIER)
+            classNames.insert(toks[i + 1].lexeme);
     }
     // Register generic function template names ( "<type|id> name < ... > (" )
     // so call sites are recognised regardless of declaration order.
@@ -484,6 +487,10 @@ Stmt Parser::parseDeclaration() {
         return parseClassDecl();
     }
 
+    if (match({ TokenType::ENUM })) {
+        return parseEnumDecl();
+    }
+
     // Function decl: typeName IDENTIFIER ( ...
     // Exception: if we are inside a function body and the return type is a class
     // name (an IDENTIFIER in classNames_), then "ClassName varName(args)" is a
@@ -560,7 +567,50 @@ Stmt Parser::parseClassDecl() {
 
     std::vector<FieldDecl> fields;
     std::deque<MethodDecl> methods;
+    parseMemberList(name, fields, methods, /*allowDestructor=*/true);
 
+    consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
+    return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
+}
+
+Stmt Parser::parseEnumDecl() {
+    Token name = consume(TokenType::IDENTIFIER, "expected enum name after 'enum'");
+    classNames.insert(name.lexeme);   // recognise the enum name as a type name
+    consume(TokenType::LEFT_BRACE, "expected '{' after enum name");
+
+    std::deque<EnumVariant> variants;
+    // Variant list: IDENTIFIER ( '(' args ')' )?  comma-separated, terminated by ';' or '}'.
+    if (check(TokenType::IDENTIFIER)) {
+        do {
+            Token vname = consume(TokenType::IDENTIFIER, "expected enum variant name");
+            std::vector<std::unique_ptr<Expr>> args;
+            if (match({ TokenType::LEFT_PAREN })) {
+                if (!check(TokenType::RIGHT_PAREN)) {
+                    do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+                }
+                consume(TokenType::RIGHT_PAREN, "expected ')' after enum variant arguments");
+            }
+            variants.push_back(EnumVariant{ vname, std::move(args) });
+        } while (match({ TokenType::COMMA }));
+    }
+    // Optional ';' separates the variant list from the body (fields / constructor / methods).
+    (void)match({ TokenType::SEMICOLON });
+
+    std::vector<FieldDecl> fields;
+    std::deque<MethodDecl> methods;
+    // Parse a destructor if present so the semantic analyser can reject it with a
+    // clear "enums cannot declare a destructor" diagnostic (rather than a generic
+    // parse error). allowDestructor=true here; the rejection happens in semantics.
+    parseMemberList(name, fields, methods, /*allowDestructor=*/true);
+
+    consume(TokenType::RIGHT_BRACE, "expected '}' after enum body");
+    return makeStmt(EnumDeclStmt{ name, std::move(variants), std::move(fields), std::move(methods) });
+}
+
+void Parser::parseMemberList(const Token& name,
+                             std::vector<FieldDecl>& fields,
+                             std::deque<MethodDecl>& methods,
+                             bool allowDestructor) {
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
         // Members are public by default; 'private' opts out.
         bool isPublic = true;
@@ -569,7 +619,8 @@ Stmt Parser::parseClassDecl() {
         }
 
         // Destructor: ~ClassName()
-        if (check(TokenType::TILDE)
+        if (allowDestructor
+            && check(TokenType::TILDE)
             && current + 1 < tokens.size()
             && tokens[current + 1].type == TokenType::IDENTIFIER
             && tokens[current + 1].lexeme == name.lexeme
@@ -659,9 +710,6 @@ Stmt Parser::parseClassDecl() {
             fields.push_back(FieldDecl{ isPublic, memberType, memberName });
         }
     }
-
-    consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
-    return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
 }
 
 Stmt Parser::parseStatement() {

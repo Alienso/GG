@@ -306,6 +306,37 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             indent--;
         },
 
+        [&](const EnumDeclStmt& enumDecl) {
+            out("EnumDecl '" + enumDecl.name.lexeme + "'");
+            indent++;
+            for (const EnumVariant& v : enumDecl.variants) {
+                out("variant '" + v.name.lexeme + "' (" + std::to_string(v.args.size()) + " args)");
+                indent++;
+                for (const auto& arg : v.args) printExpr(*arg);
+                indent--;
+            }
+            for (const FieldDecl& fd : enumDecl.fields) {
+                out(std::string(fd.isPublic ? "" : "private ")
+                    + "field " + fd.typeName.lexeme + " '" + fd.name.lexeme + "'");
+            }
+            for (const MethodDecl& md : enumDecl.methods) {
+                std::string params;
+                bool first = true;
+                for (const auto& param : md.params) {
+                    if (!first) params += ", ";
+                    first = false;
+                    params += param.typeName.lexeme + " " + param.name.lexeme;
+                }
+                std::string prefix = std::string(md.isPublic ? "" : "private ")
+                                   + (md.isConstructor ? "ctor " : "method ");
+                out(prefix + "'" + md.name.lexeme + "' (" + params + ")");
+                indent++;
+                printBlock(md.body);
+                indent--;
+            }
+            indent--;
+        },
+
     }, *stmt.node);
 }
 

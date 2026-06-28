@@ -173,7 +173,7 @@ vector-reallocation copy-fallback that would hit the deleted assignment operator
 - Generated on demand when a value-copy initialisation is encountered.
 
 ## Test baseline
-**369 test cases / 745 assertions** (as of `--unsafe-ptr` flag + `ptr<void>` alias).
+**383 test cases / 766 assertions** (as of definite-assignment / use-before-init analysis).
 
 ## Keeping CLAUDE.md current
 

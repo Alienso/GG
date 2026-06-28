@@ -1,0 +1,63 @@
+// e2e/typed_pointer_test.gg
+//
+// End-to-end validation of typed raw pointers ptr<T> + generalized [] indexing:
+//   * a ptr<i32> field holds a malloc'd buffer (sized with sizeof(T))
+//   * elements are written/read through this.data[i]
+//   * indexing works on a local ptr<T> too
+//   * a fixed-size array still indexes correctly alongside ptr<T>
+//
+// Returns a unique number on failure; main returns 0 on success.
+// Expected result: exit code 0
+
+extern ptr malloc(u64 n);
+extern void free(ptr p);
+
+class IntVec {
+    public ptr<i32> data;
+    public i32 len;
+
+    public IntVec(i32 capacity) {
+        this.data = malloc(sizeof(i32) * capacity);
+        this.len  = 0;
+    }
+
+    public void push(i32 v) {
+        this.data[this.len] = v;
+        this.len = this.len + 1;
+    }
+
+    public i32 get(i32 i) {
+        return this.data[i];
+    }
+
+    public ~IntVec() {
+        free(this.data);
+    }
+}
+
+i32 main() {
+    IntVec v(8);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+
+    if (v.get(0) != 10) { return 1; }
+    if (v.get(1) != 20) { return 2; }
+    if (v.get(2) != 30) { return 3; }
+    if (v.len   != 3)   { return 4; }
+
+    // Local typed pointer indexing.
+    ptr<i32> buf = malloc(sizeof(i32) * 4);
+    buf[0] = 7;
+    buf[3] = 9;
+    if (buf[0] != 7) { return 5; }
+    if (buf[3] != 9) { return 6; }
+    free(buf);
+
+    // Fixed-size array indexing still works.
+    i32[4] arr;
+    arr[2] = 99;
+    if (arr[2] != 99) { return 7; }
+
+    return 0;
+}

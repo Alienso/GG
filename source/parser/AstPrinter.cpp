@@ -87,15 +87,20 @@ void AstPrinter::printExpr(const Expr& expr) {
         },
 
         [&](const IndexExpr& indexExpr) {
-            out("Index '" + indexExpr.name.lexeme + "'");
+            out("Index");
             indent++;
+            printExpr(*indexExpr.object);
             printExpr(*indexExpr.index);
             indent--;
         },
 
         [&](const IndexAssignExpr& indexAssign) {
-            out("IndexAssign '" + indexAssign.name.lexeme + "'");
+            out("IndexAssign");
             indent++;
+            out("object:");
+            indent++;
+            printExpr(*indexAssign.object);
+            indent--;
             out("index:");
             indent++;
             printExpr(*indexAssign.index);

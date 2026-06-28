@@ -46,9 +46,10 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
         for (const FieldDecl& fd : cls.fields) {
             const std::string& lex = fd.typeName.lexeme;
             Type fieldType;
-            if (fd.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
-                // Reference field: Class&
-                fieldType = makeReferenceType(lex.substr(0, lex.size() - 1));
+            Type synth = decodeSynthesizedType(fd.typeName);
+            if (!isError(synth)) {
+                // Reference field (Class&) or typed-pointer field (ptr<T>).
+                fieldType = synth;
             } else if (fd.typeName.type == TokenType::IDENTIFIER) {
                 // Bare class name → value-object field (embedding) — not supported yet.
                 error(fd.name, "object value fields are not supported; declare it as a reference '"
@@ -179,10 +180,9 @@ void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
 }
 
 Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
-    // Reference type: a synthesized "<Class>&" token from the parser.
-    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
-        && typeToken.lexeme.back() == '&')
-        return makeReferenceType(typeToken.lexeme.substr(0, typeToken.lexeme.size() - 1));
+    // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
+    Type synth = decodeSynthesizedType(typeToken);
+    if (!isError(synth)) return synth;
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
     return typeFromToken(typeToken.type);

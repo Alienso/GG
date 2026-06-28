@@ -18,6 +18,10 @@
 // Key = expr.node.get() — stable because the AST is never mutated during analysis.
 using ExprTypeMap = std::unordered_map<const Expr::Variant*, Type>;
 
+// First (leftmost) token of an expression — for error reporting on nodes that
+// store no keyword token of their own. Defined in SemanticAnalyzer_Stmts.cpp.
+const Token& exprFirstToken(const Expr& expr);
+
 // ---- ClassInfo: semantic information about a class ----
 
 struct ClassInfo {

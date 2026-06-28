@@ -1204,3 +1204,94 @@ TEST_CASE("Sizeof - sizeof(reference) is pointer-sized", "[sizeof][codegen]") {
     )");
     REQUIRE(irContains(ir, "getelementptr ptr, ptr null, i32 1"));
 }
+
+// ============================================================
+// Typed pointers ptr<T> + generalized [] indexing
+// ============================================================
+
+TEST_CASE("TypedPtr - ptr<T> variable lowers to an opaque pointer", "[typedptr][codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<i32> buf = malloc(16);
+        }
+    )");
+    REQUIRE(irContains(ir, "alloca ptr"));
+}
+
+TEST_CASE("TypedPtr - indexing a ptr<i32> GEPs the element type", "[typedptr][codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<i32> buf = malloc(16);
+            buf[2] = 7;
+            i32 v = buf[2];
+        }
+    )");
+    // Element GEP uses the element IR type (i32) and a single i64 index — not the
+    // two-index array form.
+    REQUIRE(irContains(ir, "getelementptr i32, ptr "));
+    REQUIRE(irContains(ir, "store i32 7"));
+}
+
+TEST_CASE("TypedPtr - indexing has no array bounds check", "[typedptr][codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<i32> buf = malloc(16);
+            i32 v = buf[100];
+        }
+    )");
+    REQUIRE_FALSE(irContains(ir, "@abort"));
+}
+
+TEST_CASE("TypedPtr - ptr<T> field indexed through this", "[typedptr][codegen]") {
+    auto ir = codegenString(R"(
+        extern ptr malloc(u64 n);
+        class Vec {
+            public ptr<i32> data;
+            public Vec() { this.data = malloc(16); }
+            public void set(i32 i, i32 v) { this.data[i] = v; }
+            public i32 get(i32 i) { return this.data[i]; }
+        }
+        void main() {
+            Vec v();
+            v.set(0, 42);
+        }
+    )");
+    REQUIRE(irContains(ir, "%Vec = type { ptr }"));
+    REQUIRE(irContains(ir, "getelementptr i32, ptr "));
+}
+
+TEST_CASE("TypedPtr - generalized [] still works on a fixed-size array", "[typedptr][array][codegen]") {
+    auto ir = codegenString(R"(
+        void main() {
+            i32[4] a;
+            a[1] = 9;
+            i32 x = a[1];
+        }
+    )");
+    // Arrays keep the two-index GEP form into their storage.
+    REQUIRE(irContains(ir, "getelementptr [4 x i32], ptr "));
+}
+
+TEST_CASE("TypedPtr - element type can be a reference (ptr<Point&>)", "[typedptr][semantic]") {
+    auto r = analyzeString(R"(
+        class Point { public i32 x; }
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<Point&> buf = malloc(8);
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("TypedPtr - indexing a non-indexable type is an error", "[typedptr][semantic]") {
+    auto r = analyzeString(R"(
+        void main() {
+            i32 x = 3;
+            i32 y = x[0];
+        }
+    )");
+    REQUIRE(r.hadError);
+}

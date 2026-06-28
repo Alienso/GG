@@ -5,24 +5,24 @@
 // Used for error reporting when the AST node stores no keyword token.
 // ============================================================
 
-static const Token& firstToken(const Expr& expr) {
+const Token& exprFirstToken(const Expr& expr) {
     struct Visitor {
         const Token& operator()(const LiteralExpr& literal)            const { return literal.token; }
         const Token& operator()(const IdentifierExpr& identifier)      const { return identifier.name; }
         const Token& operator()(const UnaryExpr& unary)                const { return unary.operatorToken; }
-        const Token& operator()(const BinaryExpr& binary)              const { return firstToken(*binary.left); }
+        const Token& operator()(const BinaryExpr& binary)              const { return exprFirstToken(*binary.left); }
         const Token& operator()(const AssignExpr& assign)              const { return assign.name; }
         const Token& operator()(const CompoundAssignExpr& compoundAssign) const { return compoundAssign.name; }
-        const Token& operator()(const PostfixExpr& postfix)            const { return firstToken(*postfix.operand); }
+        const Token& operator()(const PostfixExpr& postfix)            const { return exprFirstToken(*postfix.operand); }
         const Token& operator()(const CallExpr& call)                  const { return call.callee; }
         const Token& operator()(const VarDeclExpr& varDecl)            const { return varDecl.typeName; }
-        const Token& operator()(const IndexExpr& indexExpr)            const { return indexExpr.name; }
-        const Token& operator()(const IndexAssignExpr& indexAssign)    const { return indexAssign.name; }
+        const Token& operator()(const IndexExpr& indexExpr)            const { return exprFirstToken(*indexExpr.object); }
+        const Token& operator()(const IndexAssignExpr& indexAssign)    const { return exprFirstToken(*indexAssign.object); }
         const Token& operator()(const ThisExpr& thisExpr)              const { return thisExpr.keyword; }
-        const Token& operator()(const MemberAccessExpr& ma)            const { return firstToken(*ma.object); }
-        const Token& operator()(const MemberAssignExpr& ma)            const { return firstToken(*ma.object); }
-        const Token& operator()(const MethodCallExpr& mc)              const { return firstToken(*mc.object); }
-        const Token& operator()(const CastExpr& castExpr)              const { return firstToken(*castExpr.operand); }
+        const Token& operator()(const MemberAccessExpr& ma)            const { return exprFirstToken(*ma.object); }
+        const Token& operator()(const MemberAssignExpr& ma)            const { return exprFirstToken(*ma.object); }
+        const Token& operator()(const MethodCallExpr& mc)              const { return exprFirstToken(*mc.object); }
+        const Token& operator()(const CastExpr& castExpr)              const { return exprFirstToken(*castExpr.operand); }
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
     };
@@ -95,7 +95,7 @@ void SemanticAnalyzer::analyzeBlock(const BlockStmt& block) {
 void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
     Type conditionType = analyzeExpr(ifStmt.condition);
     if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
-        error(firstToken(ifStmt.condition),
+        error(exprFirstToken(ifStmt.condition),
               "if condition must be bool-compatible, got " + typeName(conditionType));
     }
     analyzeStmt(*ifStmt.thenBranch);
@@ -105,7 +105,7 @@ void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
 void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
     Type conditionType = analyzeExpr(whileStmt.condition);
     if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
-        error(firstToken(whileStmt.condition),
+        error(exprFirstToken(whileStmt.condition),
               "while condition must be bool-compatible, got " + typeName(conditionType));
     }
     loopDepth++;
@@ -121,7 +121,7 @@ void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
     if (forStmt.condition) {
         Type conditionType = analyzeExpr(*forStmt.condition);
         if (!isError(conditionType) && !isBoolCompatible(conditionType)) {
-            error(firstToken(*forStmt.condition),
+            error(exprFirstToken(*forStmt.condition),
                   "for condition must be bool-compatible, got " + typeName(conditionType));
         }
     }

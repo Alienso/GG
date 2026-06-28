@@ -31,6 +31,7 @@ inline std::string irTypeName(const Type& t) {
         case TypeKind::Array:  return "[" + std::to_string(t.arraySize) + " x " + irTypeName(Type{t.elementKind}) + "]";
         case TypeKind::Object: return "%" + t.className;
         case TypeKind::Reference: return "ptr";   // refcounted heap reference — an opaque pointer to the object body
+        case TypeKind::TypedPtr:  return "ptr";   // typed raw pointer ptr<T> — an opaque pointer at the IR level
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "i32";   // fallback — suppressed errors
     }

@@ -71,6 +71,13 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     if (f == TypeKind::Reference && t == TypeKind::Object && from.className == to.className)
         return CastResult::Silent;
 
+    // Typed raw pointers ptr<T> are interchangeable with the opaque ptr type and
+    // with each other (they are all just `ptr` in the IR). These are internal,
+    // low-level conversions used by container implementations.
+    if (f == TypeKind::TypedPtr && t == TypeKind::TypedPtr) return CastResult::Silent;
+    if (f == TypeKind::TypedPtr && t == TypeKind::Ptr)      return CastResult::Silent;
+    if (f == TypeKind::Ptr      && t == TypeKind::TypedPtr) return CastResult::Silent;
+
     // Any integer → float (silent widening)
     if (isInteger(f) && isFloat(t))          return CastResult::Silent;
 
@@ -192,8 +199,74 @@ std::string typeName(const Type& t) {
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
         case TypeKind::Reference: return "Ref<" + t.className + ">";
+        case TypeKind::TypedPtr: {
+            Type elem = typedPtrElement(t);
+            return "ptr<" + typeName(elem) + ">";
+        }
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "<error>";
     }
     return "<unknown>";
+}
+
+// ============================================================
+// typeKindFromName — primitive keyword spelling → TypeKind
+// ============================================================
+
+TypeKind typeKindFromName(const std::string& name) {
+    if (name == "i8")   return TypeKind::I8;
+    if (name == "i16")  return TypeKind::I16;
+    if (name == "i32")  return TypeKind::I32;
+    if (name == "i64")  return TypeKind::I64;
+    if (name == "u8")   return TypeKind::U8;
+    if (name == "u16")  return TypeKind::U16;
+    if (name == "u32")  return TypeKind::U32;
+    if (name == "u64")  return TypeKind::U64;
+    if (name == "f32")  return TypeKind::F32;
+    if (name == "f64")  return TypeKind::F64;
+    if (name == "bool") return TypeKind::Bool;
+    if (name == "char") return TypeKind::Char;
+    if (name == "ptr")  return TypeKind::Ptr;
+    if (name == "void") return TypeKind::Void;
+    return TypeKind::Error;
+}
+
+// ============================================================
+// decodeSynthesizedType — parser-synthesized type token → Type
+//
+// Handles:
+//   "Class&"       → Reference(Class)
+//   "ptr<Elem>"    → TypedPtr whose element is described by Elem, where Elem is
+//                    a primitive spelling, "Class" (Object), or "Class.ref"
+//                    (Reference). Nested ptr elements decay to opaque Ptr.
+// Returns Type{Error} when `tok` is not such a synthesized token.
+// ============================================================
+
+Type decodeSynthesizedType(const Token& tok) {
+    const std::string& s = tok.lexeme;
+
+    // Reference: "Class&"
+    if (!s.empty() && s.back() == '&')
+        return makeReferenceType(s.substr(0, s.size() - 1));
+
+    // Typed pointer: "ptr<Elem>"
+    if (s.size() > 5 && s.compare(0, 4, "ptr<") == 0 && s.back() == '>') {
+        std::string elem = s.substr(4, s.size() - 5);
+
+        // Reference element: "Elem.ref"
+        if (elem.size() > 4 && elem.compare(elem.size() - 4, 4, ".ref") == 0) {
+            std::string cls = elem.substr(0, elem.size() - 4);
+            return makeTypedPtr(TypeKind::Reference, cls);
+        }
+
+        // Primitive element
+        TypeKind pk = typeKindFromName(elem);
+        if (pk != TypeKind::Error)
+            return makeTypedPtr(pk);
+
+        // Otherwise an object/class element
+        return makeTypedPtr(TypeKind::Object, elem);
+    }
+
+    return Type{TypeKind::Error};
 }

@@ -124,6 +124,8 @@ private:
     std::string genVarDecl(const VarDeclExpr& varDecl);
     std::string genIndex(const IndexExpr& indexExpr);
     std::string genIndexAssign(const IndexAssignExpr& indexAssign);
+    std::string genElementAddress(const Expr& object, const Expr& index,
+                                  std::string& elementIrTypeOut);
     std::string genThis(const ThisExpr& thisExpr);
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);

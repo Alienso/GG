@@ -164,21 +164,19 @@ Type CodeGen::exprType(const Expr& expression) const {
 }
 
 Type CodeGen::resolveParamType(const ParamDecl& param) const {
-    // Reference type: a synthesized "<Class>&" token from the parser.
-    if (param.typeName.type == TokenType::IDENTIFIER && !param.typeName.lexeme.empty()
-        && param.typeName.lexeme.back() == '&')
-        return makeReferenceType(param.typeName.lexeme.substr(0, param.typeName.lexeme.size() - 1));
+    // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
+    Type synth = decodeSynthesizedType(param.typeName);
+    if (!isError(synth)) return synth;
     if (param.typeName.type == TokenType::IDENTIFIER && cgClasses_.count(param.typeName.lexeme))
         return makeObjectType(param.typeName.lexeme);
     return typeFromToken(param.typeName.type);
 }
 
 Type CodeGen::resolveReturnType(const Token& typeToken) const {
-    // "Class&" → reference return (lowers to ptr). Bare class returns (by value) are
-    // unsupported and fall through to typeFromToken (Error); primitives/void resolve normally.
-    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
-        && typeToken.lexeme.back() == '&')
-        return makeReferenceType(typeToken.lexeme.substr(0, typeToken.lexeme.size() - 1));
+    // "Class&" → reference return (lowers to ptr); "ptr<Elem>" → typed pointer.
+    // Bare class returns (by value) are unsupported and fall through to typeFromToken.
+    Type synth = decodeSynthesizedType(typeToken);
+    if (!isError(synth)) return synth;
     return typeFromToken(typeToken.type);
 }
 

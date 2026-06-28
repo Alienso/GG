@@ -389,58 +389,58 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
 }
 
 Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
-    const Symbol* sym = symbolTable.lookup(indexExpr.name.lexeme);
-    if (!sym) {
-        error(indexExpr.name, "use of undeclared identifier '" + indexExpr.name.lexeme + "'");
-        analyzeExpr(*indexExpr.index);
-        return Type{TypeKind::Error};
-    }
-    if (sym->type.kind != TypeKind::Array) {
-        error(indexExpr.name, "'" + indexExpr.name.lexeme + "' is not an array");
-        analyzeExpr(*indexExpr.index);
-        return Type{TypeKind::Error};
-    }
+    const Token& site = exprFirstToken(*indexExpr.object);
+    Type objectType   = analyzeExpr(*indexExpr.object);
 
-    // Index must be an integer
+    // Index must be an integer (validate before bailing on object errors).
     Type indexType = analyzeExpr(*indexExpr.index);
     if (!isError(indexType) && !isInteger(indexType.kind))
-        error(indexExpr.name, "array index must be an integer type, got " + typeName(indexType));
+        error(site, "index must be an integer type, got " + typeName(indexType));
 
-    // Compile-time bounds check for constant literal index
-    if (!isError(indexType))
-        checkConstantIndexBounds(*indexExpr.index, sym->type.arraySize);
+    if (isError(objectType)) return Type{TypeKind::Error};
 
-    return Type{sym->type.elementKind};
+    if (objectType.kind == TypeKind::Array) {
+        if (!isError(indexType))
+            checkConstantIndexBounds(*indexExpr.index, objectType.arraySize);
+        return Type{objectType.elementKind};
+    }
+
+    if (objectType.kind == TypeKind::TypedPtr)
+        return typedPtrElement(objectType);
+
+    error(site, "cannot index a value of type " + typeName(objectType));
+    return Type{TypeKind::Error};
 }
 
 Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
-    const Symbol* sym = symbolTable.lookup(indexAssign.name.lexeme);
-    if (!sym) {
-        error(indexAssign.name, "use of undeclared identifier '" + indexAssign.name.lexeme + "'");
-        analyzeExpr(*indexAssign.index);
-        analyzeExpr(*indexAssign.value);
-        return Type{TypeKind::Error};
-    }
-    if (sym->type.kind != TypeKind::Array) {
-        error(indexAssign.name, "'" + indexAssign.name.lexeme + "' is not an array");
-        analyzeExpr(*indexAssign.index);
-        analyzeExpr(*indexAssign.value);
-        return Type{TypeKind::Error};
-    }
+    const Token& site = exprFirstToken(*indexAssign.object);
+    Type objectType   = analyzeExpr(*indexAssign.object);
 
-    // Validate index type
     Type indexType = analyzeExpr(*indexAssign.index);
     if (!isError(indexType) && !isInteger(indexType.kind))
-        error(indexAssign.name, "array index must be an integer type, got " + typeName(indexType));
+        error(site, "index must be an integer type, got " + typeName(indexType));
 
-    // Compile-time bounds check for constant literal index
-    if (!isError(indexType))
-        checkConstantIndexBounds(*indexAssign.index, sym->type.arraySize);
+    if (isError(objectType)) {
+        analyzeExpr(*indexAssign.value);
+        return Type{TypeKind::Error};
+    }
+
+    Type elementType;
+    if (objectType.kind == TypeKind::Array) {
+        if (!isError(indexType))
+            checkConstantIndexBounds(*indexAssign.index, objectType.arraySize);
+        elementType = Type{objectType.elementKind};
+    } else if (objectType.kind == TypeKind::TypedPtr) {
+        elementType = typedPtrElement(objectType);
+    } else {
+        error(site, "cannot index a value of type " + typeName(objectType));
+        analyzeExpr(*indexAssign.value);
+        return Type{TypeKind::Error};
+    }
 
     // Value type must be assignable to element type
-    Type elementType{sym->type.elementKind};
     Type valueType = analyzeExpr(*indexAssign.value);
-    checkCast(valueType, elementType, indexAssign.name, "array element assignment");
+    checkCast(valueType, elementType, site, "element assignment");
 
     return elementType;
 }

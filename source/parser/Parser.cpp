@@ -187,8 +187,9 @@ size_t Parser::typeSpanAt(size_t from) const {
     if (!isType) return 0;
 
     size_t i = from + 1;
-    // generic argument list: Name<...>
-    if (t.type == TokenType::IDENTIFIER && gen_->classNames.count(t.lexeme)
+    // generic argument list: Name<...>  or  typed pointer: ptr<...>
+    if (((t.type == TokenType::IDENTIFIER && gen_->classNames.count(t.lexeme))
+         || t.type == TokenType::PTR)
         && i < tokens.size() && tokens[i].type == TokenType::LESS) {
         int depth = 1; ++i;
         while (i < tokens.size() && depth > 0) {
@@ -431,6 +432,13 @@ Token Parser::consumeType() {
     std::string lexeme = base.lexeme;
     int         line   = base.line;
     bool        classLike = base.type == TokenType::IDENTIFIER;  // class / mangled instantiation
+
+    // Typed raw pointer: ptr<T> -> synthesized "ptr<elem>" token (internal type).
+    if (base.type == TokenType::PTR && check(TokenType::LESS)) {
+        std::vector<std::vector<Token>> args = parseTypeArgList();
+        std::string elem = args.empty() ? "" : argMangle(args[0]);
+        return Token{ TokenType::IDENTIFIER, "ptr<" + elem + ">", line };
+    }
 
     // Generic class instantiation: Name<args> -> mangled concrete class name.
     if (base.type == TokenType::IDENTIFIER && gen_->classNames.count(base.lexeme)
@@ -844,7 +852,7 @@ Expr Parser::parseAssignment() {
         auto indexNode = std::move(std::get<IndexExpr>(*expression.node));
         Expr value = parseAssignment();  // right-associative
         return makeExpr(IndexAssignExpr{
-            indexNode.name,
+            std::move(indexNode.object),
             std::move(indexNode.index),
             box(std::move(value))
         });
@@ -978,15 +986,13 @@ Expr Parser::parseUnary() {
 Expr Parser::parsePostfix() {
     Expr expression = parsePrimary();
     for (;;) {
-        // Subscript access: identifier[index]
-        if (check(TokenType::LEFT_BRACKET)
-            && expression.node
-            && std::holds_alternative<IdentifierExpr>(*expression.node)) {
+        // Subscript access on any expression: expr[index]  (arrays, ptr<T>, this.field, …)
+        if (check(TokenType::LEFT_BRACKET)) {
             advance();  // consume [
             Expr indexExpr = parseExpression();
-            consume(TokenType::RIGHT_BRACKET, "expected ']' after array index");
-            Token arrayName = std::get<IdentifierExpr>(*expression.node).name;
-            return makeExpr(IndexExpr{ arrayName, box(std::move(indexExpr)) });
+            consume(TokenType::RIGHT_BRACKET, "expected ']' after index");
+            expression = makeExpr(IndexExpr{ box(std::move(expression)), box(std::move(indexExpr)) });
+            continue;
         }
         // Postfix ++ and --
         if (match({ TokenType::INCREMENT, TokenType::DECREMENT })) {

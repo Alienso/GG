@@ -20,6 +20,7 @@ enum class TypeKind {
     Array,  // fixed-size stack array: element type + count stored in Type struct
     Object, // class instance — value, lives with its owner; className stores the class name
     Reference, // heap reference to a class instance (Ref<Class>, refcounted); className stores the pointee class
+    TypedPtr,  // typed raw pointer ptr<T> (internal); elementKind (+ className) describe the element
     Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
@@ -69,6 +70,23 @@ inline Type makeReferenceType(const std::string& name) {
     return t;
 }
 
+// Convenience constructor for typed pointers — ptr<T> (internal). The element is
+// described by elementKind (and className when the element is a class/reference).
+inline Type makeTypedPtr(TypeKind elementKind, const std::string& className = "") {
+    Type t;
+    t.kind        = TypeKind::TypedPtr;
+    t.elementKind = elementKind;
+    t.className   = className;
+    return t;
+}
+
+// The element type of a ptr<T>.
+inline Type typedPtrElement(const Type& t) {
+    if (t.elementKind == TypeKind::Reference) return makeReferenceType(t.className);
+    if (t.elementKind == TypeKind::Object)    return makeObjectType(t.className);
+    return Type{t.elementKind};
+}
+
 // ---- CastResult ----
 
 enum class CastResult { None, Silent, Warn };
@@ -89,5 +107,11 @@ CastResult  canImplicitlyCast(const Type& from, const Type& to);
 Type        commonArithmeticType(const Type& a, const Type& b);
 Type        typeFromToken(TokenType tt);
 std::string typeName(const Type& t);
+
+// Maps a primitive type keyword spelling ("i32", "ptr", …) to its TypeKind, or Error.
+TypeKind    typeKindFromName(const std::string& name);
+// Decodes a parser-synthesized type token: "Class&" → Reference, "ptr<Elem>" → TypedPtr.
+// Returns Type{Error} when `tok` is not such a synthesized token.
+Type        decodeSynthesizedType(const Token& tok);
 
 #endif //GG_TYPE_H

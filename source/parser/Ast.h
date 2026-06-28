@@ -76,12 +76,12 @@ struct VarDeclExpr {
 };
 
 struct IndexExpr {
-    Token                 name;    // array variable name
+    std::unique_ptr<Expr> object;  // indexed expression (array variable, ptr<T>, this.field, …)
     std::unique_ptr<Expr> index;   // subscript expression
 };
 
 struct IndexAssignExpr {
-    Token                 name;    // array variable name
+    std::unique_ptr<Expr> object;  // indexed expression
     std::unique_ptr<Expr> index;   // subscript expression
     std::unique_ptr<Expr> value;   // right-hand side value
 };

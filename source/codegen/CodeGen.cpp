@@ -28,14 +28,13 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         cgi.irTypeName = "%" + cls.name.lexeme;
         bool hasRefField = false;
         for (const FieldDecl& fd : cls.fields) {
-            const std::string& lex = fd.typeName.lexeme;
-            Type fieldType;
-            if (fd.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
-                fieldType   = makeReferenceType(lex.substr(0, lex.size() - 1));
+            Type fieldType  = decodeSynthesizedType(fd.typeName);
+            if (fieldType.kind == TypeKind::Reference) {
                 hasRefField = true;
-            } else {
+            } else if (isError(fieldType)) {
                 fieldType = typeFromToken(fd.typeName.type);
             }
+            // TypedPtr fields decode to a plain `ptr` in the struct (no refcount).
             cgi.fields.emplace_back(fd.name.lexeme, fieldType);
         }
         // A class needs a destructor if it declares one or owns reference fields.

@@ -497,6 +497,27 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         return ptrName;
     }
 
+    // ---- Typed raw pointer (ptr<T>) declaration ----
+    {
+        Type synth = decodeSynthesizedType(varDecl.typeName);
+        if (synth.kind == TypeKind::TypedPtr) {
+            std::string name    = varDecl.name.lexeme;
+            std::string ptrName = freshAllocaName(name);
+            emitAlloca(ptrName, "ptr");
+            allocaMap[name]  = ptrName;
+            varTypeMap[name] = synth;
+            if (varDecl.initializer) {
+                Type        initType = exprType(*varDecl.initializer);
+                std::string value    = genExpr(*varDecl.initializer);
+                value = emitCast(value, initType, synth);   // all ptr forms are `ptr` in IR
+                emitStore("ptr", value, ptrName);
+            } else {
+                emitStore("ptr", "null", ptrName);
+            }
+            return ptrName;
+        }
+    }
+
     // ---- Object (class) declaration ----
     if (varDecl.typeName.type == TokenType::IDENTIFIER) {
         // Class type — varDecl.typeName.lexeme is the class name
@@ -569,69 +590,76 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
 
 // ---- Index (array read) ----
 
-std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
-    const std::string& name = indexExpr.name.lexeme;
-    auto varTypeIt = varTypeMap.find(name);
-    auto allocaIt  = allocaMap.find(name);
-    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
+// Compute the address of an indexed element. Handles fixed-size arrays
+// (GEP into the array's storage) and typed raw pointers ptr<T> (GEP off the
+// loaded buffer pointer). Returns the element pointer ("%tN") and writes the
+// element's IR type into `elementIrTypeOut`.
+std::string CodeGen::genElementAddress(const Expr& object, const Expr& index,
+                                       std::string& elementIrTypeOut) {
+    Type objType = exprType(object);
 
-    Type        arrayType     = varTypeIt->second;
-    Type        elementType{arrayType.elementKind};
-    std::string elementIrType = irTypeName(elementType);
-    std::string arrayIrType   = irTypeName(arrayType);
-    std::string ptrName       = allocaIt->second;
-
-    // Evaluate and widen the index to i64 for GEP (icmp ult also needs i64)
-    Type        indexType  = exprType(*indexExpr.index);
-    std::string indexValue = genExpr(*indexExpr.index);
+    // Evaluate and widen the index to i64 for GEP.
+    Type        indexType  = exprType(index);
+    std::string indexValue = genExpr(index);
     indexValue = emitCast(indexValue, indexType, Type{TypeKind::I64});
 
-    if (boundsCheck) {
-        ensureAbortDeclared();
-        emitBoundsCheck(indexValue, arrayType.arraySize);
+    if (objType.kind == TypeKind::Array) {
+        Type        elementType{objType.elementKind};
+        elementIrTypeOut = irTypeName(elementType);
+        std::string arrayIrType = irTypeName(objType);
+
+        // Arrays are lvalues stored in allocas — take the storage address.
+        std::string base;
+        if (std::holds_alternative<IdentifierExpr>(*object.node)) {
+            auto it = allocaMap.find(std::get<IdentifierExpr>(*object.node).name.lexeme);
+            base = it != allocaMap.end() ? it->second : "0";
+        } else {
+            base = genExpr(object);
+        }
+
+        if (boundsCheck) {
+            ensureAbortDeclared();
+            emitBoundsCheck(indexValue, objType.arraySize);
+        }
+
+        std::string elemPtr = freshTemp();
+        emit("%" + elemPtr + " = getelementptr " + arrayIrType + ", ptr " + base
+             + ", i32 0, i64 " + indexValue);
+        return "%" + elemPtr;
     }
 
-    std::string elemPtr = freshTemp();
-    emit("%" + elemPtr + " = getelementptr " + arrayIrType + ", ptr " + ptrName
-         + ", i32 0, i64 " + indexValue);
-
-    return emitLoad(elementIrType, "%" + elemPtr);
+    // Typed raw pointer ptr<T>: GEP off the buffer pointer value (no bounds check).
+    Type        elementType  = typedPtrElement(objType);
+    elementIrTypeOut         = irTypeName(elementType);
+    std::string buf          = genExpr(object);   // the pointer value
+    std::string elemPtr      = freshTemp();
+    emit("%" + elemPtr + " = getelementptr " + elementIrTypeOut + ", ptr " + buf
+         + ", i64 " + indexValue);
+    return "%" + elemPtr;
 }
 
-// ---- IndexAssign (array write) ----
+std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
+    std::string elementIrType;
+    std::string elemPtr = genElementAddress(*indexExpr.object, *indexExpr.index, elementIrType);
+    return emitLoad(elementIrType, elemPtr);
+}
+
+// ---- IndexAssign (array / pointer write) ----
 
 std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
-    const std::string& name = indexAssign.name.lexeme;
-    auto varTypeIt = varTypeMap.find(name);
-    auto allocaIt  = allocaMap.find(name);
-    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
-
-    Type        arrayType     = varTypeIt->second;
-    Type        elementType{arrayType.elementKind};
-    std::string elementIrType = irTypeName(elementType);
-    std::string arrayIrType   = irTypeName(arrayType);
-    std::string ptrName       = allocaIt->second;
-
-    // Index (widen to i64)
-    Type        indexType  = exprType(*indexAssign.index);
-    std::string indexValue = genExpr(*indexAssign.index);
-    indexValue = emitCast(indexValue, indexType, Type{TypeKind::I64});
-
-    if (boundsCheck) {
-        ensureAbortDeclared();
-        emitBoundsCheck(indexValue, arrayType.arraySize);
-    }
-
-    std::string elemPtr = freshTemp();
-    emit("%" + elemPtr + " = getelementptr " + arrayIrType + ", ptr " + ptrName
-         + ", i32 0, i64 " + indexValue);
+    std::string elementIrType;
+    std::string elemPtr = genElementAddress(*indexAssign.object, *indexAssign.index, elementIrType);
 
     // Value (cast to element type)
+    Type        objType   = exprType(*indexAssign.object);
+    Type        elementType = objType.kind == TypeKind::TypedPtr
+                                ? typedPtrElement(objType)
+                                : Type{objType.elementKind};
     Type        valueType = exprType(*indexAssign.value);
     std::string value     = genExpr(*indexAssign.value);
     value = emitCast(value, valueType, elementType);
 
-    emitStore(elementIrType, value, "%" + elemPtr);
+    emitStore(elementIrType, value, elemPtr);
     return value;  // assignment expression returns the stored value
 }
 

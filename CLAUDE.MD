@@ -172,8 +172,28 @@ vector-reallocation copy-fallback that would hit the deleted assignment operator
   retains reference fields (releasing `dest`'s old reference targets first).
 - Generated on demand when a value-copy initialisation is encountered.
 
+### Enums (Java-style)
+- Declared with `enum Name { VARIANT, ... }` or with a body:
+  `enum Planet { EARTH(5.976, 6.378); f64 mass; f64 radius; Planet(f64 m, f64 r){...} f64 getMass(){...} }`.
+- Each variant is a global singleton `%Enum` struct; an enum variable is a `ptr`
+  to a singleton (`TypeKind::Enum` lowers to LLVM `ptr`).
+- Fields are immutable — assignable only via `this.field =` inside the constructor.
+  All declared fields must be initialised in the constructor; variant arg counts
+  must match the constructor arity.
+- Identity equality only: `==`/`!=` lower to `icmp eq/ne ptr`. No other operators.
+- Enums cannot be constructed directly (`Enum()`), `new`-ed, or given a destructor.
+- Variant mangling: `@Enum$VARIANT` (a global). Methods/ctor mangle like classes:
+  `@Enum_method`, ctor `@Enum_Enum(ptr %self, …)`.
+- Pre-main init: variant singletons with a constructor are populated by
+  `@gg_enum_init()`, registered in `@llvm.global_ctors`. Fieldless enums skip this
+  and get a single `i8` padding byte (`%Color = type { i8 }`) so distinct variants
+  have distinct addresses.
+- Enums reuse `classRegistry`/`ClassInfo` and `cgClasses_`/`CGClassInfo` for
+  fields/methods/ctor, plus a parallel `enumRegistry`/`EnumInfo` (semantic) and
+  `cgEnumNames_` set (codegen). `EnumDeclStmt::variants`/`methods` are `std::deque`.
+
 ## Test baseline
-**383 test cases / 766 assertions** (as of definite-assignment / use-before-init analysis).
+**406 test cases / 822 assertions** (as of Java-style enums + enum value params/returns).
 
 ## Keeping CLAUDE.md current
 

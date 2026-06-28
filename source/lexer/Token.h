@@ -12,7 +12,7 @@ enum class TokenType {
     LEFT_PAREN, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE,
     LEFT_BRACKET, RIGHT_BRACKET,
     COMMA, DOT, SEMICOLON,
-    TILDE, QUESTION, COLON,
+    TILDE, QUESTION, COLON, COLON_COLON,
 
     // One or two character tokens.
     BANG, BANG_EQUAL,
@@ -34,7 +34,7 @@ enum class TokenType {
     // Keywords.
     CLASS, ENUM, ELSE, EXTERN, FALSE, FOR, IF, IMPORT,
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
-    PRIVATE, AS, NEW, SIZEOF,
+    PRIVATE, AS, NEW, SIZEOF, STATIC,
 
     // Type keywords — signed integers.
     I8, I16, I32, I64,

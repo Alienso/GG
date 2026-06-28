@@ -19,6 +19,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     funcParamTypes.clear();
     cgClasses_.clear();
     cgEnumNames_.clear();
+    globalCtors_.clear();
+    staticLocalInits_.clear();
+    usedStaticGlobals_.clear();
 
     // Build CGClassInfo for each class (field order + types for GEP).
     for (const auto& decl : program.declarations) {
@@ -31,9 +34,14 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         for (const FieldDecl& fd : cls.fields) {
             Type fieldType  = decodeSynthesizedType(fd.typeName);
             if (fieldType.kind == TypeKind::Reference) {
-                hasRefField = true;
+                if (!fd.isStatic) hasRefField = true;
             } else if (isError(fieldType)) {
                 fieldType = typeFromToken(fd.typeName.type);
+            }
+            // Static fields are class-level globals, not part of the struct layout.
+            if (fd.isStatic) {
+                cgi.staticFields.emplace_back(fd.name.lexeme, fieldType);
+                continue;
             }
             // TypedPtr fields decode to a plain `ptr` in the struct (no refcount).
             cgi.fields.emplace_back(fd.name.lexeme, fieldType);
@@ -41,6 +49,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         // A class needs a destructor if it declares one or owns reference fields.
         for (const MethodDecl& md : cls.methods)
             if (md.isDestructor) { cgi.hasDestructor = true; break; }
+        // Record static methods so calls omit the implicit `this` argument.
+        for (const MethodDecl& md : cls.methods)
+            if (md.isStatic) cgi.staticMethods.insert(md.name.lexeme);
         cgi.needsDtor = cgi.hasDestructor || hasRefField;
         cgClasses_[cls.name.lexeme] = std::move(cgi);
     }
@@ -118,14 +129,19 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             genExternDecl(std::get<ExternFuncDeclStmt>(*decl.node));
     }
 
-    // Emit the pre-main enum-variant initializer (registered in @llvm.global_ctors).
+    // Emit the pre-main initializers (enum variant singletons, then static fields).
+    // Each records its name in globalCtors_; a single @llvm.global_ctors is emitted last.
     genEnumInit(program);
+    genStaticInit(program);
 
     // Emit any clone helpers requested during codegen (may set usesRefcount_).
     for (const auto& cn : clonesNeeded_) genCloneFunction(cn);
 
     // Emit the refcount runtime if any `new`/retain/release was lowered.
     if (usesRefcount_) emitRefcountRuntime();
+
+    // Register every pre-main initializer in one @llvm.global_ctors array.
+    emitGlobalCtors();
 
     return std::move(module);
 }

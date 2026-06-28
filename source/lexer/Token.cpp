@@ -50,7 +50,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"private", TokenType::PRIVATE},
     {"as",      TokenType::AS},
     {"new",     TokenType::NEW},
-    {"sizeof",  TokenType::SIZEOF}
+    {"sizeof",  TokenType::SIZEOF},
+    {"static",  TokenType::STATIC}
 };
 
 TokenType lookupKeyword(const std::string& text) {

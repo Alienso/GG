@@ -35,12 +35,21 @@ struct ClassInfo {
     };
     struct Method {
         bool             isPublic  = false;
+        bool             isStatic  = false;   // class-level method (no implicit `this`)
         Type             returnType;
         std::vector<Type> paramTypes;
         Token            decl;     // method name token
     };
+    // A static (class-level) field: shared storage, not part of the struct layout.
+    struct StaticField {
+        bool  isPublic = false;
+        Type  type;
+        Token decl;          // field name token
+        bool  hasInit  = false;  // true if it carries a constant initializer
+    };
     std::vector<std::string>              fieldOrder;   // preserves declaration order
     std::unordered_map<std::string, Field>  fields;
+    std::unordered_map<std::string, StaticField> staticFields;
     std::unordered_map<std::string, Method> methods;
     std::optional<Method>                   destructor; // at most one per class
 };
@@ -77,6 +86,7 @@ private:
     int                 loopDepth         = 0;  // > 0 while inside a while/for loop
     std::string         currentClassName;       // set while analysing a class body
     bool                currentClassIsEnum = false; // true while analysing an enum body
+    bool                currentMethodIsStatic = false; // true while analysing a static method body
     bool                inEnumConstructor  = false; // true while analysing an enum's constructor body
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
@@ -87,7 +97,7 @@ private:
     // Build the shared ClassInfo (fields + methods + optional destructor) for a
     // class or enum body. allowDestructor is false for enums.
     [[nodiscard]] ClassInfo buildClassInfo(const std::string& ownerName,
-                                           const std::vector<FieldDecl>& fields,
+                                           const std::deque<FieldDecl>& fields,
                                            const std::deque<MethodDecl>& methods,
                                            bool allowDestructor);
 
@@ -121,6 +131,9 @@ private:
     [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);
     [[nodiscard]] Type analyzeCall(const CallExpr& call);
     [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& varDecl);
+    // True if `expr` is a compile-time constant (literal, or unary/binary/cast of
+    // constants). Used to validate static-local initializers, which run pre-main.
+    [[nodiscard]] static bool isConstantExpr(const Expr& expr);
     [[nodiscard]] Type analyzeIndex(const IndexExpr& indexExpr);
     [[nodiscard]] Type analyzeIndexAssign(const IndexAssignExpr& indexAssign);
     [[nodiscard]] Type analyzeThis(const ThisExpr& thisExpr);

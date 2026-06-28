@@ -33,6 +33,14 @@ void CodeGen::genClassDecl(const ClassDeclStmt& classDecl) {
             typeBody += irTypeName(fieldType);
         }
         module.typeDecls.push_back("%" + className + " = type { " + typeBody + " }");
+
+        // Emit one global per static field: @ClassName$field = global <ir> zeroinitializer.
+        // Non-zero initializers are applied at runtime in @gg_static_init.
+        for (const auto& [fieldName, fieldType] : cgIt->second.staticFields) {
+            module.globals.push_back(
+                "@" + className + "$" + fieldName + " = global "
+                + irTypeName(fieldType) + " zeroinitializer");
+        }
     }
 
     // Emit each method. The destructor is generated separately (genDestructor)
@@ -124,10 +132,84 @@ void CodeGen::genEnumInit(const Program& program) {
     currentFunction   = nullptr;
     currentBasicBlock = nullptr;
 
-    // Register the initializer to run before main.
+    // Register the initializer to run before main (combined with others later).
+    globalCtors_.push_back("gg_enum_init");
+}
+
+void CodeGen::genStaticInit(const Program& program) {
+    // Collect every static field that carries an initializer expression.
+    struct InitField { std::string className; const FieldDecl* field; };
+    std::vector<InitField> inits;
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (!std::holds_alternative<ClassDeclStmt>(*decl.node)) continue;
+        const auto& cls = std::get<ClassDeclStmt>(*decl.node);
+        for (const FieldDecl& fd : cls.fields)
+            if (fd.isStatic && fd.initializer)
+                inits.push_back({ cls.name.lexeme, &fd });
+    }
+    // Static locals (collected during function codegen) also initialise here.
+    if (inits.empty() && staticLocalInits_.empty()) return;
+
+    // Reset per-function state and emit @gg_static_init.
+    tempCounter = 0; labelCounter = 0;
+    allocaMap.clear(); varTypeMap.clear();
+    usedAllocaNames.clear();
+    breakLabelStack.clear(); continueLabelStack.clear();
+    dtorScopes_.clear();
+    pendingTemps_.clear();
+    currentClassName_ = "";
+    currentReturnType = Type{TypeKind::Void};
+
+    IRFunction irFunc;
+    irFunc.signature = "define void @gg_static_init()";
+    module.functions.push_back(std::move(irFunc));
+    currentFunction = &module.functions.back();
+    currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
+    currentBasicBlock = &currentFunction->blocks.back();
+
+    for (const InitField& f : inits) {
+        Type        fieldType = exprType(*f.field->initializer);
+        // The global's declared type comes from the field, not the initializer.
+        auto cgIt = cgClasses_.find(f.className);
+        Type globalType = fieldType;
+        if (cgIt != cgClasses_.end())
+            for (const auto& [n, t] : cgIt->second.staticFields)
+                if (n == f.field->name.lexeme) { globalType = t; break; }
+
+        std::string value = genExpr(*f.field->initializer);
+        value = emitCast(value, fieldType, globalType);
+        emitStore(irTypeName(globalType), value,
+                  "@" + f.className + "$" + f.field->name.lexeme);
+    }
+
+    // Static-local initializers: store each constant into its persistent global.
+    for (const StaticLocalInit& sl : staticLocalInits_) {
+        Type        initType = exprType(*sl.init);
+        std::string value    = genExpr(*sl.init);
+        value = emitCast(value, initType, sl.type);
+        emitStore(irTypeName(sl.type), value, sl.global);
+    }
+
+    emit("ret void");
+    currentBasicBlock->terminated = true;
+    currentFunction   = nullptr;
+    currentBasicBlock = nullptr;
+
+    globalCtors_.push_back("gg_static_init");
+}
+
+void CodeGen::emitGlobalCtors() {
+    if (globalCtors_.empty()) return;
+    std::string n = std::to_string(globalCtors_.size());
+    std::string entries;
+    for (size_t i = 0; i < globalCtors_.size(); ++i) {
+        if (i) entries += ", ";
+        entries += "{ i32, ptr, ptr } { i32 65535, ptr @" + globalCtors_[i] + ", ptr null }";
+    }
     module.globals.push_back(
-        "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] "
-        "[{ i32, ptr, ptr } { i32 65535, ptr @gg_enum_init, ptr null }]");
+        "@llvm.global_ctors = appending global [" + n + " x { i32, ptr, ptr }] ["
+        + entries + "]");
 }
 
 void CodeGen::genFunction(const FunctionDeclStmt& function) {
@@ -141,6 +223,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
 
     currentReturnType        = resolveReturnType(function.returnType);
     std::string returnIrType = irTypeName(currentReturnType);
+    currentStaticPrefix_     = function.name.lexeme;
 
     std::string paramStr;
     bool first = true;
@@ -181,10 +264,13 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     std::string mangledName = method.isDestructor
         ? className + "_dtor"
         : className + "_" + method.name.lexeme;
+    currentStaticPrefix_ = mangledName;
 
-    std::string paramStr = "ptr %self";
+    // Static methods are class-level: no implicit `this`/`%self` parameter.
+    std::string paramStr = method.isStatic ? "" : "ptr %self";
     for (const auto& p : method.params) {
-        paramStr += ", " + paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
+        if (!paramStr.empty()) paramStr += ", ";
+        paramStr += paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
     }
 
     IRFunction irFunc;
@@ -194,10 +280,12 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
     currentBasicBlock = &currentFunction->blocks.back();
 
-    allocaMap["this"]  = "%self";
-    varTypeMap["this"] = cgEnumNames_.count(className)
-                       ? makeEnumType(className)
-                       : makeObjectType(className);
+    if (!method.isStatic) {
+        allocaMap["this"]  = "%self";
+        varTypeMap["this"] = cgEnumNames_.count(className)
+                           ? makeEnumType(className)
+                           : makeObjectType(className);
+    }
 
     spillParamsToAllocas(method.params);
     emitFunctionBody(method.body, returnIrType);

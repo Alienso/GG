@@ -1,0 +1,36 @@
+// End-to-end test for static member fields (Phase 1).
+// A static field is a single global shared by all instances, initialised
+// before main and accessible as ClassName::field or obj.field.
+
+class Counter {
+    static i32 total = 10;
+    i32 id;
+
+    Counter(i32 id) {
+        this.id = id;
+        Counter::total = Counter::total + 1;   // bump the shared counter
+    }
+
+    i32 getTotal() { return Counter::total; }
+}
+
+i32 main() {
+    // Initial value comes from the pre-main initializer.
+    if (Counter::total != 10) { return 1; }
+
+    Counter& a = new Counter(1);
+    Counter& b = new Counter(2);
+
+    // Two constructions => total bumped twice => 12.
+    if (Counter::total != 12) { return 2; }
+
+    // Read the same shared value through an instance.
+    if (a.total != 12) { return 3; }
+    if (b.getTotal() != 12) { return 4; }
+
+    // Write through the type name; observe through an instance.
+    Counter::total = 99;
+    if (a.total != 99) { return 5; }
+
+    return 0;
+}

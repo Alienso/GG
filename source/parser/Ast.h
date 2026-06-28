@@ -73,6 +73,7 @@ struct VarDeclExpr {
     Token name;
     std::unique_ptr<Expr> initializer;   // nullptr if absent
     size_t arraySize = 0;                // 0 = scalar; N > 0 = fixed-size array of N elements
+    bool   isStatic  = false;            // C-style static local: single persistent global
 };
 
 struct IndexExpr {
@@ -221,14 +222,19 @@ struct ImportStmt {
 
 struct FieldDecl {
     bool  isPublic  = false;
+    bool  isStatic  = false;   // `static T name;` — class-level storage, not per-instance
     Token typeName;   // type keyword token
     Token name;
+    // Constant initializer for a static field (`static i32 count = 0;`), run in a
+    // pre-main initializer. nullptr for instance fields and uninitialised statics.
+    std::unique_ptr<Expr> initializer;
 };
 
 struct MethodDecl {
     bool                   isPublic      = false;
     bool                   isConstructor = false;  // true when name == class name
     bool                   isDestructor  = false;   // true for ~ClassName() — no params, no return type
+    bool                   isStatic      = false;   // true for `static T method(...)` — no implicit `this`
     Token                  returnType;     // for constructors/destructors: class-name token
     Token                  name;
     std::vector<ParamDecl> params;
@@ -237,7 +243,9 @@ struct MethodDecl {
 
 struct ClassDeclStmt {
     Token                  name;
-    std::vector<FieldDecl> fields;
+    // std::deque (not vector) because FieldDecl now owns a unique_ptr initializer
+    // and Token has const members — making it move-only and not move-assignable.
+    std::deque<FieldDecl>  fields;
     // std::deque avoids moving existing elements on growth, which is needed
     // because MethodDecl contains BlockStmt (with unique_ptr) and Token
     // (const string members) — making it neither copyable nor noexcept-moveable.
@@ -254,7 +262,7 @@ struct EnumVariant {
 struct EnumDeclStmt {
     Token                    name;
     std::deque<EnumVariant>  variants;   // declaration order = ordinal order
-    std::vector<FieldDecl>   fields;
+    std::deque<FieldDecl>    fields;
     // std::deque for the same reason as ClassDeclStmt::methods.
     std::deque<MethodDecl>   methods;
 };

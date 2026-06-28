@@ -565,7 +565,7 @@ Stmt Parser::parseClassDecl() {
     Token name = consume(TokenType::IDENTIFIER, "expected class name after 'class'");
     consume(TokenType::LEFT_BRACE, "expected '{' after class name");
 
-    std::vector<FieldDecl> fields;
+    std::deque<FieldDecl> fields;
     std::deque<MethodDecl> methods;
     parseMemberList(name, fields, methods, /*allowDestructor=*/true);
 
@@ -596,7 +596,7 @@ Stmt Parser::parseEnumDecl() {
     // Optional ';' separates the variant list from the body (fields / constructor / methods).
     (void)match({ TokenType::SEMICOLON });
 
-    std::vector<FieldDecl> fields;
+    std::deque<FieldDecl> fields;
     std::deque<MethodDecl> methods;
     // Parse a destructor if present so the semantic analyser can reject it with a
     // clear "enums cannot declare a destructor" diagnostic (rather than a generic
@@ -608,14 +608,18 @@ Stmt Parser::parseEnumDecl() {
 }
 
 void Parser::parseMemberList(const Token& name,
-                             std::vector<FieldDecl>& fields,
+                             std::deque<FieldDecl>& fields,
                              std::deque<MethodDecl>& methods,
                              bool allowDestructor) {
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
-        // Members are public by default; 'private' opts out.
+        // Members are public by default; 'private' opts out. `static` (in either
+        // order relative to private) marks a class-level field.
         bool isPublic = true;
-        if (match({ TokenType::PRIVATE })) {
-            isPublic = false;
+        bool isStatic = false;
+        for (;;) {
+            if (match({ TokenType::PRIVATE })) { isPublic = false; continue; }
+            if (match({ TokenType::STATIC  })) { isStatic = true;  continue; }
+            break;
         }
 
         // Destructor: ~ClassName()
@@ -638,7 +642,7 @@ void Parser::parseMemberList(const Token& name,
             insideFunction = savedDtor;
 
             methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/false, /*isDestructor=*/true,
+                isPublic, /*isConstructor=*/false, /*isDestructor=*/true, /*isStatic=*/false,
                 dtorName, dtorName, {}, std::move(dtorBody)
             });
             continue;
@@ -667,7 +671,7 @@ void Parser::parseMemberList(const Token& name,
             insideFunction = savedIF1;
 
             methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/true, /*isDestructor=*/false,
+                isPublic, /*isConstructor=*/true, /*isDestructor=*/false, /*isStatic=*/false,
                 ctorName,   // returnType token = class name token (no actual return type)
                 ctorName,   // name token
                 std::move(params), std::move(body)
@@ -681,7 +685,7 @@ void Parser::parseMemberList(const Token& name,
         Token memberName = consume(TokenType::IDENTIFIER, "expected member name");
 
         if (check(TokenType::LEFT_PAREN)) {
-            // Method
+            // Method (static methods carry no implicit `this`).
             consume(TokenType::LEFT_PAREN, "");
             std::vector<ParamDecl> params;
             if (!check(TokenType::RIGHT_PAREN)) {
@@ -700,14 +704,20 @@ void Parser::parseMemberList(const Token& name,
             insideFunction = savedIF2;
 
             methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/false, /*isDestructor=*/false,
+                isPublic, /*isConstructor=*/false, /*isDestructor=*/false, isStatic,
                 memberType, memberName,
                 std::move(params), std::move(body)
             });
         } else {
-            // Field
+            // Field — a static field may carry a constant initializer.
+            std::unique_ptr<Expr> initializer;
+            if (isStatic && match({ TokenType::EQUAL })) {
+                initializer = box(parseExpression());
+            }
             consume(TokenType::SEMICOLON, "expected ';' after field declaration");
-            fields.push_back(FieldDecl{ isPublic, memberType, memberName });
+            fields.push_back(FieldDecl{
+                isPublic, isStatic, memberType, memberName, std::move(initializer)
+            });
         }
     }
 }
@@ -826,6 +836,10 @@ Stmt Parser::parseExprStmt() {
 // ============================================================
 
 Expr Parser::parseExpression() {
+    // C-style static local: `static <type> name = const;`. Only valid as a
+    // declaration; the leading keyword unambiguously introduces a VarDeclExpr.
+    bool isStatic = match({ TokenType::STATIC });
+
     // Array declaration: typeName [ NUMBER ] IDENTIFIER ( = expr )?
     if (isTypeName() && peekNext().type == TokenType::LEFT_BRACKET) {
         Token  typeName  = advance();
@@ -836,7 +850,7 @@ Expr Parser::parseExpression() {
         Token  name      = consume(TokenType::IDENTIFIER, "expected variable name after array type");
         std::unique_ptr<Expr> initializer = nullptr;
         if (match({ TokenType::EQUAL })) initializer = box(parseExpression());
-        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize });
+        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize, isStatic });
     }
 
     // Variable declaration of any type form: <type> IDENTIFIER ...
@@ -861,8 +875,11 @@ Expr Parser::parseExpression() {
             // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
             initializer = box(makeExpr(CallExpr{ typeName, std::move(args) }));
         }
-        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer) });
+        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), /*arraySize=*/0, isStatic });
     }
+
+    if (isStatic)
+        throw error(peek(), "expected a variable declaration after 'static'");
     return parseAssignment();
 }
 
@@ -1043,9 +1060,11 @@ Expr Parser::parsePostfix() {
             expression = makeExpr(PostfixExpr{ box(std::move(expression)), previous() });
             continue;
         }
-        // Member access / method call: expr.member or expr.method(args)
-        if (check(TokenType::DOT)) {
-            advance();  // consume '.'
+        // Static member access / call via scope resolution: ClassName::member
+        // (or ClassName::method(args)). Lowered to the same nodes as '.' access;
+        // the semantic analyser resolves the left identifier as a type name.
+        if (check(TokenType::DOT) || check(TokenType::COLON_COLON)) {
+            advance();  // consume '.' or '::'
             Token member = consume(TokenType::IDENTIFIER, "expected member name after '.'");
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('

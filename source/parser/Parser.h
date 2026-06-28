@@ -120,7 +120,7 @@ private:
     // class or enum body until the closing '}'. `typeName` is used to detect the
     // constructor (a method whose name matches). Destructors are only valid for classes.
     void                    parseMemberList(const Token& typeName,
-                                            std::vector<FieldDecl>& fields,
+                                            std::deque<FieldDecl>& fields,
                                             std::deque<MethodDecl>& methods,
                                             bool allowDestructor);
     [[nodiscard]] Stmt      parseFunctionDecl(const Token& returnType, const Token& name);

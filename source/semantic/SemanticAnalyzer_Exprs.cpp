@@ -383,6 +383,16 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     return sym->type;
 }
 
+bool SemanticAnalyzer::isConstantExpr(const Expr& expr) {
+    return std::visit(overloaded{
+        [](const LiteralExpr&)            { return true; },
+        [](const UnaryExpr& u)            { return isConstantExpr(*u.operand); },
+        [](const BinaryExpr& b)           { return isConstantExpr(*b.left) && isConstantExpr(*b.right); },
+        [](const CastExpr& c)             { return isConstantExpr(*c.operand); },
+        [](const auto&)                   { return false; },
+    }, *expr.node);
+}
+
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     // Resolve the declared type — handles class names (Object) and Class& (Reference).
     Type elementType = resolveTypeToken(varDecl.typeName);
@@ -394,6 +404,22 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         error(varDecl.typeName, "variable '" + varDecl.name.lexeme + "' cannot have type 'void'");
         if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
         return Type{TypeKind::Error};
+    }
+
+    // C-style static local: persistent single-storage variable. Phase 3 supports
+    // scalar primitive (numeric / bool / char) static locals with a constant
+    // initializer that runs once before main.
+    if (varDecl.isStatic) {
+        bool primitive = varDecl.arraySize == 0
+                      && (isNumeric(elementType.kind)
+                          || elementType.kind == TypeKind::Bool
+                          || elementType.kind == TypeKind::Char);
+        if (!primitive)
+            error(varDecl.typeName, "static local variable '" + varDecl.name.lexeme
+                  + "' must have a primitive type (numeric, bool or char)");
+        if (varDecl.initializer && !isConstantExpr(*varDecl.initializer))
+            error(varDecl.name, "static local variable '" + varDecl.name.lexeme
+                  + "' requires a constant initializer");
     }
 
     // Raw pointer types are gated behind --unsafe-ptr.
@@ -428,7 +454,8 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     //   - Everything else (primitives, references)     → no (must be assigned before use)
     bool isInit = varDecl.initializer != nullptr
                || elementType.kind == TypeKind::Object
-               || varDecl.arraySize > 0;
+               || varDecl.arraySize > 0
+               || varDecl.isStatic;   // static locals are zero-initialised storage
 
     symbolTable.declare(varDecl.name.lexeme, Symbol{
         Symbol::Kind::Variable,
@@ -508,13 +535,17 @@ Type SemanticAnalyzer::analyzeThis(const ThisExpr& thisExpr) {
         error(thisExpr.keyword, "'this' used outside of a class method");
         return Type{TypeKind::Error};
     }
+    if (currentMethodIsStatic) {
+        error(thisExpr.keyword, "'this' cannot be used in a static method");
+        return Type{TypeKind::Error};
+    }
     if (currentClassIsEnum)
         return makeEnumType(currentClassName);
     return makeObjectType(currentClassName);
 }
 
 Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess) {
-    // Static enum variant access: EnumName.VARIANT
+    // Static access through a type name: EnumName.VARIANT or ClassName::field.
     if (std::holds_alternative<IdentifierExpr>(*memberAccess.object->node)) {
         const auto& ident = std::get<IdentifierExpr>(*memberAccess.object->node);
         auto enumIt = enumRegistry.find(ident.name.lexeme);
@@ -527,6 +558,21 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
             }
             return makeEnumType(ident.name.lexeme);
         }
+        // ClassName::field — static member field access through the type name.
+        auto clsIt = classRegistry.find(ident.name.lexeme);
+        if (clsIt != classRegistry.end()) {
+            auto sfIt = clsIt->second.staticFields.find(memberAccess.field.lexeme);
+            if (sfIt == clsIt->second.staticFields.end()) {
+                error(memberAccess.field, "class '" + ident.name.lexeme
+                      + "' has no static member '" + memberAccess.field.lexeme + "'");
+                return Type{TypeKind::Error};
+            }
+            const ClassInfo::StaticField& sf = sfIt->second;
+            if (!sf.isPublic && currentClassName != ident.name.lexeme)
+                warn(memberAccess.field, "static field '" + memberAccess.field.lexeme
+                     + "' is private in class '" + ident.name.lexeme + "'");
+            return sf.type;
+        }
     }
 
     Type objectType = analyzeExpr(*memberAccess.object);
@@ -534,6 +580,16 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
 
     const ClassInfo* cls = lookupObjectClass(objectType, memberAccess.field);
     if (!cls) return Type{TypeKind::Error};
+
+    // A static field may also be read through an instance: obj.staticField.
+    auto staticIt = cls->staticFields.find(memberAccess.field.lexeme);
+    if (staticIt != cls->staticFields.end()) {
+        const ClassInfo::StaticField& sf = staticIt->second;
+        if (!sf.isPublic && currentClassName != objectType.className)
+            warn(memberAccess.field, "static field '" + memberAccess.field.lexeme
+                 + "' is private in class '" + objectType.className + "'");
+        return sf.type;
+    }
 
     auto fieldIt = cls->fields.find(memberAccess.field.lexeme);
     if (fieldIt == cls->fields.end()) {
@@ -553,6 +609,28 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
 }
 
 Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign) {
+    // Static field write through the type name: ClassName::field = value.
+    if (std::holds_alternative<IdentifierExpr>(*memberAssign.object->node)) {
+        const auto& ident = std::get<IdentifierExpr>(*memberAssign.object->node);
+        auto clsIt = classRegistry.find(ident.name.lexeme);
+        if (clsIt != classRegistry.end() && enumRegistry.find(ident.name.lexeme) == enumRegistry.end()) {
+            auto sfIt = clsIt->second.staticFields.find(memberAssign.field.lexeme);
+            if (sfIt == clsIt->second.staticFields.end()) {
+                error(memberAssign.field, "class '" + ident.name.lexeme
+                      + "' has no static member '" + memberAssign.field.lexeme + "'");
+                analyzeExpr(*memberAssign.value);
+                return Type{TypeKind::Error};
+            }
+            const ClassInfo::StaticField& sf = sfIt->second;
+            if (!sf.isPublic && currentClassName != ident.name.lexeme)
+                warn(memberAssign.field, "static field '" + memberAssign.field.lexeme
+                     + "' is private in class '" + ident.name.lexeme + "'");
+            Type valueType = analyzeExpr(*memberAssign.value);
+            checkCast(valueType, sf.type, memberAssign.field, "static field assignment");
+            return sf.type;
+        }
+    }
+
     Type objectType = analyzeExpr(*memberAssign.object);
     if (isError(objectType)) {
         analyzeExpr(*memberAssign.value);
@@ -563,6 +641,18 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
     if (!cls) {
         analyzeExpr(*memberAssign.value);
         return Type{TypeKind::Error};
+    }
+
+    // Static field write through an instance: obj.staticField = value.
+    auto staticIt = cls->staticFields.find(memberAssign.field.lexeme);
+    if (staticIt != cls->staticFields.end()) {
+        const ClassInfo::StaticField& sf = staticIt->second;
+        if (!sf.isPublic && currentClassName != objectType.className)
+            warn(memberAssign.field, "static field '" + memberAssign.field.lexeme
+                 + "' is private in class '" + objectType.className + "'");
+        Type valueType = analyzeExpr(*memberAssign.value);
+        checkCast(valueType, sf.type, memberAssign.field, "static field assignment");
+        return sf.type;
     }
 
     auto fieldIt = cls->fields.find(memberAssign.field.lexeme);
@@ -597,6 +687,44 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
 }
 
 Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
+    // Static method call through the type name: ClassName::method(args).
+    // The leading identifier names a class (and is not shadowed by a variable).
+    if (std::holds_alternative<IdentifierExpr>(*methodCall.object->node)) {
+        const auto& ident = std::get<IdentifierExpr>(*methodCall.object->node);
+        if (!symbolTable.lookup(ident.name.lexeme)) {
+            auto clsIt = classRegistry.find(ident.name.lexeme);
+            if (clsIt != classRegistry.end()) {
+                auto mIt = clsIt->second.methods.find(methodCall.method.lexeme);
+                if (mIt == clsIt->second.methods.end()) {
+                    error(methodCall.method, "class '" + ident.name.lexeme
+                          + "' has no static method '" + methodCall.method.lexeme + "'");
+                    for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+                    return Type{TypeKind::Error};
+                }
+                const ClassInfo::Method& sm = mIt->second;
+                if (!sm.isStatic) {
+                    error(methodCall.method, "method '" + methodCall.method.lexeme
+                          + "' is not static; call it on an instance");
+                    for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+                    return sm.returnType;
+                }
+                if (!sm.isPublic && currentClassName != ident.name.lexeme)
+                    warn(methodCall.method, "static method '" + methodCall.method.lexeme
+                         + "' is private in class '" + ident.name.lexeme + "'");
+                if (methodCall.args.size() != sm.paramTypes.size()) {
+                    error(methodCall.method, "static method '" + methodCall.method.lexeme
+                          + "' expects " + std::to_string(sm.paramTypes.size())
+                          + " argument(s), got " + std::to_string(methodCall.args.size()));
+                    for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+                    return sm.returnType;
+                }
+                analyzeCallArgs(methodCall.args, sm.paramTypes, methodCall.method,
+                                "static method '" + methodCall.method.lexeme + "'");
+                return sm.returnType;
+            }
+        }
+    }
+
     Type objectType = analyzeExpr(*methodCall.object);
     if (isError(objectType)) {
         for (const auto& arg : methodCall.args) analyzeExpr(*arg);

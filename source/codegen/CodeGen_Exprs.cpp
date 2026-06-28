@@ -452,6 +452,10 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
 // ---- VarDecl ----
 
 std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
+    // ---- C-style static local (persistent global) ----
+    // Semantics guarantee a scalar primitive type here.
+    if (varDecl.isStatic) return genStaticLocal(varDecl);
+
     // ---- Array declaration ----
     if (varDecl.arraySize > 0) {
         TypeKind elementKind = typeFromToken(varDecl.typeName.type).kind;
@@ -621,6 +625,35 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     }
 
     return ptrName;
+}
+
+// ---- C-style static local ----
+
+std::string CodeGen::genStaticLocal(const VarDeclExpr& varDecl) {
+    Type        declaredType = typeFromToken(varDecl.typeName.type);
+    std::string irType       = irTypeName(declaredType);
+    const std::string& name  = varDecl.name.lexeme;
+
+    // Mangle a unique global name "@<prefix>$<name>" (append .N on collision so
+    // two same-named static locals in sibling scopes stay distinct).
+    std::string base = "@" + currentStaticPrefix_ + "$" + name;
+    std::string global = base;
+    for (int n = 1; usedStaticGlobals_.count(global); ++n)
+        global = base + "." + std::to_string(n);
+    usedStaticGlobals_.insert(global);
+
+    // Persistent zero-initialised storage; non-zero initializer runs in @gg_static_init.
+    module.globals.push_back(global + " = internal global " + irType + " zeroinitializer");
+
+    // Reads/writes of this name target the global directly (genIdentifier/genAssign
+    // load and store through allocaMap[name]).
+    allocaMap[name]  = global;
+    varTypeMap[name] = declaredType;
+
+    if (varDecl.initializer)
+        staticLocalInits_.push_back({ global, declaredType, varDecl.initializer.get() });
+
+    return global;
 }
 
 // ---- Index (array read) ----

@@ -22,7 +22,9 @@ private:
     // ---- Per-class info (populated in generate()) ----
     struct CGClassInfo {
         std::string                             irTypeName;      // "%Point"
-        std::vector<std::pair<std::string,Type>> fields;        // ordered: (name, type)
+        std::vector<std::pair<std::string,Type>> fields;        // instance fields: (name, type)
+        std::vector<std::pair<std::string,Type>> staticFields;  // class-level fields: (name, type)
+        std::unordered_set<std::string>          staticMethods; // class-level method names (no `this`)
         bool                                    hasDestructor = false;  // user-written ~Class()
         bool                                    needsDtor     = false;  // user dtor OR has reference fields
     };
@@ -98,9 +100,29 @@ private:
     void genClassDecl(const ClassDeclStmt& classDecl);
     // Emit an enum: %Enum type, @Enum$VARIANT global singletons, ctor + methods.
     void genEnumDecl(const EnumDeclStmt& enumDecl);
-    // Emit @gg_enum_init (constructs every variant singleton) and register it in
-    // @llvm.global_ctors. Called once after all enums are emitted.
+    // Emit @gg_enum_init (constructs every variant singleton). Records the function
+    // name in globalCtors_ for a single combined @llvm.global_ctors registration.
     void genEnumInit(const Program& program);
+    // Emit @gg_static_init (runs every static-field initializer). Records the
+    // function name in globalCtors_.
+    void genStaticInit(const Program& program);
+    // Emit a single @llvm.global_ctors array from globalCtors_ (if non-empty).
+    void emitGlobalCtors();
+    // Names of pre-main initializer functions to register in @llvm.global_ctors.
+    std::vector<std::string> globalCtors_;
+
+    // ---- C-style static local variables ----
+    // Prefix used to mangle a function's static locals into globals
+    // (e.g. "counter" → @counter$calls, "Counter_make" → @Counter_make$n).
+    std::string currentStaticPrefix_;
+    // Global names already handed out (ensures uniqueness across same-named locals).
+    std::unordered_set<std::string> usedStaticGlobals_;
+    // One pending constant-initializer store per static local, emitted in @gg_static_init.
+    struct StaticLocalInit { std::string global; Type type; const Expr* init; };
+    std::vector<StaticLocalInit> staticLocalInits_;
+    // Lower a `static <prim> name = const;` local: emit a persistent global, map the
+    // name to it, and queue its initializer for pre-main execution.
+    std::string genStaticLocal(const VarDeclExpr& varDecl);
     void genMethod(const std::string& className, const MethodDecl& method);
     // Generate @Class_dtor: runs the user destructor body (if any), then releases
     // each reference field in reverse declaration order. Emitted for any class that
@@ -139,6 +161,11 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
+    // Emit a static method call (no implicit `this`): @ClassName_method(args).
+    std::string genStaticCall(const std::string& className,
+                              const MethodCallExpr& methodCall,
+                              const Type& resolvedType,
+                              const std::string& returnIrType);
     std::string genCast(const CastExpr& castExpr, const Type& toType);
     std::string genNew(const NewExpr& newExpr, const Type& resolvedType);
     std::string genSizeof(const SizeofExpr& sizeofExpr);
@@ -171,6 +198,11 @@ private:
     std::pair<std::string, Type> resolveFieldGEP(const std::string& objPtr,
                                                   const std::string& className,
                                                   const std::string& fieldName);
+
+    // Return the type of a static field `className::fieldName`, or nullptr if no
+    // such static field exists (e.g. it is an instance field).
+    const Type* findStaticField(const std::string& className,
+                                const std::string& fieldName) const;
 
     // ---- Bounds check helpers ----
     void ensureAbortDeclared();

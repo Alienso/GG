@@ -66,7 +66,10 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const s
             case ';': tokens.emplace_back(TokenType::SEMICOLON, ";", line); break;
             case '~': tokens.emplace_back(TokenType::TILDE,    "~", line); break;
             case '?': tokens.emplace_back(TokenType::QUESTION, "?", line); break;
-            case ':': tokens.emplace_back(TokenType::COLON,    ":", line); break;
+            case ':':
+                tokens.emplace_back(match(':') ? TokenType::COLON_COLON : TokenType::COLON,
+                                    source.substr(start, current - start), line);
+                break;
 
             // --- one-or-two character tokens ---
             case '!': {

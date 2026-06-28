@@ -45,7 +45,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
 // Build a ClassInfo (fields + methods + optional destructor) shared by classes and
 // enums. `ownerName` is used in error messages; `allowDestructor` is false for enums.
 ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
-                                           const std::vector<FieldDecl>& fields,
+                                           const std::deque<FieldDecl>& fields,
                                            const std::deque<MethodDecl>& methods,
                                            bool allowDestructor) {
     ClassInfo info;
@@ -64,6 +64,24 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             fieldType = Type{TypeKind::Error};
         } else {
             fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
+        }
+        // Static fields are class-level storage (a global), not part of the struct
+        // layout — they get no struct index and live in a separate registry.
+        // (allowDestructor is false only for enums, which don't support statics yet.)
+        if (fd.isStatic) {
+            if (!allowDestructor) {
+                error(fd.name, "enums cannot declare static fields");
+                continue;
+            }
+            if (info.staticFields.count(fd.name.lexeme) || info.fields.count(fd.name.lexeme)) {
+                error(fd.name, "duplicate field '" + fd.name.lexeme
+                      + "' in '" + ownerName + "'");
+                continue;
+            }
+            info.staticFields.emplace(fd.name.lexeme,
+                ClassInfo::StaticField{fd.isPublic, fieldType, fd.name,
+                                       /*hasInit=*/fd.initializer != nullptr});
+            continue;
         }
         info.fieldOrder.push_back(fd.name.lexeme);
         // emplace constructs in-place, avoiding copy/move-assignment of Token
@@ -88,7 +106,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
                 continue;
             }
             info.destructor.emplace(ClassInfo::Method{
-                md.isPublic, Type{TypeKind::Void}, std::vector<Type>{}, md.name
+                md.isPublic, /*isStatic=*/false, Type{TypeKind::Void}, std::vector<Type>{}, md.name
             });
             continue;
         }
@@ -99,7 +117,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         for (const ParamDecl& p : md.params)
             paramTypes.push_back(resolveTypeToken(p.typeName));
         info.methods.emplace(md.name.lexeme,
-            ClassInfo::Method{md.isPublic, returnType, std::move(paramTypes), md.name});
+            ClassInfo::Method{md.isPublic, md.isStatic, returnType, std::move(paramTypes), md.name});
     }
     return info;
 }

@@ -259,13 +259,22 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     std::string savedClassName = currentClassName;
     currentClassName          = className;
 
-    // Gate raw pointer field types behind --unsafe-ptr.
-    for (const FieldDecl& fd : classDecl.fields)
+    // Gate raw pointer field types behind --unsafe-ptr, and type-check the constant
+    // initializer of each static field against its declared type.
+    for (const FieldDecl& fd : classDecl.fields) {
         checkRawPtrAllowed(fd.typeName, fd.name);
+        if (fd.isStatic && fd.initializer) {
+            Type fieldType = resolveTypeToken(fd.typeName);
+            Type initType  = analyzeExpr(*fd.initializer);
+            checkCast(initType, fieldType, fd.name, "static field initializer");
+        }
+    }
 
     for (const MethodDecl& md : classDecl.methods) {
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
+        bool                savedStatic     = currentMethodIsStatic;
+        currentMethodIsStatic               = md.isStatic;
 
         currentReturnType = (md.isConstructor || md.isDestructor)
                                 ? Type{TypeKind::Void}
@@ -280,15 +289,18 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
 
         enterScope();  // method scope
 
-        // Inject 'this' as a variable with type Object{className}
-        symbolTable.declare("this", Symbol{
-            Symbol::Kind::Variable,
-            makeObjectType(className),
-            classDecl.name,
-            {},
-            /*isParameter=*/false,
-            /*isInitialized=*/true   // 'this' is always valid inside a method
-        });
+        // Inject 'this' as a variable with type Object{className}. Static methods
+        // are class-level: they have no receiver, so no 'this' is in scope.
+        if (!md.isStatic) {
+            symbolTable.declare("this", Symbol{
+                Symbol::Kind::Variable,
+                makeObjectType(className),
+                classDecl.name,
+                {},
+                /*isParameter=*/false,
+                /*isInitialized=*/true   // 'this' is always valid inside a method
+            });
+        }
 
         // Declare parameters
         for (const ParamDecl& param : md.params) {
@@ -321,8 +333,9 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
 
         exitScope();
 
-        currentReturnType = savedReturnType;
-        loopDepth         = savedLoopDepth;
+        currentReturnType     = savedReturnType;
+        loopDepth             = savedLoopDepth;
+        currentMethodIsStatic = savedStatic;
     }
 
     currentClassName = savedClassName;

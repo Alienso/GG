@@ -1,0 +1,45 @@
+// End-to-end test for static class methods (Phase 2).
+// A static method is class-level: no implicit `this`, called as
+// ClassName::method(args) or obj.method(args). It may read/write static fields.
+
+class Counter {
+    static i32 total = 0;
+    i32 id;
+
+    Counter(i32 id) {
+        this.id = id;
+        Counter::bump();        // call a static method from a constructor
+    }
+
+    // Pure static helper — no receiver, just arithmetic.
+    static i32 add(i32 a, i32 b) { return a + b; }
+
+    // Static method that mutates shared state.
+    static void bump() { Counter::total = Counter::total + 1; }
+
+    // Static reader of the shared field.
+    static i32 getTotal() { return Counter::total; }
+}
+
+i32 main() {
+    // Pure arithmetic static call.
+    if (Counter::add(2, 3) != 5) { return 1; }
+
+    // Shared counter starts at zero.
+    if (Counter::getTotal() != 0) { return 2; }
+
+    Counter& a = new Counter(1);
+    Counter& b = new Counter(2);
+
+    // Two constructions => bumped twice.
+    if (Counter::getTotal() != 2) { return 3; }
+
+    // A static method is also reachable through an instance.
+    if (a.getTotal() != 2) { return 4; }
+
+    // Direct static mutation.
+    Counter::bump();
+    if (Counter::total != 3) { return 5; }
+
+    return 0;
+}

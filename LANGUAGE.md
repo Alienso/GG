@@ -17,10 +17,11 @@ via monomorphization.
 6. [Functions](#6-functions)
 7. [Arrays](#7-arrays)
 8. [Classes](#8-classes)
-9. [Memory model](#9-memory-model)
-10. [Generics](#10-generics)
-11. [Imports & extern](#11-imports--extern)
-12. [What GG does NOT support](#12-what-gg-does-not-support)
+9. [Enums](#9-enums)
+10. [Memory model](#10-memory-model)
+11. [Generics](#11-generics)
+12. [Imports & extern](#12-imports--extern)
+13. [What GG does NOT support](#13-what-gg-does-not-support)
 
 ---
 
@@ -433,9 +434,142 @@ If you declare an object variable without parentheses (`Point p;`), its fields a
 zero-initialised and the constructor is **not** called. Always call the constructor
 explicitly when the class's invariants require it.
 
+### Static members
+Prefix a field or method with `static` to make it **class-level** — shared by all
+instances rather than stored per object. Both forms are accessed with the
+scope-resolution operator `ClassName::member`, **or** through any instance
+(`obj.member`); both resolve to the same shared storage / receiver-less call.
+
+```gg
+class Counter {
+    static i32 count = 0;        // one shared slot for the whole program
+    static i32 limit;            // zero-initialised if no initialiser given
+
+    Counter() {
+        Counter::count = Counter::count + 1;   // mutate the shared field
+    }
+
+    // Static method — no implicit `this`; cannot touch instance fields.
+    static i32 howMany() {
+        return Counter::count;
+    }
+}
+
+void main() {
+    Counter a;
+    Counter b;
+    i32 n = Counter::howMany();   // 2  — via the class
+    i32 m = a.howMany();          // 2  — via an instance (same call)
+    Counter::limit = 100;         // static fields are mutable
+}
+```
+
+Rules:
+- **Static fields** are real globals, **not** part of the struct layout, and are
+  **mutable**. An optional constant initialiser (`static i32 count = 0;`) runs once
+  before `main`.
+- **Static methods** have **no implicit `this`** — using `this` inside one is an error,
+  and they cannot read or write instance fields. They may freely access static fields.
+- Calling an **instance** method via `ClassName::method(...)` is an error ("not static").
+  Calling a **static** method through an instance (`obj.method(...)`) is allowed.
+- Enums may **not** declare static members.
+
+### Static local variables (C-style)
+Inside a function or method body, a `static` local is a **single persistent global**:
+it keeps its value across calls and is initialised exactly once before `main`.
+
+```gg
+i32 nextId() {
+    static i32 counter = 0;   // initialised once, before main
+    counter = counter + 1;    // persists across calls
+    return counter;
+}
+
+void main() {
+    i32 a = nextId();   // 1
+    i32 b = nextId();   // 2
+    i32 c = nextId();   // 3
+}
+```
+
+Restrictions:
+- Only **scalar primitive** types (numeric / `bool` / `char`) are supported.
+- The initialiser (if present) must be a **compile-time constant** (literals and
+  unary/binary/cast expressions over constants). Without an initialiser the storage is
+  zero-initialised.
+- Two functions may declare identically named static locals with no conflict — each is
+  an independent global.
+
 ---
 
-## 9. Memory model
+## 9. Enums
+
+GG enums are **Java-style**: each variant is a global singleton object, not an integer.
+Variants may carry immutable fields, declare methods and a constructor, and are compared
+by **identity**.
+
+### Fieldless enums
+```gg
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+void main() {
+    Color c = Color.GREEN;       // variants accessed as Enum.VARIANT
+    if (c == Color.GREEN) { }    // identity equality only
+    if (c != Color.RED)   { }
+}
+```
+
+### Enums with fields, a constructor, and methods
+```gg
+enum Planet {
+    MERCURY(3.303, 2.4397),      // variant list comes first, separated by commas
+    EARTH(5.976, 6.37814),
+    JUPITER(1898.0, 71.492);     // terminated with a semicolon before the body
+
+    f64 mass;                    // fields are immutable after construction
+    f64 radius;
+
+    Planet(f64 mass, f64 radius) {
+        this.mass = mass;        // fields may only be assigned via `this.field =`
+        this.radius = radius;    // inside the constructor
+    }
+
+    f64 gravity() {
+        return this.mass / (this.radius * this.radius);
+    }
+}
+
+void main() {
+    f64 m = Planet.EARTH.mass;          // field read on a variant
+    f64 g = Planet.JUPITER.gravity();   // method call on a variant
+
+    Planet p = Planet.MERCURY;          // bind a variant to a variable
+    p = Planet.EARTH;                   // rebind
+    if (p == Planet.EARTH) { }          // identity comparison
+}
+```
+
+### Rules & restrictions
+- **Variant list first** — comma-separated; if a body (fields/methods) follows, terminate
+  the variant list with a semicolon.
+- **Each variant arg count must match the constructor arity.** Every declared field must
+  be initialised in the constructor.
+- **Fields are immutable** — assignable only via `this.field =` inside the constructor;
+  there is no external write.
+- **Identity equality only** — `==` / `!=` compare the singleton address. No `<`, `>`,
+  ordinal, or other operators.
+- An enum value is a handle to a singleton (lowers to a pointer); binding/rebinding a
+  variable copies the handle (no allocation).
+- Enums **cannot** be constructed directly (`Planet(...)`), `new`-ed, given a destructor,
+  or declare `static` members.
+
+---
+
+## 10. Memory model
 
 GG has three memory strategies, chosen by the declaration form:
 
@@ -500,7 +634,7 @@ Returns `u64`. Use it to compute allocation sizes for `malloc`.
 
 ---
 
-## 10. Generics
+## 11. Generics
 
 GG generics are **monomorphized at compile time** — each unique type argument
 combination produces a separate concrete class or function. There are no runtime
@@ -562,7 +696,7 @@ Box<i32>& b = new Box<i32>(99);   // Box<T> was declared in box_lib.gg
 
 ---
 
-## 11. Imports & extern
+## 12. Imports & extern
 
 ### Importing another GG file
 ```gg
@@ -596,7 +730,7 @@ Standard library modules in `stdlib/` wrap the most commonly needed C functions:
 
 ---
 
-## 12. What GG does NOT support
+## 13. What GG does NOT support
 
 The following features are **currently absent** from the current implementation. They may be added in the future.
 Attempting them will produce a compile error (or will simply not parse).
@@ -606,8 +740,7 @@ Attempting them will produce a compile error (or will simply not parse).
 |-----------------|-------|
 | `null` literal  | `ptr` / `ptr<T>` are null at the IR level (store 0), but there is no GG-level `null` keyword |
 | Built-in string type | Strings are C `ptr`; use `extern puts` and pass string literals directly |
-| Enum types | No `enum` keyword |
-| Union / sum types | No tagged unions |
+| Union / sum types | No tagged unions (enums are Java-style singletons, not sum types — see §9) |
 | Tuples | No tuple syntax or destructuring |
 | Nullable types (`T?`) | No optional type |
 
@@ -628,7 +761,8 @@ Attempting them will produce a compile error (or will simply not parse).
 | Inheritance / subclassing | No `extends` or base classes |
 | Virtual methods / interfaces | No dynamic dispatch; no vtable |
 | Constructor overloading | At most one constructor per class |
-| Static fields or methods | No `static` keyword |
+| `const` members | No `const` keyword; static fields and locals are always mutable |
+| File-scope / internal linkage for statics | Static fields keep external linkage; no `private`-style linkage control |
 | Access modifiers beyond `private` | No `public` keyword, no `protected`; `private` is advisory (warning only) |
 | Explicit `this` parameter | `this` is implicit; cannot be renamed or captured |
 | Copy constructors | Deep copy is automatic via the generated `@ClassName_clone` helper |

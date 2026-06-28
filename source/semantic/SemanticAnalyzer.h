@@ -13,6 +13,7 @@
 #include "Type.h"
 #include "../parser/Ast.h"
 #include "../CompileError.h"
+#include "../CompilerOptions.h"
 
 // Maps each Expr variant pointer to its resolved Type.
 // Key = expr.node.get() — stable because the AST is never mutated during analysis.
@@ -51,7 +52,9 @@ struct SemanticResult {
 
 class SemanticAnalyzer {
 public:
-    SemanticResult analyze(const Program& program, const std::string& filename = "");  // resets all state per call
+    SemanticResult analyze(const Program& program,
+                           const std::string& filename = "",
+                           const CompilerOptions& options = {});  // resets all state per call
 
 private:
     SymbolTable         symbolTable;
@@ -62,6 +65,7 @@ private:
     int                 loopDepth         = 0;  // > 0 while inside a while/for loop
     std::string         currentClassName;       // set while analysing a class body
     std::unordered_map<std::string, ClassInfo> classRegistry;
+    bool                allowRawPtr_      = false; // set from CompilerOptions each call
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);
@@ -105,6 +109,10 @@ private:
     [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);
 
     // Helpers
+    // Emit an error if typeToken resolves to ptr/ptr<T> and --unsafe-ptr was not given.
+    // Exempt from the check: extern declarations (CRT bindings always need ptr).
+    void          checkRawPtrAllowed(const Token& typeToken, const Token& site);
+
     void          enterScope();
     void          exitScope();
     const Symbol* lookupSymbol(const Token& nameToken);  // emits error if missing

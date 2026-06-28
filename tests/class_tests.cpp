@@ -163,7 +163,7 @@ TEST_CASE("Class - accessing undeclared member is an error", "[class][semantic]"
     REQUIRE(result.hadError);
 }
 
-TEST_CASE("Class - accessing private field from outside class is an error", "[class][semantic]") {
+TEST_CASE("Class - accessing private field from outside class is a warning, not an error", "[class][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Foo { private i32 secret; }
@@ -172,8 +172,8 @@ TEST_CASE("Class - accessing private field from outside class is an error", "[cl
             i32 x = f.secret;
         }
     )");
-    REQUIRE(result.hadError);
-    REQUIRE(cap.contains("private"));
+    REQUIRE_FALSE(result.hadError);       // warning only — compilation succeeds
+    REQUIRE(cap.contains("private"));     // warning message still mentions "private"
 }
 
 TEST_CASE("Class - accessing private field from inside class is valid", "[class][semantic]") {
@@ -184,6 +184,33 @@ TEST_CASE("Class - accessing private field from inside class is valid", "[class]
         }
     )");
     REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Class - calling private method from outside class is a warning, not an error", "[class][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Foo {
+            private i32 hidden() { return 1; }
+        }
+        void main() {
+            Foo f;
+            i32 x = f.hidden();
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE(cap.contains("private"));
+}
+
+TEST_CASE("Class - omitting access modifier defaults to public", "[class][parser]") {
+    auto prog = parseString(R"(
+        class Bar {
+            i32 x;
+            i32 get() { return this.x; }
+        }
+    )");
+    const auto& cls = asStmt<ClassDeclStmt>(prog.declarations[0]);
+    REQUIRE(cls.fields[0].isPublic);    // defaults to public
+    REQUIRE(cls.methods[0].isPublic);   // defaults to public
 }
 
 TEST_CASE("Class - constructor argument count mismatch is an error", "[class][semantic]") {

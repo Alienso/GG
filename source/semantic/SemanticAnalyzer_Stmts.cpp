@@ -160,9 +160,13 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     currentReturnType = resolveTypeToken(functionDecl.returnType);
     loopDepth         = 0;  // loops in the outer scope do not extend into this function
 
+    // Gate raw pointer types behind --unsafe-ptr.
+    checkRawPtrAllowed(functionDecl.returnType, functionDecl.name);
+
     enterScope();  // function scope — parameters live here
 
     for (const ParamDecl& param : functionDecl.params) {
+        checkRawPtrAllowed(param.typeName, param.name);
         Type paramType = resolveTypeToken(param.typeName);
         if (paramType.kind == TypeKind::Void) {
             error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
@@ -217,6 +221,10 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     std::string savedClassName = currentClassName;
     currentClassName          = className;
 
+    // Gate raw pointer field types behind --unsafe-ptr.
+    for (const FieldDecl& fd : classDecl.fields)
+        checkRawPtrAllowed(fd.typeName, fd.name);
+
     for (const MethodDecl& md : classDecl.methods) {
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
@@ -225,6 +233,12 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
                                 ? Type{TypeKind::Void}
                                 : resolveTypeToken(md.returnType);
         loopDepth         = 0;
+
+        // Gate raw pointer types in method signatures behind --unsafe-ptr.
+        if (!md.isConstructor && !md.isDestructor)
+            checkRawPtrAllowed(md.returnType, md.name);
+        for (const ParamDecl& param : md.params)
+            checkRawPtrAllowed(param.typeName, param.name);
 
         enterScope();  // method scope
 

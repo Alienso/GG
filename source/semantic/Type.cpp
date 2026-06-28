@@ -253,6 +253,9 @@ Type decodeSynthesizedType(const Token& tok) {
     if (s.size() > 5 && s.compare(0, 4, "ptr<") == 0 && s.back() == '>') {
         std::string elem = s.substr(4, s.size() - 5);
 
+        // ptr<void> is an alias for the opaque ptr type.
+        if (elem == "void") return Type{TypeKind::Ptr};
+
         // Reference element: "Elem.ref"
         if (elem.size() > 4 && elem.compare(elem.size() - 4, 4, ".ref") == 0) {
             std::string cls = elem.substr(0, elem.size() - 4);

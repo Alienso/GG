@@ -1295,3 +1295,62 @@ TEST_CASE("TypedPtr - indexing a non-indexable type is an error", "[typedptr][se
     )");
     REQUIRE(r.hadError);
 }
+
+// ============================================================
+// --unsafe-ptr flag: ptr/ptr<T> are rejected without the flag
+// ============================================================
+
+TEST_CASE("UnsafePtr - ptr variable is rejected without --unsafe-ptr flag", "[unsafeptr][semantic]") {
+    // Use a bare CompilerOptions{} — allowRawPtr defaults to false.
+    auto r = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr p = malloc(4);
+        }
+    )", CompilerOptions{});
+    REQUIRE(r.hadError);
+}
+
+TEST_CASE("UnsafePtr - ptr<i32> variable is rejected without --unsafe-ptr flag", "[unsafeptr][semantic]") {
+    auto r = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<i32> p = malloc(4);
+        }
+    )", CompilerOptions{});
+    REQUIRE(r.hadError);
+}
+
+TEST_CASE("UnsafePtr - ptr/ptr<T> are allowed with --unsafe-ptr flag", "[unsafeptr][semantic]") {
+    CompilerOptions opts;
+    opts.allowRawPtr = true;
+    auto r = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr p = malloc(4);
+            ptr<i32> q = malloc(16);
+        }
+    )", opts);
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("UnsafePtr - extern declaration is always allowed (exempt from flag)", "[unsafeptr][semantic]") {
+    // extern declarations are exempt regardless of the flag
+    auto r = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        void main() { }
+    )", CompilerOptions{});
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("UnsafePtr - ptr<void> is an alias for ptr", "[unsafeptr][semantic]") {
+    CompilerOptions opts;
+    opts.allowRawPtr = true;
+    auto r = analyzeString(R"(
+        extern ptr malloc(u64 n);
+        void main() {
+            ptr<void> p = malloc(8);
+        }
+    )", opts);
+    REQUIRE_FALSE(r.hadError);
+}

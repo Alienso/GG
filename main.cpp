@@ -13,6 +13,8 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--no-bounds-check") {
             options.boundsCheck = false;
+        } else if (arg == "--unsafe-ptr") {
+            options.allowRawPtr = true;
         } else {
             paths.emplace_back(std::filesystem::absolute(arg).string());
         }

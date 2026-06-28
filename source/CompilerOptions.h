@@ -8,6 +8,7 @@
 
 struct CompilerOptions {
     bool boundsCheck = true;   // emit runtime array bounds checks; disabled by --no-bounds-check
+    bool allowRawPtr = false;  // allow ptr / ptr<T> in non-extern contexts; enabled by --unsafe-ptr
 };
 
 #endif //GG_COMPILEROPTIONS_H

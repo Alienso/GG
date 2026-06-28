@@ -356,6 +356,9 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         return Type{TypeKind::Error};
     }
 
+    // Raw pointer types are gated behind --unsafe-ptr.
+    checkRawPtrAllowed(varDecl.typeName, varDecl.name);
+
     // Array initializers are not yet supported
     if (varDecl.arraySize > 0 && varDecl.initializer) {
         error(varDecl.typeName, "array initializers are not yet supported");
@@ -472,10 +475,10 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
     }
 
     const ClassInfo::Field& field = fieldIt->second;
-    // Access control: private fields only accessible from within the same class
+    // Access control: private fields emit a warning (not an error) when accessed from outside the class.
     if (!field.isPublic && currentClassName != objectType.className) {
-        error(memberAccess.field, "field '" + memberAccess.field.lexeme
-              + "' is private in class '" + objectType.className + "'");
+        warn(memberAccess.field, "field '" + memberAccess.field.lexeme
+             + "' is private in class '" + objectType.className + "'");
     }
 
     return field.type;
@@ -504,8 +507,8 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
 
     const ClassInfo::Field& field = fieldIt->second;
     if (!field.isPublic && currentClassName != objectType.className) {
-        error(memberAssign.field, "field '" + memberAssign.field.lexeme
-              + "' is private in class '" + objectType.className + "'");
+        warn(memberAssign.field, "field '" + memberAssign.field.lexeme
+             + "' is private in class '" + objectType.className + "'");
     }
 
     Type valueType = analyzeExpr(*memberAssign.value);
@@ -536,8 +539,8 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
 
     const ClassInfo::Method& method = methodIt->second;
     if (!method.isPublic && currentClassName != objectType.className) {
-        error(methodCall.method, "method '" + methodCall.method.lexeme
-              + "' is private in class '" + objectType.className + "'");
+        warn(methodCall.method, "method '" + methodCall.method.lexeme
+             + "' is private in class '" + objectType.className + "'");
     }
 
     if (methodCall.args.size() != method.paramTypes.size()) {

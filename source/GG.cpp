@@ -42,7 +42,7 @@ void GG::run() {
             AstPrinter astPrinter;
             astPrinter.print(ast, astFile);
 
-            SemanticResult result = semanticAnalyzer.analyze(ast, filePath);
+            SemanticResult result = semanticAnalyzer.analyze(ast, filePath, options);
             IRModule ir = codeGenerator.generate(ast, result, options);
             IRPrinter irPrinter;
             irPrinter.print(ir, irFile);

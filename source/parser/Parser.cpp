@@ -562,14 +562,12 @@ Stmt Parser::parseClassDecl() {
     std::deque<MethodDecl> methods;
 
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
-        // Each member starts with public/private
+        // Access modifier is optional; default is public.
         bool isPublic = true;
         if (match({ TokenType::PUBLIC })) {
             isPublic = true;
         } else if (match({ TokenType::PRIVATE })) {
             isPublic = false;
-        } else {
-            throw error(peek(), "expected 'public' or 'private' before class member");
         }
 
         // Destructor: ~ClassName()

@@ -86,7 +86,7 @@ function Invoke-Native {
 Write-Host ""
 Write-Host "==> [1/2]  GG  $SourceResolved" -ForegroundColor Cyan
 
-$gg = Invoke-Native $GG @("$SourceResolved")
+$gg = Invoke-Native $GG @("$SourceResolved", "--unsafe-ptr")
 
 foreach ($line in $gg.Stderr) {
     if (!$line) { continue }

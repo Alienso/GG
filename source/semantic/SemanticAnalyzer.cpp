@@ -9,15 +9,18 @@
 // Public entry point
 // ============================================================
 
-SemanticResult SemanticAnalyzer::analyze(const Program& program, const std::string& filenameParam) {
+SemanticResult SemanticAnalyzer::analyze(const Program& program,
+                                          const std::string& filenameParam,
+                                          const CompilerOptions& options) {
     symbolTable       = SymbolTable{};
     typeMap.clear();
     hadError          = false;
     filename          = filenameParam;
     currentReturnType = std::nullopt;
     loopDepth         = 0;
-    currentClassName = "";
+    currentClassName  = "";
     classRegistry.clear();
+    allowRawPtr_      = options.allowRawPtr;
 
     symbolTable.enterScope();   // global scope
 
@@ -177,6 +180,15 @@ void SemanticAnalyzer::error(const Token& token, const std::string& message) {
 void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
     std::string prefix = filename.empty() ? "" : filename + ":";
     std::cerr << prefix << token.line << ": Warning: " << message << '\n';
+}
+
+void SemanticAnalyzer::checkRawPtrAllowed(const Token& typeToken, const Token& site) {
+    if (allowRawPtr_) return;
+    Type t = resolveTypeToken(typeToken);
+    if (t.kind == TypeKind::Ptr || t.kind == TypeKind::TypedPtr) {
+        error(site, "'" + typeName(t) + "' is a raw pointer type and requires --unsafe-ptr "
+              "(raw pointers are for stdlib/internal use only)");
+    }
 }
 
 Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {

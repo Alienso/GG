@@ -39,6 +39,15 @@ struct StderrCapture {
     }
 };
 
+// Default compiler options used by test helpers.
+// allowRawPtr = true so all existing ptr/ptr<T> tests pass without change.
+// A test that wants to verify the restriction should pass CompilerOptions{} explicitly.
+inline CompilerOptions defaultTestOptions() {
+    CompilerOptions opts;
+    opts.allowRawPtr = true;
+    return opts;
+}
+
 // ---- Pipeline helpers ----
 
 namespace detail {
@@ -89,11 +98,14 @@ inline Program parseString(const std::string& source) {
 }
 
 // Lex + parse + analyse a source string and return the SemanticResult.
-inline SemanticResult analyzeString(const std::string& source) {
+// options defaults to defaultTestOptions() (allowRawPtr=true) so existing tests
+// that use ptr/ptr<T> continue to pass without modification.
+inline SemanticResult analyzeString(const std::string& source,
+                                    CompilerOptions options = defaultTestOptions()) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
     try {
-        return analyzer.analyze(ast);
+        return analyzer.analyze(ast, "", options);
     } catch (const CompileError& e) {
         std::cerr << e.what() << '\n';
         return SemanticResult{true, {}, {}};
@@ -101,11 +113,13 @@ inline SemanticResult analyzeString(const std::string& source) {
 }
 
 // Lex + parse + analyse + codegen a source string and return the IR text.
-inline std::string codegenString(const std::string& source, CompilerOptions options = {}) {
+// options defaults to defaultTestOptions() (allowRawPtr=true).
+inline std::string codegenString(const std::string& source,
+                                 CompilerOptions options = defaultTestOptions()) {
     Program ast = parseString(source);
     SemanticAnalyzer analyzer;
     // Let CompileError propagate — a semantic error in codegenString is a test failure
-    SemanticResult semanticResult = analyzer.analyze(ast);
+    SemanticResult semanticResult = analyzer.analyze(ast, "", options);
     CodeGen codeGenerator;
     IRModule ir = codeGenerator.generate(ast, semanticResult, options);
     std::ostringstream output;
@@ -116,11 +130,13 @@ inline std::string codegenString(const std::string& source, CompilerOptions opti
 
 // Resolve + analyse + codegen a .gg file on disk and return the IR text.
 // Used by stdlib tests that operate on actual source files rather than inline strings.
-inline std::string codegenFile(const std::string& path, CompilerOptions options = {}) {
+// options defaults to defaultTestOptions() (allowRawPtr=true).
+inline std::string codegenFile(const std::string& path,
+                                CompilerOptions options = defaultTestOptions()) {
     ImportResolver resolver;
     Program ast = resolver.resolve(path);
     SemanticAnalyzer analyzer;
-    SemanticResult semanticResult = analyzer.analyze(ast);
+    SemanticResult semanticResult = analyzer.analyze(ast, path, options);
     CodeGen codeGenerator;
     IRModule ir = codeGenerator.generate(ast, semanticResult, options);
     std::ostringstream output;

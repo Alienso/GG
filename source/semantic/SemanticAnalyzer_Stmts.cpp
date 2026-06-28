@@ -98,8 +98,34 @@ void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
         error(exprFirstToken(ifStmt.condition),
               "if condition must be bool-compatible, got " + typeName(conditionType));
     }
+
+    // Definite-assignment analysis across branches.
+    // A variable is definitely initialized after an if-else only if it is
+    // initialized in BOTH the then-branch and the else-branch.
+    // With no else, the then-branch may not run — so nothing is newly guaranteed.
+    auto snapBefore = symbolTable.captureInitState();
     analyzeStmt(*ifStmt.thenBranch);
-    if (ifStmt.elseBranch) analyzeStmt(*ifStmt.elseBranch);
+
+    if (ifStmt.elseBranch) {
+        auto snapAfterThen = symbolTable.captureInitState();
+        symbolTable.restoreInitState(snapBefore);
+        analyzeStmt(*ifStmt.elseBranch);
+        auto snapAfterElse = symbolTable.captureInitState();
+
+        // Merge: definitely initialized iff initialized in BOTH branches.
+        // (If a variable was already initialized before the if, both snapshots
+        //  carry that fact, so it stays initialized.)
+        SymbolTable::InitSnapshot merged;
+        for (const auto& [name, initThen] : snapAfterThen) {
+            auto it = snapAfterElse.find(name);
+            bool initElse = (it != snapAfterElse.end()) && it->second;
+            merged[name] = initThen && initElse;
+        }
+        symbolTable.restoreInitState(merged);
+    } else {
+        // No else branch: then-branch may not run — revert to pre-if state.
+        symbolTable.restoreInitState(snapBefore);
+    }
 }
 
 void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
@@ -108,9 +134,14 @@ void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
         error(exprFirstToken(whileStmt.condition),
               "while condition must be bool-compatible, got " + typeName(conditionType));
     }
+    // The loop body may never execute, so assignments inside it do not count as
+    // definite initialization.  Analyse the body (to catch errors in it) but then
+    // restore the pre-loop initialization state.
+    auto snapBefore = symbolTable.captureInitState();
     loopDepth++;
     analyzeStmt(*whileStmt.body);
     loopDepth--;
+    symbolTable.restoreInitState(snapBefore);
 }
 
 void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
@@ -128,9 +159,13 @@ void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
 
     if (forStmt.increment) analyzeExpr(*forStmt.increment);
 
+    // The loop body may never execute: analyse it (to catch errors) but restore
+    // the pre-body initialization state so nothing is spuriously deemed initialized.
+    auto snapBefore = symbolTable.captureInitState();
     loopDepth++;
     analyzeStmt(*forStmt.body);
     loopDepth--;
+    symbolTable.restoreInitState(snapBefore);
 
     exitScope();
 }
@@ -182,7 +217,8 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
             paramType,
             param.name,
             {},
-            /*isParameter=*/true
+            /*isParameter=*/true,
+            /*isInitialized=*/true   // parameters are always initialized at call entry
         };
         if (!symbolTable.declare(param.name.lexeme, sym))
             error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
@@ -247,7 +283,9 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
             Symbol::Kind::Variable,
             makeObjectType(className),
             classDecl.name,
-            {}
+            {},
+            /*isParameter=*/false,
+            /*isInitialized=*/true   // 'this' is always valid inside a method
         });
 
         // Declare parameters
@@ -263,7 +301,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
                 paramType = Type{TypeKind::Error};
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
-                    Symbol::Kind::Variable, paramType, param.name, {}, /*isParameter=*/true}))
+                    Symbol::Kind::Variable, paramType, param.name, {},
+                    /*isParameter=*/true, /*isInitialized=*/true}))
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 

@@ -482,3 +482,177 @@ TEST_CASE("Semantic - ptr return type is valid", "[semantic]") {
     )");
     REQUIRE_FALSE(result.hadError);
 }
+
+// ============================================================
+// Definite assignment — use-before-initialization errors
+// ============================================================
+
+TEST_CASE("Uninit - primitive used before any assignment is an error", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - primitive with initializer is valid", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x = 5;
+            return x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - assigned before read is valid", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            x = 5;
+            return x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - function parameters are always initialized", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 double_it(i32 n) { return n + n; }
+        i32 main() { return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - value-object declaration is zero-initialized (no error)", "[uninit]") {
+    // Class values are zero-initialized by the runtime; reading them is safe.
+    auto result = analyzeString(R"(
+        class Point { i32 x; i32 y; }
+        i32 main() {
+            Point p;
+            return p.x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - reference declared without init is an error when read", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Counter { i32 n; Counter(i32 v) { this.n = v; } }
+        i32 main() {
+            Counter& c;
+            return c.n;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - compound-assign on uninitialized variable is an error", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            x += 1;
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - if-else both branches assign: initialized after", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 pick(bool cond) {
+            i32 x;
+            if (cond) { x = 1; } else { x = 2; }
+            return x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - if without else does not guarantee initialization", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            if (true) { x = 1; }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - if-else only one branch assigns: error after", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            if (true) { x = 1; } else { }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - while body does not guarantee initialization", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            while (false) { x = 1; }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - for body does not guarantee initialization", "[uninit]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 x;
+            for (i32 i = 0; i < 10; i++) { x = i; }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+TEST_CASE("Uninit - nested if-else: both paths cover all branches is valid", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 clamp(i32 v, i32 lo, i32 hi) {
+            i32 result;
+            if (v < lo) {
+                result = lo;
+            } else if (v > hi) {
+                result = hi;
+            } else {
+                result = v;
+            }
+            return result;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Uninit - variable initialized before loop body always read is valid", "[uninit]") {
+    auto result = analyzeString(R"(
+        i32 main() {
+            i32 sum = 0;
+            for (i32 i = 0; i < 10; i++) { sum = sum + i; }
+            return sum;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

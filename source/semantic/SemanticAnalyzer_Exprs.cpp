@@ -58,6 +58,12 @@ Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
         error(identifier.name, "cannot use function '" + identifier.name.lexeme + "' as a value");
         return Type{TypeKind::Error};
     }
+    if (!sym->isInitialized) {
+        error(identifier.name, "variable '" + identifier.name.lexeme
+              + "' is used before it has been assigned a value");
+        // Return the declared type anyway so downstream analysis uses the right type
+        // and does not cascade into spurious "undeclared identifier" errors.
+    }
     return sym->type;
 }
 
@@ -221,6 +227,9 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     Type lhsType = sym->type;
     Type rhsType = analyzeExpr(*assign.value);
     checkCast(rhsType, lhsType, assign.name, "assignment");
+    // Any successful assignment makes the variable definitely initialized.
+    if (Symbol* mut = symbolTable.lookupMutable(assign.name.lexeme))
+        mut->isInitialized = true;
     return lhsType;
 }
 
@@ -235,6 +244,11 @@ Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundA
         error(compoundAssign.name, "cannot assign to function '" + compoundAssign.name.lexeme + "'");
         analyzeExpr(*compoundAssign.value);
         return Type{TypeKind::Error};
+    }
+    // Compound assignment reads the variable before writing — check initialization.
+    if (!sym->isInitialized) {
+        error(compoundAssign.name, "variable '" + compoundAssign.name.lexeme
+              + "' is used before it has been assigned a value");
     }
 
     Type lhsType = sym->type;
@@ -271,6 +285,9 @@ Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundA
     }
 
     checkCast(rhsType, lhsType, compoundAssign.operatorToken, "compound assignment");
+    // Compound assignment writes to the variable — mark it as definitely initialized.
+    if (Symbol* mut = symbolTable.lookupMutable(compoundAssign.name.lexeme))
+        mut->isInitialized = true;
     return lhsType;
 }
 
@@ -286,6 +303,11 @@ Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
               + typeName(operandType));
         return Type{TypeKind::Error};
     }
+    // Postfix writes back to the variable — mark as initialized to suppress
+    // cascading "uninitialized" errors on subsequent reads.
+    const auto& ident = std::get<IdentifierExpr>(*postfix.operand->node);
+    if (Symbol* mut = symbolTable.lookupMutable(ident.name.lexeme))
+        mut->isInitialized = true;
     return operandType;
 }
 
@@ -381,11 +403,22 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
     }
 
+    // Decide whether the variable starts as definitely initialized:
+    //   - explicit initializer present                → yes
+    //   - Object (class value): zero-initialized struct → yes
+    //   - Array: zero-initialized by the runtime       → yes
+    //   - Everything else (primitives, references)     → no (must be assigned before use)
+    bool isInit = varDecl.initializer != nullptr
+               || elementType.kind == TypeKind::Object
+               || varDecl.arraySize > 0;
+
     symbolTable.declare(varDecl.name.lexeme, Symbol{
         Symbol::Kind::Variable,
         declaredType,
         varDecl.name,
-        {}
+        {},
+        /*isParameter=*/false,
+        /*isInitialized=*/isInit
     });
 
     return declaredType;

@@ -3,6 +3,20 @@ project(GG)
 
 set(CMAKE_CXX_STANDARD 23)
 
+# ---- Parallel build default ----
+# `cmake --build` reads the CMAKE_BUILD_PARALLEL_LEVEL *environment* variable to
+# decide how many compile jobs to run concurrently. Default it to the number of
+# logical cores unless the user already set it, so plain `cmake --build` is
+# parallel without needing an explicit -j/--parallel flag.
+# Note: this only takes effect for build invocations made *after* this configure
+# step runs in the same environment; passing --parallel on the command line, or
+# using the Ninja generator (parallel by default), are the most reliable options.
+if(NOT DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+    cmake_host_system_information(RESULT GG_NPROC QUERY NUMBER_OF_LOGICAL_CORES)
+    set(ENV{CMAKE_BUILD_PARALLEL_LEVEL} ${GG_NPROC})
+    message(STATUS "GG: defaulting CMAKE_BUILD_PARALLEL_LEVEL to ${GG_NPROC} logical cores")
+endif()
+
 # ---- Compiler diagnostics ----
 # Applied to every translation unit in this project (not to Catch2, which is a
 # separate CMake target compiled with its own flags).

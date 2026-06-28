@@ -2,12 +2,14 @@
 
 ## Build commands
 
+Always pass `--parallel` so builds use all logical cores.
+
 ```powershell
 # Build the unit-test binary
-cmake --build cmake-build-debug --target GG_tests
+cmake --build cmake-build-debug --target GG_tests --parallel
 
 # Build the compiler binary (required before using compile.ps1)
-cmake --build cmake-build-debug --target GG
+cmake --build cmake-build-debug --target GG --parallel
 
 # Run all unit tests
 .\cmake-build-debug\GG_tests.exe
@@ -192,8 +194,58 @@ vector-reallocation copy-fallback that would hit the deleted assignment operator
   fields/methods/ctor, plus a parallel `enumRegistry`/`EnumInfo` (semantic) and
   `cgEnumNames_` set (codegen). `EnumDeclStmt::variants`/`methods` are `std::deque`.
 
+### Static members (class-level)
+Roadmap: (1) **static fields** ✅ done, (2) **static methods** ✅ done, (3) **static local
+variables** (C-style) ✅ done, (4) polish (const statics, access enforcement, file-scope
+linkage) — **intentionally deferred** (no-op per project decision: no `const` keyword,
+private access stays a warning, static fields keep external linkage).
+- **Static fields** — `static T name;` or `static T name = const;` inside a class.
+  Shared class-level storage, **not** part of the struct layout. Accessed via the
+  scope-resolution operator `ClassName::field` **or** through an instance `obj.field`
+  (both resolve to the same global). Static fields are mutable (unlike enum fields).
+- **Static methods** — `static T method(...)` inside a class. Class-level: **no
+  implicit `this`** (using `this` in a static body is an error). Called as
+  `ClassName::method(args)` **or** through an instance `obj.method(args)` (both lower
+  to the same receiver-less call). May read/write static fields. Mangled
+  `@ClassName_method(...)` **without** the leading `ptr %self`. Calling an instance
+  method via `::` is an error ("not static"); calling a static via an instance is fine.
+- `static` keyword (lexer) + `::` (`COLON_COLON`) token. `private static` / `static`
+  in either order is accepted in a member list.
+- Lowering: one global per static field, `@ClassName$field = global <ir> zeroinitializer`.
+  Initializers run before main in `@gg_static_init()`. Parser stores the initializer
+  on `FieldDecl::initializer` (a `unique_ptr<Expr>`); `FieldDecl` also has `isStatic`.
+- `ClassName::field` / `ClassName::method(...)` parse to the same
+  `MemberAccessExpr`/`MemberAssignExpr`/`MethodCallExpr` nodes as `obj.field` / `obj.m()`
+  (the left identifier is resolved as a type name in semantics/codegen).
+- Static fields live in `ClassInfo::staticFields` (semantic) and
+  `CGClassInfo::staticFields` (codegen); they are excluded from the instance field
+  list / struct layout and the field index numbering. Enums may **not** declare statics.
+- Static methods carry `isStatic` on `MethodDecl` and `ClassInfo::Method`; codegen
+  records their names in `CGClassInfo::staticMethods` so `genMethodCall` dispatches to
+  `genStaticCall` (no receiver). `SemanticAnalyzer::currentMethodIsStatic` gates `this`.
+- **Static locals** — `static T name;` / `static T name = const;` inside a function or
+  method body. A single persistent global shared across all calls; initialised once
+  before main. Phase 3 supports **scalar primitive** types only (numeric/bool/char);
+  the initializer must be a compile-time constant (`SemanticAnalyzer::isConstantExpr`:
+  literals and unary/binary/cast of constants). `VarDeclExpr` carries `isStatic`; the
+  parser accepts a leading `static` in `parseExpression`. Lowering: one
+  `@<prefix>$<name> = internal global <ir> zeroinitializer` (prefix = function name or
+  `Class_method`; collisions get a `.N` suffix). The name maps in `allocaMap` directly
+  to the global, so reads/writes load/store through it (no alloca). Non-zero
+  initializers are queued in `CodeGen::staticLocalInits_` and flushed in
+  `@gg_static_init` alongside static-field initializers.
+- **`@llvm.global_ctors` is now unified**: both `@gg_enum_init` and `@gg_static_init`
+  register through a single `globalCtors_` list emitted by `emitGlobalCtors()` as one
+  `[N x { i32, ptr, ptr }]` array (LLVM permits only one such global).
+
+### AST container note
+`ClassDeclStmt::fields` and `EnumDeclStmt::fields` are `std::deque<FieldDecl>` (not
+`vector`): `FieldDecl` now owns a `unique_ptr<Expr> initializer` and contains `Token`s
+(const members), making it move-only and not move-assignable — same rationale as the
+`methods` deque.
+
 ## Test baseline
-**406 test cases / 822 assertions** (as of Java-style enums + enum value params/returns).
+**448 test cases / 912 assertions** (as of static local variables — Phase 3).
 
 ## Keeping CLAUDE.md current
 

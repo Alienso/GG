@@ -199,6 +199,83 @@ TEST_CASE("ImplicitThis - a bare instance field in a static method is undeclared
     REQUIRE(cap.contains("use of undeclared identifier 'n'"));
 }
 
+// ------------------------------------------------------------
+// Static fields, reference fields, local shadowing, args
+// ------------------------------------------------------------
+
+TEST_CASE("ImplicitThis - a bare static-field read and write resolve to the global", "[implicitthis][semantic]") {
+    auto result = analyzeString(R"(
+        class C {
+            static mut i32 total;
+            C() { total = total + 1; }   // bare static read + write
+            static i32 count() { return total; }
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+// Static fields are class-level (not instance state), so a non-`mut` method may write them.
+TEST_CASE("ImplicitThis - a non-mut method may write a bare static field", "[implicitthis][semantic]") {
+    auto result = analyzeString(R"(
+        class C {
+            static mut i32 total;
+            void bump() { total = total + 1; }   // no `mut` needed for a static field
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ImplicitThis - a bare static-field write lowers to a global store", "[implicitthis][codegen]") {
+    std::string ir = codegenString(R"(
+        class C {
+            static mut i32 total;
+            void bump() { total = total + 1; }
+        }
+        i32 main() { C& c = new C(); c.bump(); return 0; }
+    )");
+    REQUIRE(ir.find("@C$total") != std::string::npos);
+}
+
+TEST_CASE("ImplicitThis - a bare reference-field write works in a mut method", "[implicitthis][semantic]") {
+    auto result = analyzeString(R"(
+        class Node {
+            i32 v;
+            mut Node& next;
+            Node(i32 x) { v = x; }
+            void link(mut Node& n) mut { next = n; }   // bare ref-field write
+            i32 peek() { return next.v; }               // bare ref-field read + access
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+// A local (not just a parameter) shadows a same-named field. Here the field is const,
+// so if `x` bound to the field the reassignment would error — it does not, proving the
+// local wins.
+TEST_CASE("ImplicitThis - a local variable shadows a same-named field", "[implicitthis][semantic]") {
+    auto result = analyzeString(R"(
+        class C {
+            i32 x;                       // const field
+            C(i32 a) { this.x = a; }
+            i32 m() { mut i32 x = 1; x = 2; return x; }
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ImplicitThis - a bare method call passes arguments correctly", "[implicitthis][codegen]") {
+    std::string ir = codegenString(R"(
+        class C {
+            mut i32 n;
+            C() { n = 0; }
+            void addN(i32 d) mut { n += d; }
+            void run() mut { addN(5); }   // bare call with an argument
+        }
+        i32 main() { mut C& c = new C(); c.run(); return 0; }
+    )");
+    REQUIRE(ir.find("@C_addN(") != std::string::npos);
+}
+
 TEST_CASE("ImplicitThis - an enum method may read a field without this", "[implicitthis][semantic]") {
     auto result = analyzeString(R"(
         enum Planet {

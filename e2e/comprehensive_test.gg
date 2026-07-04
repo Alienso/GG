@@ -25,16 +25,16 @@ i32 fib(i32 n) {
 
 // For-loop sum of 1..n
 i32 sumTo(i32 n) {
-    i32 total = 0;
-    for (i32 i = 1; i <= n; i++) {
+    mut i32 total = 0;
+    for (mut i32 i = 1; i <= n; i++) {
         total = total + i;
     }
     return total;
 }
 
 // While-loop countdown — returns number of steps
-i32 countDown(i32 n) {
-    i32 steps = 0;
+i32 countDown(mut i32 n) {
+    mut i32 steps = 0;
     while (n > 0) {
         steps++;
         n--;
@@ -130,24 +130,24 @@ i32 main() {
 
     // ---- 30-37: Compound assignment ----------------------------------
 
-    i32 x = 10;
+    mut i32 x = 10;
     x += 5;   if (x != 15) { return 30; }
     x -= 3;   if (x != 12) { return 31; }
     x *= 2;   if (x != 24) { return 32; }
     x /= 4;   if (x != 6)  { return 33; }
     x %= 4;   if (x != 2)  { return 34; }
 
-    i32 bits = 4;
+    mut i32 bits = 4;
     bits |= 2;  if (bits != 6) { return 35; }
     bits &= 5;  if (bits != 4) { return 36; }
     bits ^= 3;  if (bits != 7) { return 37; }
 
     // ---- 38-43: Prefix and postfix ++/-- -----------------------------
 
-    i32 a = 5;
+    mut i32 a = 5;
     ++a;              if (a != 6)   { return 38; }
     --a;              if (a != 5)   { return 39; }
-    i32 old = a++;    if (old != 5) { return 40; }
+    mut i32 old = a++;    if (old != 5) { return 40; }
                       if (a   != 6) { return 41; }
     old = a--;        if (old != 6) { return 42; }
                       if (a   != 5) { return 43; }
@@ -184,8 +184,8 @@ i32 main() {
     // ---- 51: for loop with break -------------------------------------
     // Find first i where i*i > 20  →  i=5 (25 > 20)
 
-    i32 found = -1;
-    for (i32 i = 0; i < 10; i++) {
+    mut i32 found = -1;
+    for (mut i32 i = 0; i < 10; i++) {
         if (i * i > 20) { found = i; break; }
     }
     if (found != 5)               { return 51; }
@@ -193,8 +193,8 @@ i32 main() {
     // ---- 52: for loop with continue (sum even numbers 0..9) ----------
     // 0+2+4+6+8 = 20
 
-    i32 evenSum = 0;
-    for (i32 i = 0; i < 10; i++) {
+    mut i32 evenSum = 0;
+    for (mut i32 i = 0; i < 10; i++) {
         if (i % 2 != 0) { continue; }
         evenSum = evenSum + i;
     }
@@ -202,7 +202,7 @@ i32 main() {
 
     // ---- 53: while with break ----------------------------------------
 
-    i32 wb = 0;
+    mut i32 wb = 0;
     while (true) {
         wb++;
         if (wb >= 5) { break; }
@@ -212,8 +212,8 @@ i32 main() {
     // ---- 54: while with continue (count odd numbers 1..9) ------------
     // Odd numbers in 1..9: 1,3,5,7,9 → count = 5
 
-    i32 oddCount = 0;
-    i32 j = 0;
+    mut i32 oddCount = 0;
+    mut i32 j = 0;
     while (j < 10) {
         j++;
         if (j % 2 == 0) { continue; }
@@ -224,7 +224,7 @@ i32 main() {
     // ---- 55: else-if chain -------------------------------------------
 
     i32 grade = 75;
-    i32 letter = 0;
+    mut i32 letter = 0;
     if      (grade >= 90) { letter = 4; }
     else if (grade >= 80) { letter = 3; }
     else if (grade >= 70) { letter = 2; }
@@ -234,9 +234,9 @@ i32 main() {
     // ---- 56: nested loops --------------------------------------------
     // Count pairs (i,j) with i+j == 5, i in 0..5, j in 0..5 → 6 pairs
 
-    i32 pairCount = 0;
-    for (i32 i = 0; i <= 5; i++) {
-        for (i32 j = 0; j <= 5; j++) {
+    mut i32 pairCount = 0;
+    for (mut i32 i = 0; i <= 5; i++) {
+        for (mut i32 j = 0; j <= 5; j++) {
             if (i + j == 5) { pairCount++; }
         }
     }
@@ -283,8 +283,8 @@ i32 main() {
     // ---- 66: large for-loop accumulation (stress test) ---------------
     // Sum of squares 1..10 = 385
 
-    i32 sumSq = 0;
-    for (i32 i = 1; i <= 10; i++) {
+    mut i32 sumSq = 0;
+    for (mut i32 i = 1; i <= 10; i++) {
         sumSq += i * i;
     }
     if (sumSq != 385)             { return 66; }
@@ -292,7 +292,7 @@ i32 main() {
     // ---- 67: deeply nested if ----------------------------------------
 
     i32 v = 42;
-    i32 result = 0;
+    mut i32 result = 0;
     if (v > 0) {
         if (v > 10) {
             if (v > 40) {
@@ -319,7 +319,7 @@ i32 main() {
 
     // ---- 70: assignment is an expression (value of assignment) -------
 
-    i32 assigned = 0;
+    mut i32 assigned = 0;
     i32 assignee = (assigned = 99);
     if (assignee != 99)           { return 70; }
     if (assigned  != 99)          { return 71; }

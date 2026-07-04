@@ -4,7 +4,7 @@ i32 main(){
     i32 x = 5;
     f32 y = 1.0;
     f64 z = 0.5;
-    char c = '!';
+    mut char c = '!';
     string variable = "Hello World!";
 
     bool cond = true;

@@ -74,6 +74,7 @@ struct VarDeclExpr {
     std::unique_ptr<Expr> initializer;   // nullptr if absent
     size_t arraySize = 0;                // 0 = scalar; N > 0 = fixed-size array of N elements
     bool   isStatic  = false;            // C-style static local: single persistent global
+    bool   isMut     = false;            // `mut` — reassignable; otherwise const (single-assignment)
 };
 
 struct IndexExpr {
@@ -111,6 +112,7 @@ struct MethodCallExpr {
 struct CastExpr {
     std::unique_ptr<Expr> operand;
     Token                 targetType;   // type keyword token (i32, f32, ptr, …)
+    bool                  isMut = false; // `expr as mut T` — casts to a mutable reference view
 };
 
 // Heap allocation operator: `new ClassName(args)` — allocates a refcounted
@@ -199,6 +201,7 @@ struct ReturnStmt {
 struct ParamDecl {
     Token typeName;
     Token name;
+    bool  isMut = false;   // `mut` — reassignable inside the body; otherwise const
 };
 
 struct FunctionDeclStmt {
@@ -223,6 +226,7 @@ struct ImportStmt {
 struct FieldDecl {
     bool  isPublic  = false;
     bool  isStatic  = false;   // `static T name;` — class-level storage, not per-instance
+    bool  isMut     = false;   // `mut` — reassignable after construction; otherwise const
     Token typeName;   // type keyword token
     Token name;
     // Constant initializer for a static field (`static i32 count = 0;`), run in a
@@ -235,6 +239,7 @@ struct MethodDecl {
     bool                   isConstructor = false;  // true when name == class name
     bool                   isDestructor  = false;   // true for ~ClassName() — no params, no return type
     bool                   isStatic      = false;   // true for `static T method(...)` — no implicit `this`
+    bool                   isMut         = false;   // true for `T method(...) mut` — may mutate `this`
     Token                  returnType;     // for constructors/destructors: class-name token
     Token                  name;
     std::vector<ParamDecl> params;

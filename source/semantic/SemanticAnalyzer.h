@@ -29,6 +29,7 @@ const Token& exprFirstToken(const Expr& expr);
 struct ClassInfo {
     struct Field {
         bool  isPublic = false;
+        bool  isMut    = false; // `mut` — writable after construction; otherwise const
         Type  type;
         int   index    = 0;  // field index in the struct (0-based, declaration order)
         Token decl;          // the field name token, for error reporting
@@ -36,8 +37,10 @@ struct ClassInfo {
     struct Method {
         bool             isPublic  = false;
         bool             isStatic  = false;   // class-level method (no implicit `this`)
+        bool             isMut     = false;   // `T m(...) mut` — may mutate `this`
         Type             returnType;
         std::vector<Type> paramTypes;
+        std::vector<bool> paramMut;           // per-parameter `mut` flag
         Token            decl;     // method name token
     };
     // A static (class-level) field: shared storage, not part of the struct layout.
@@ -88,6 +91,8 @@ private:
     bool                currentClassIsEnum = false; // true while analysing an enum body
     bool                currentMethodIsStatic = false; // true while analysing a static method body
     bool                inEnumConstructor  = false; // true while analysing an enum's constructor body
+    bool                inConstructor      = false; // true while analysing a class's constructor body
+    bool                currentThisMutable = false; // true while analysing a `mut` method / ctor / dtor
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
@@ -131,6 +136,24 @@ private:
     [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);
     [[nodiscard]] Type analyzeCall(const CallExpr& call);
     [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& varDecl);
+    // Effective mutability of a parameter (`mut` flag); see the .cpp for the borrow rules.
+    [[nodiscard]] bool paramIsMutable(const ParamDecl& param, const Type& resolvedType);
+    // Implicit-`this` member resolution: a bare name (not shadowed by a local/param/function)
+    // may refer to a member of the enclosing class. Returns nullptr when not applicable.
+    [[nodiscard]] const ClassInfo::Field* currentInstanceField(const std::string& name) const;
+    [[nodiscard]] const Type*             currentStaticFieldType(const std::string& name) const;
+    [[nodiscard]] const ClassInfo::Method* currentClassMethod(const std::string& name) const;
+    // Validate a `++`/`--` target (local, or implicit-`this` field). Emits an error and
+    // returns false if the target is immutable; returns true otherwise.
+    bool incDecTargetOk(const Token& op, const std::string& name);
+    // True if `expr` denotes a mutable place — a `mut` binding, `this`, a freshly-owned
+    // reference (`new`/call result), or a `mut`-field access chain whose root is mutable.
+    // Used for transitive const (field-write receiver) and the const→mut cast warning.
+    [[nodiscard]] bool exprIsMutablePlace(const Expr& expr);
+    // Emit the const→mut coercion warning when a read-only reference `source` flows into a
+    // `mut` reference target. No-op for non-reference targets, mutable sources, or an
+    // explicit cast (`as mut T`), which is the sanctioned way to silence it.
+    void warnConstToMut(const Token& at, const Expr& source, const Type& targetType);
     // True if `expr` is a compile-time constant (literal, or unary/binary/cast of
     // constants). Used to validate static-local initializers, which run pre-main.
     [[nodiscard]] static bool isConstantExpr(const Expr& expr);
@@ -165,7 +188,8 @@ private:
     void analyzeCallArgs(const std::vector<std::unique_ptr<Expr>>& args,
                          const std::vector<Type>& paramTypes,
                          const Token& callee,
-                         const std::string& context);
+                         const std::string& context,
+                         const std::vector<bool>& paramMut = {});
     // Emit a compile-time out-of-bounds error if `indexExpr` is a constant literal outside [0, arraySize).
     void checkConstantIndexBounds(const Expr& indexExpr, size_t arraySize);
 };

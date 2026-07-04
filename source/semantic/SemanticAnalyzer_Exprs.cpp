@@ -48,9 +48,39 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
     }
 }
 
+const ClassInfo::Field* SemanticAnalyzer::currentInstanceField(const std::string& name) const {
+    if (currentMethodIsStatic || currentClassName.empty()) return nullptr;
+    auto cit = classRegistry.find(currentClassName);
+    if (cit == classRegistry.end()) return nullptr;
+    auto fit = cit->second.fields.find(name);
+    return fit == cit->second.fields.end() ? nullptr : &fit->second;
+}
+
+const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) const {
+    if (currentClassName.empty()) return nullptr;
+    auto cit = classRegistry.find(currentClassName);
+    if (cit == classRegistry.end()) return nullptr;
+    auto sfit = cit->second.staticFields.find(name);
+    return sfit == cit->second.staticFields.end() ? nullptr : &sfit->second.type;
+}
+
+const ClassInfo::Method* SemanticAnalyzer::currentClassMethod(const std::string& name) const {
+    if (currentClassName.empty()) return nullptr;
+    auto cit = classRegistry.find(currentClassName);
+    if (cit == classRegistry.end()) return nullptr;
+    auto mit = cit->second.methods.find(name);
+    return mit == cit->second.methods.end() ? nullptr : &mit->second;
+}
+
 Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
     const Symbol* sym = symbolTable.lookup(identifier.name.lexeme);
     if (!sym) {
+        // Implicit `this`: a bare name may refer to a member of the enclosing class
+        // (lowest priority — only when no local/param/function shadows it).
+        if (const ClassInfo::Field* f = currentInstanceField(identifier.name.lexeme))
+            return f->type;
+        if (const Type* sft = currentStaticFieldType(identifier.name.lexeme))
+            return *sft;
         error(identifier.name, "use of undeclared identifier '" + identifier.name.lexeme + "'");
         return Type{TypeKind::Error};
     }
@@ -65,6 +95,29 @@ Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
         // and does not cascade into spurious "undeclared identifier" errors.
     }
     return sym->type;
+}
+
+bool SemanticAnalyzer::incDecTargetOk(const Token& op, const std::string& name) {
+    if (const Symbol* sym = symbolTable.lookup(name)) {
+        if (sym->kind == Symbol::Kind::Variable && !sym->isMutable) {
+            error(op, "cannot mutate immutable variable '" + name + "'; declare it 'mut' to allow mutation");
+            return false;
+        }
+        return true;
+    }
+    // Implicit `this` field: `++`/`--` always mutates → needs a mut field in a mut method.
+    if (const ClassInfo::Field* f = currentInstanceField(name)) {
+        if (!f->isMut) {
+            error(op, "cannot mutate immutable field '" + name + "'; declare it 'mut'");
+            return false;
+        }
+        if (!currentThisMutable) {
+            error(op, "cannot write to field '" + name + "' in a read-only method; declare the method 'mut'");
+            return false;
+        }
+    }
+    // Static field → mutable; not-a-field → analyzeExpr(operand) already reported it.
+    return true;
 }
 
 Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
@@ -93,7 +146,7 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
             return operandType;
 
         case TokenType::INCREMENT:
-        case TokenType::DECREMENT:
+        case TokenType::DECREMENT: {
             if (!std::holds_alternative<IdentifierExpr>(*unary.operand->node)) {
                 error(unary.operatorToken, "operand of '" + unary.operatorToken.lexeme + "' must be an identifier");
                 return Type{TypeKind::Error};
@@ -103,7 +156,12 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
                       + typeName(operandType));
                 return Type{TypeKind::Error};
             }
+            // '++'/'--' mutate an existing value, so the target must be `mut`.
+            const auto& ident = std::get<IdentifierExpr>(*unary.operand->node);
+            if (!incDecTargetOk(unary.operatorToken, ident.name.lexeme))
+                return Type{TypeKind::Error};
             return operandType;
+        }
 
         default:
             return Type{TypeKind::Error};
@@ -213,6 +271,29 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
 Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     const Symbol* sym = symbolTable.lookup(assign.name.lexeme);
     if (!sym) {
+        // Implicit `this`: a bare name may be a field of the enclosing class.
+        if (const ClassInfo::Field* f = currentInstanceField(assign.name.lexeme)) {
+            if (!f->isMut && !inConstructor) {
+                error(assign.name, "cannot assign to immutable field '" + assign.name.lexeme
+                      + "'; declare it 'mut'");
+                analyzeExpr(*assign.value);
+                return f->type;
+            }
+            if (!currentThisMutable) {
+                error(assign.name, "cannot write to field '" + assign.name.lexeme
+                      + "' in a read-only method; declare the method 'mut'");
+                analyzeExpr(*assign.value);
+                return f->type;
+            }
+            Type rhs = analyzeExpr(*assign.value);
+            checkCast(rhs, f->type, assign.name, "field assignment");
+            return f->type;
+        }
+        if (const Type* sft = currentStaticFieldType(assign.name.lexeme)) {
+            Type rhs = analyzeExpr(*assign.value);
+            checkCast(rhs, *sft, assign.name, "static field assignment");
+            return *sft;
+        }
         error(assign.name, "use of undeclared identifier '" + assign.name.lexeme + "'");
         analyzeExpr(*assign.value);
         return Type{TypeKind::Error};
@@ -223,14 +304,23 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return Type{TypeKind::Error};
     }
 
-    // Object/reference parameters are immutable bindings: you may mutate their
-    // fields (obj.field = ...) but you may not rebind the parameter (obj = ...).
-    // A reference parameter is a borrow, so rebinding it would corrupt refcounts.
+    // Object/reference parameters may not be *rebound* (obj = ...), even when declared
+    // `mut` — a reference parameter is a borrow, so rebinding it would corrupt refcounts.
+    // (`mut` on such a parameter only unlocks writes to the object's mut fields.)
     if (sym->isParameter
         && (sym->type.kind == TypeKind::Object || sym->type.kind == TypeKind::Reference)) {
         std::string kindWord = sym->type.kind == TypeKind::Object ? "object" : "reference";
-        error(assign.name, "cannot reassign " + kindWord + " parameter '" + assign.name.lexeme
-              + "': it is an immutable binding");
+        error(assign.name, "cannot rebind " + kindWord + " parameter '" + assign.name.lexeme
+              + "': it is a borrow, not an owning binding");
+        analyzeExpr(*assign.value);
+        return sym->type;
+    }
+
+    // Const bindings permit exactly one defining assignment: allowed only while the
+    // variable is not yet initialized. `mut` bindings may be reassigned freely.
+    if (!sym->isMutable && sym->isInitialized) {
+        error(assign.name, "cannot reassign immutable variable '" + assign.name.lexeme
+              + "'; declare it 'mut' to allow reassignment");
         analyzeExpr(*assign.value);
         return sym->type;
     }
@@ -238,6 +328,9 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     Type lhsType = sym->type;
     Type rhsType = analyzeExpr(*assign.value);
     checkCast(rhsType, lhsType, assign.name, "assignment");
+    // Rebinding a `mut` reference from a read-only reference is a const→mut coercion.
+    if (sym->isMutable)
+        warnConstToMut(assign.name, *assign.value, lhsType);
     // Any successful assignment makes the variable definitely initialized.
     if (Symbol* mut = symbolTable.lookupMutable(assign.name.lexeme))
         mut->isInitialized = true;
@@ -246,23 +339,48 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
 
 Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundAssign) {
     const Symbol* sym = symbolTable.lookup(compoundAssign.name.lexeme);
-    if (!sym) {
+    Type lhsType;
+    if (sym) {
+        if (sym->kind == Symbol::Kind::Function) {
+            error(compoundAssign.name, "cannot assign to function '" + compoundAssign.name.lexeme + "'");
+            analyzeExpr(*compoundAssign.value);
+            return Type{TypeKind::Error};
+        }
+        // Compound assignment always mutates an existing value, so the target must be `mut`.
+        if (!sym->isMutable) {
+            error(compoundAssign.name, "cannot mutate immutable variable '" + compoundAssign.name.lexeme
+                  + "'; declare it 'mut' to allow mutation");
+            analyzeExpr(*compoundAssign.value);
+            return sym->type;
+        }
+        // Compound assignment reads the variable before writing — check initialization.
+        if (!sym->isInitialized) {
+            error(compoundAssign.name, "variable '" + compoundAssign.name.lexeme
+                  + "' is used before it has been assigned a value");
+        }
+        lhsType = sym->type;
+    } else if (const ClassInfo::Field* f = currentInstanceField(compoundAssign.name.lexeme)) {
+        // Implicit `this.field op= v` — always mutates, so needs a mut field in a mut method.
+        if (!f->isMut) {
+            error(compoundAssign.name, "cannot mutate immutable field '" + compoundAssign.name.lexeme
+                  + "'; declare it 'mut'");
+            analyzeExpr(*compoundAssign.value);
+            return f->type;
+        }
+        if (!currentThisMutable) {
+            error(compoundAssign.name, "cannot write to field '" + compoundAssign.name.lexeme
+                  + "' in a read-only method; declare the method 'mut'");
+            analyzeExpr(*compoundAssign.value);
+            return f->type;
+        }
+        lhsType = f->type;
+    } else if (const Type* sft = currentStaticFieldType(compoundAssign.name.lexeme)) {
+        lhsType = *sft;
+    } else {
         error(compoundAssign.name, "use of undeclared identifier '" + compoundAssign.name.lexeme + "'");
         analyzeExpr(*compoundAssign.value);
         return Type{TypeKind::Error};
     }
-    if (sym->kind == Symbol::Kind::Function) {
-        error(compoundAssign.name, "cannot assign to function '" + compoundAssign.name.lexeme + "'");
-        analyzeExpr(*compoundAssign.value);
-        return Type{TypeKind::Error};
-    }
-    // Compound assignment reads the variable before writing — check initialization.
-    if (!sym->isInitialized) {
-        error(compoundAssign.name, "variable '" + compoundAssign.name.lexeme
-              + "' is used before it has been assigned a value");
-    }
-
-    Type lhsType = sym->type;
     Type rhsType = analyzeExpr(*compoundAssign.value);
 
     if (isError(lhsType) || isError(rhsType)) return Type{TypeKind::Error};
@@ -314,9 +432,12 @@ Type SemanticAnalyzer::analyzePostfix(const PostfixExpr& postfix) {
               + typeName(operandType));
         return Type{TypeKind::Error};
     }
+    // Postfix '++'/'--' mutate an existing value, so the target must be `mut`.
+    const auto& ident = std::get<IdentifierExpr>(*postfix.operand->node);
+    if (!incDecTargetOk(postfix.operatorToken, ident.name.lexeme))
+        return Type{TypeKind::Error};
     // Postfix writes back to the variable — mark as initialized to suppress
     // cascading "uninitialized" errors on subsequent reads.
-    const auto& ident = std::get<IdentifierExpr>(*postfix.operand->node);
     if (Symbol* mut = symbolTable.lookupMutable(ident.name.lexeme))
         mut->isInitialized = true;
     return operandType;
@@ -352,12 +473,38 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
             return makeObjectType(call.callee.lexeme);
         }
         analyzeCallArgs(call.args, ctor.paramTypes, call.callee,
-                        "constructor '" + call.callee.lexeme + "'");
+                        "constructor '" + call.callee.lexeme + "'", ctor.paramMut);
         return makeObjectType(call.callee.lexeme);
     }
 
     const Symbol* sym = symbolTable.lookup(call.callee.lexeme);
     if (!sym) {
+        // Implicit `this`: a bare call may target a method of the enclosing class
+        // (only when no local/parameter/free-function shadows the name).
+        if (const ClassInfo::Method* m = currentClassMethod(call.callee.lexeme)) {
+            if (!m->isStatic && currentMethodIsStatic) {
+                error(call.callee, "cannot call instance method '" + call.callee.lexeme
+                      + "' from a static method");
+                for (const auto& arg : call.args) analyzeExpr(*arg);
+                return m->returnType;
+            }
+            if (m->isMut && !currentThisMutable) {
+                error(call.callee, "cannot call mutating method '" + call.callee.lexeme
+                      + "' on 'this' in a read-only method; declare the calling method 'mut'");
+                for (const auto& arg : call.args) analyzeExpr(*arg);
+                return m->returnType;
+            }
+            if (call.args.size() != m->paramTypes.size()) {
+                error(call.callee, "method '" + call.callee.lexeme + "' expects "
+                      + std::to_string(m->paramTypes.size()) + " argument(s), got "
+                      + std::to_string(call.args.size()));
+                for (const auto& arg : call.args) analyzeExpr(*arg);
+                return m->returnType;
+            }
+            analyzeCallArgs(call.args, m->paramTypes, call.callee,
+                            "method '" + call.callee.lexeme + "'", m->paramMut);
+            return m->returnType;
+        }
         error(call.callee, "undeclared function '" + call.callee.lexeme + "'");
         for (const auto& arg : call.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
@@ -378,7 +525,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     }
 
     analyzeCallArgs(call.args, sym->paramTypes, call.callee,
-                    "'" + call.callee.lexeme + "'");
+                    "'" + call.callee.lexeme + "'", sym->paramMut);
 
     return sym->type;
 }
@@ -445,6 +592,9 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     if (varDecl.arraySize == 0 && varDecl.initializer) {
         Type initializerType = analyzeExpr(*varDecl.initializer);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
+        // Initialising a `mut` reference from a read-only reference is a const→mut coercion.
+        if (varDecl.isMut)
+            warnConstToMut(varDecl.name, *varDecl.initializer, declaredType);
     }
 
     // Decide whether the variable starts as definitely initialized:
@@ -463,7 +613,8 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         varDecl.name,
         {},
         /*isParameter=*/false,
-        /*isInitialized=*/isInit
+        /*isInitialized=*/isInit,
+        /*isMutable=*/varDecl.isMut
     });
 
     return declaredType;
@@ -608,6 +759,48 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
     return field.type;
 }
 
+bool SemanticAnalyzer::exprIsMutablePlace(const Expr& expr) {
+    const auto& node = *expr.node;
+    // `this` is a mutable receiver only inside a `mut` method / ctor / dtor (Rust &mut self).
+    if (std::holds_alternative<ThisExpr>(node))       return currentThisMutable;
+    // Freshly-owned references: `new T(...)` and call/method results.
+    if (std::holds_alternative<NewExpr>(node))        return true;
+    if (std::holds_alternative<CallExpr>(node))       return true;
+    if (std::holds_alternative<MethodCallExpr>(node)) return true;
+    if (std::holds_alternative<IndexExpr>(node))
+        return exprIsMutablePlace(*std::get<IndexExpr>(node).object);
+    if (std::holds_alternative<CastExpr>(node))
+        return std::get<CastExpr>(node).isMut;   // `x as mut T` yields a mutable view
+    if (std::holds_alternative<IdentifierExpr>(node)) {
+        const Symbol* s = symbolTable.lookup(std::get<IdentifierExpr>(node).name.lexeme);
+        // Non-variable identifiers (e.g. class names for statics) are not gated here.
+        return !s || s->kind != Symbol::Kind::Variable || s->isMutable;
+    }
+    if (std::holds_alternative<MemberAccessExpr>(node)) {
+        const auto& ma = std::get<MemberAccessExpr>(node);
+        if (!exprIsMutablePlace(*ma.object)) return false;
+        // A field is a mutable place only if the field itself is `mut`.
+        Type ownerT = analyzeExpr(*ma.object);
+        if (ownerT.kind == TypeKind::Object || ownerT.kind == TypeKind::Reference) {
+            auto cit = classRegistry.find(ownerT.className);
+            if (cit != classRegistry.end()) {
+                auto fit = cit->second.fields.find(ma.field.lexeme);
+                if (fit != cit->second.fields.end()) return fit->second.isMut;
+            }
+        }
+        return true;   // unknown shape → don't over-report
+    }
+    return true;
+}
+
+void SemanticAnalyzer::warnConstToMut(const Token& at, const Expr& source, const Type& targetType) {
+    if (targetType.kind != TypeKind::Reference) return;   // refs only (value copies are independent)
+    if (std::holds_alternative<CastExpr>(*source.node)) return;   // explicit cast silences
+    if (exprIsMutablePlace(source)) return;               // source already grants write access
+    warn(at, "coercing a read-only (const) reference into a 'mut' binding; add an explicit "
+             "'as mut " + typeName(targetType) + "' cast to silence this warning");
+}
+
 Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign) {
     // Static field write through the type name: ClassName::field = value.
     if (std::holds_alternative<IdentifierExpr>(*memberAssign.object->node)) {
@@ -676,6 +869,36 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
             return field.type;
         }
     }
+    // Instance fields are const by default: a non-`mut` field may be written only via
+    // 'this.field' inside the class's own constructor (mirrors the enum-field rule).
+    // Applies whether the instance is a value (`Object`) or a heap reference
+    // (`Reference`); a reference target is never `this`, so it is always gated.
+    if ((objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference)
+        && !field.isMut) {
+        bool isThis = std::holds_alternative<ThisExpr>(*memberAssign.object->node);
+        if (!inConstructor || !isThis) {
+            error(memberAssign.field, "cannot assign to immutable field '" + memberAssign.field.lexeme
+                  + "' of class '" + objectType.className
+                  + "'; declare it 'mut' to allow mutation");
+            analyzeExpr(*memberAssign.value);
+            return field.type;
+        }
+    }
+    // Transitive const: writing any field also requires the *receiver* to be a mutable
+    // place — a `mut` local/borrow, or `this` inside a `mut` method / ctor / dtor.
+    if ((objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference)
+        && !exprIsMutablePlace(*memberAssign.object)) {
+        if (std::holds_alternative<ThisExpr>(*memberAssign.object->node))
+            error(memberAssign.field, "cannot write to field '" + memberAssign.field.lexeme
+                  + "' in a read-only method; declare the method 'mut'");
+        else
+            error(memberAssign.field, "cannot assign to field '" + memberAssign.field.lexeme
+                  + "' through an immutable binding; declare the "
+                  + (objectType.kind == TypeKind::Reference ? std::string("reference") : std::string("variable"))
+                  + " 'mut'");
+        analyzeExpr(*memberAssign.value);
+        return field.type;
+    }
     if (!field.isPublic && currentClassName != objectType.className) {
         warn(memberAssign.field, "field '" + memberAssign.field.lexeme
              + "' is private in class '" + objectType.className + "'");
@@ -719,7 +942,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
                     return sm.returnType;
                 }
                 analyzeCallArgs(methodCall.args, sm.paramTypes, methodCall.method,
-                                "static method '" + methodCall.method.lexeme + "'");
+                                "static method '" + methodCall.method.lexeme + "'", sm.paramMut);
                 return sm.returnType;
             }
         }
@@ -746,6 +969,20 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     }
 
     const ClassInfo::Method& method = methodIt->second;
+    // A `mut` method mutates its receiver, so the receiver must be a mutable place —
+    // a `mut` binding, or `this` inside a `mut` method / ctor / dtor.
+    if (method.isMut
+        && (objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference)
+        && !exprIsMutablePlace(*methodCall.object)) {
+        if (std::holds_alternative<ThisExpr>(*methodCall.object->node))
+            error(methodCall.method, "cannot call mutating method '" + methodCall.method.lexeme
+                  + "' on 'this' in a read-only method; declare the calling method 'mut'");
+        else
+            error(methodCall.method, "cannot call mutating method '" + methodCall.method.lexeme
+                  + "' through an immutable binding; declare it 'mut'");
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return method.returnType;
+    }
     if (!method.isPublic && currentClassName != objectType.className) {
         warn(methodCall.method, "method '" + methodCall.method.lexeme
              + "' is private in class '" + objectType.className + "'");
@@ -760,7 +997,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     }
 
     analyzeCallArgs(methodCall.args, method.paramTypes, methodCall.method,
-                    "method '" + methodCall.method.lexeme + "'");
+                    "method '" + methodCall.method.lexeme + "'", method.paramMut);
     return method.returnType;
 }
 
@@ -868,6 +1105,6 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
     }
 
     analyzeCallArgs(newExpr.args, ctor.paramTypes, newExpr.className,
-                    "constructor '" + className + "'");
+                    "constructor '" + className + "'", ctor.paramMut);
     return makeReferenceType(className);
 }

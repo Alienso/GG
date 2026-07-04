@@ -86,7 +86,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         info.fieldOrder.push_back(fd.name.lexeme);
         // emplace constructs in-place, avoiding copy/move-assignment of Token
         info.fields.emplace(fd.name.lexeme,
-            ClassInfo::Field{fd.isPublic, fieldType, fieldIndex++, fd.name});
+            ClassInfo::Field{fd.isPublic, fd.isMut, fieldType, fieldIndex++, fd.name});
     }
     for (const MethodDecl& md : methods) {
         if (md.isDestructor) {
@@ -106,7 +106,8 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
                 continue;
             }
             info.destructor.emplace(ClassInfo::Method{
-                md.isPublic, /*isStatic=*/false, Type{TypeKind::Void}, std::vector<Type>{}, md.name
+                md.isPublic, /*isStatic=*/false, /*isMut=*/false, Type{TypeKind::Void},
+                std::vector<Type>{}, std::vector<bool>{}, md.name
             });
             continue;
         }
@@ -114,10 +115,14 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             ? Type{TypeKind::Void}
             : resolveTypeToken(md.returnType);
         std::vector<Type> paramTypes;
-        for (const ParamDecl& p : md.params)
+        std::vector<bool> paramMut;
+        for (const ParamDecl& p : md.params) {
             paramTypes.push_back(resolveTypeToken(p.typeName));
+            paramMut.push_back(p.isMut);
+        }
         info.methods.emplace(md.name.lexeme,
-            ClassInfo::Method{md.isPublic, md.isStatic, returnType, std::move(paramTypes), md.name});
+            ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
+                              std::move(paramTypes), std::move(paramMut), md.name});
     }
     return info;
 }
@@ -164,8 +169,11 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
             const auto& function = std::get<FunctionDeclStmt>(*stmt.node);
 
             std::vector<Type> paramTypes;
-            for (const ParamDecl& param : function.params)
+            std::vector<bool> paramMut;
+            for (const ParamDecl& param : function.params) {
                 paramTypes.push_back(resolveTypeToken(param.typeName));
+                paramMut.push_back(param.isMut);
+            }
 
             Symbol sym{
                 Symbol::Kind::Function,
@@ -173,6 +181,7 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                 function.name,
                 std::move(paramTypes)
             };
+            sym.paramMut = std::move(paramMut);
 
             if (!symbolTable.declare(function.name.lexeme, sym)) {
                 const Symbol* prev = symbolTable.lookupCurrentScope(function.name.lexeme);
@@ -297,12 +306,17 @@ void SemanticAnalyzer::analyzeCallArgs(
     const std::vector<std::unique_ptr<Expr>>& args,
     const std::vector<Type>& paramTypes,
     const Token& callee,
-    const std::string& context)
+    const std::string& context,
+    const std::vector<bool>& paramMut)
 {
     for (size_t i = 0; i < args.size(); ++i) {
         Type argType = analyzeExpr(*args[i]);
         checkCast(argType, paramTypes[i], callee,
                   "argument " + std::to_string(i + 1) + " of " + context);
+        // Passing a read-only reference into a `mut` reference parameter is a const→mut
+        // coercion — warn unless the argument is an explicit cast.
+        if (i < paramMut.size() && paramMut[i])
+            warnConstToMut(callee, *args[i], paramTypes[i]);
     }
 }
 

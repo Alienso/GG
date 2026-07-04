@@ -134,6 +134,40 @@ ptr<i32> data = malloc(sizeof(i32) * 16);
 **Scope:** Variables are block-scoped. A new block `{ }` creates a new scope.
 Re-declaring the same name in an inner block shadows the outer one.
 
+### Mutability — `const` by default, `mut` to opt in
+
+Every binding is **immutable by default**. A const variable may be given a value exactly
+once (its *defining* assignment), which may be deferred past the declaration line; any
+*later* reassignment is a compile error.
+
+```gg
+i32 x = 10;
+x = 20;             // ERROR: cannot reassign immutable variable 'x'
+
+mut i32 y = 10;     // `mut` makes it reassignable
+y = 20;             // OK
+y += 5;  y++;       // OK — compound assignment and ++/-- also require `mut`
+
+i32 z;              // deferred init is fine…
+z = 3;              // …this is the one allowed defining assignment
+z = 4;              // ERROR: already initialised
+
+// Split initialisation across branches is allowed for a const (one path each):
+i32 sign;
+if (n < 0) { sign = -1; } else { sign = 1; }
+```
+
+Because loop counters and accumulators are mutated, they must be `mut`:
+
+```gg
+mut i32 total = 0;
+for (mut i32 i = 0; i < 10; i++) { total = total + i; }
+```
+
+`mut` may be combined with `static` in either order (`mut static` / `static mut`).
+Array/pointer **element** writes (`arr[i] = v`) are not gated by `mut` — only the binding
+itself is (you cannot rebind the array variable regardless).
+
 ---
 
 ## 3. Operators
@@ -228,6 +262,23 @@ Allowed cast directions:
 
 **Cannot cast:** to/from `void`, or between unrelated class types.
 
+### Mutability coercions (`as mut T`)
+
+Mutability travels with **references**. Coercing a read-only (const) reference into a `mut`
+binding — at a `mut Point&` initialisation/reassignment, or when passing a const reference to
+a `mut Point&` parameter — is allowed but **emits a warning**, because it silently grants
+write access to something borrowed read-only:
+
+```gg
+Point& b = new Point(1);
+mut Point& a = b;              // WARNING: coercing a read-only reference into a 'mut' binding
+mut Point& c = b as mut Point&;   // OK — the explicit `as mut` cast acknowledges it, no warning
+```
+
+An explicit cast is the only way to silence the warning. Going the safe direction — a `mut`
+reference used where a read-only `Point&` is expected — is always silent. Value types are
+copied, so their mutability is chosen independently and never triggers this warning.
+
 ---
 
 ## 5. Control flow
@@ -306,6 +357,34 @@ void bump(Point& p) {
 }
 ```
 
+### Parameter mutability
+Parameters are **const by default**, like locals. A primitive parameter that the body
+reassigns must be declared `mut`:
+
+```gg
+i32 countdown(mut i32 n) {
+    mut i32 steps = 0;
+    while (n > 0) { n--; steps++; }   // both `n` and `steps` are `mut`
+    return steps;
+}
+```
+
+Reference parameters come in two flavours (a read-only borrow vs a mutable borrow):
+
+```gg
+void readOnly(Point& p)  { i32 a = p.x; }   // const borrow — may read, may NOT write fields
+void mutate(mut Point& p) { p.x = 5; }       // mutable borrow — may write the object's mut fields
+```
+
+- `Point&` (const borrow) — you may read the object and call its methods, but you may **not**
+  write its fields (transitive const, see §8). Passing an object to a `Point&` parameter is
+  the usual read-only case.
+- `mut Point&` (mutable borrow) — you may additionally write the object's `mut` fields.
+- Neither form may be **rebound** (`p = other`) — a reference parameter is a borrow, not an
+  owning binding, so rebinding it would corrupt the refcount.
+- Passing a read-only (const) reference into a `mut` reference parameter is a **const→mut
+  coercion** and produces a warning (see §4).
+
 ### Calling conventions
 - Primitive types pass by value.
 - `ClassName&` passes the heap pointer by value (a borrow — no extra retain/release at the call site).
@@ -346,9 +425,9 @@ block for implementing dynamic containers. See §9 for the full memory model.
 ### Declaration
 ```gg
 class Point {
-    f32 x;              // public by default — readable/writable from anywhere
-    f32 y;
-    private i32 id;     // private field — accessible only within this class's methods
+    mut f32 x;          // `mut` fields — writable after construction (e.g. by scale())
+    mut f32 y;
+    private i32 id;     // const by default: set in the ctor, never written again
 
     // Constructor — name matches class name, no return type
     Point(f32 x, f32 y) {
@@ -366,13 +445,33 @@ class Point {
         return this.x * this.x + this.y * this.y;
     }
 
-    // Void method
-    void scale(f32 factor) {
-        this.x = this.x * factor;
-        this.y = this.y * factor;
+    // Void method — mutates fields, so it is a `mut` method
+    void scale(f32 factor) mut {
+        x = x * factor;   // implicit `this` — same as this.x = this.x * factor
+        y = y * factor;
     }
 }
 ```
+
+### Implicit `this` — members without `this.`
+Inside a method you may refer to a field or method of the enclosing class by its **bare
+name** — `x` means `this.x`, `inc()` means `this.inc()`. Name resolution gives class members
+the **lowest priority**: a local variable, parameter, or free function of the same name
+shadows the member.
+
+```gg
+class Point {
+    mut i32 x;
+    i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }   // `x`/`y` are the fields (no local shadows them)
+    i32 shift(i32 x) { return x + y; }        // `x` = the parameter; `y` = the field
+}
+```
+
+The usual rules still apply through the implicit `this`: a bare write obeys field mutability
+(`x = 5` needs `x` to be a `mut` field and the method to be `mut`), and a bare `foo()` call to
+a `mut` method requires a `mut` receiver. `this.x` remains valid and is required when a local
+deliberately shadows the field.
 
 ### Using classes
 ```gg
@@ -403,8 +502,9 @@ Point& r = new Point(1.0, 2.0);  // r is a heap reference
 Point v = r;           // v is a fresh stack copy; mutating v.x does not affect r.x
 
 // ref = ref  →  rebind (release old target, retain new; no copy)
+// The variable being rebound must be `mut` (reassigning a binding).
 Point& r2 = new Point(9.0, 9.0);
-Point& s = r;          // s and r share the same heap object; refcount → 2
+mut Point& s = r;      // s and r share the same heap object; refcount → 2
 s = r2;                // s releases r, binds to r2; r's refcount drops but r stays alive
 
 // clone value to heap  →  new ClassName(value) produces a ClassName&
@@ -419,6 +519,65 @@ r.x = 99.0;     // mutates the heap object through a reference
 - Members are **public by default** — accessible from anywhere.
 - Prefix a member with `private` to restrict it to the class's own methods.
 - Accessing a `private` member from outside the class emits a **compile-time warning** but is not an error — the code still compiles and runs.
+
+### Field mutability — `const` by default, `mut` to opt in
+Instance fields are **immutable by default**, just like local variables. A const field may
+be assigned only via `this.field = …` inside the class's **own constructor**; writing it
+anywhere else (another method, or through an instance `obj.field = …`) is a compile error.
+Prefix the field with `mut` to allow writes after construction:
+
+```gg
+class Counter {
+    mut i32 n;          // writable by methods and from outside
+    i32 id;             // const — fixed at construction
+
+    Counter(i32 id) { this.n = 0; this.id = id; }   // both set in the ctor: OK
+    void inc() mut  { this.n = this.n + 1; }         // OK — `mut` method writing a mut field
+    // void bad()   { this.n = 0; }                  // ERROR — non-mut method writing a field
+    // void reid()  { this.id = 7; }                 // ERROR — id is const
+}
+```
+
+`static` fields are always mutable (they never take `mut`). Enum fields are always
+immutable (`mut` is not allowed on them).
+
+**Transitive const.** Writing a `mut` field from *outside* the class also requires the
+**receiver itself to be mutable** — const-ness is transitive (Rust-like), not just per-field:
+
+```gg
+mut Point p(1, 2);   p.x = 5;     // OK — p is a mut binding and x is a mut field
+    Point q(1, 2);   q.x = 5;     // ERROR — q is a const binding, even though x is mut
+```
+
+The same applies through references: a field is writable through `mut Point&` but not through
+a read-only `Point&`. Array and pointer *element* writes (`a[i] = v`) are never gated — only
+the binding is.
+
+### Method mutability — `mut` methods (Rust `&mut self`)
+A method that mutates the receiver must be marked with a trailing `mut` (after the parameter
+list). This is GG's `&mut self` / `&self` distinction:
+
+```gg
+class Counter {
+    mut i32 n;
+    Counter()      { this.n = 0; }
+    void inc() mut { this.n = this.n + 1; }   // mutates `this` → must be `mut`
+    i32  get()     { return this.n; }         // read-only → no `mut`
+}
+
+mut Counter a;  a.inc();   // OK — `a` is a mut binding
+    Counter b;  b.inc();   // ERROR — inc() is a mut method; `b` is a const binding
+    Counter c;  c.get();   // OK — get() is read-only, callable on any binding
+```
+
+Rules:
+- Inside a **non-`mut`** method, `this` is read-only: writing `this.field` or calling a `mut`
+  method on `this` is an error.
+- A **`mut`** method may write `this`'s `mut` fields and call other `mut` methods on `this`.
+- Calling a `mut` method **requires a mutable receiver** (a `mut` binding, or `this` inside a
+  `mut` method). Read-only methods can be called on any receiver.
+- **Constructors and destructors** are implicitly mut-context (they may mutate `this` and call
+  `mut` methods without being marked). `static` and `enum` methods **cannot** be `mut`.
 
 ### Rules & restrictions
 - **One constructor per class** — constructor overloading is not supported.
@@ -761,7 +920,7 @@ Attempting them will produce a compile error (or will simply not parse).
 | Inheritance / subclassing | No `extends` or base classes |
 | Virtual methods / interfaces | No dynamic dispatch; no vtable |
 | Constructor overloading | At most one constructor per class |
-| `const` members | No `const` keyword; static fields and locals are always mutable |
+| `const`-qualified *types* | There is no `const T` type qualifier; immutability is a property of the *binding* (`mut` opts out), not the type. See §2/§8 for const-by-default. |
 | File-scope / internal linkage for statics | Static fields keep external linkage; no `private`-style linkage control |
 | Access modifiers beyond `private` | No `public` keyword, no `protected`; `private` is advisory (warning only) |
 | Explicit `this` parameter | `this` is implicit; cannot be renamed or captured |

@@ -11,15 +11,15 @@
 // Expected result: exit code 0
 
 class Node {
-    i32   val;
-    Node& next;                 // self-referential reference field
+    mut i32   val;
+    mut Node& next;                 // self-referential reference field
     Node(i32 v) { this.val = v; }
 }
 
 i32 main() {
 
     // ---- build a 3-element chain -------------------------------------
-    Node& a = new Node(1);
+    mut Node& a = new Node(1);
     a.next = new Node(2);
     a.next.next = new Node(3);
 

@@ -357,14 +357,14 @@ TEST_CASE("Static - local var parses with isStatic flag", "[static][parser]") {
 
 TEST_CASE("Static - local with constant initializer type-checks", "[static][semantic]") {
     auto result = analyzeString(R"(
-        i32 next() { static i32 c = 0; c = c + 1; return c; }
+        i32 next() { static mut i32 c = 0; c = c + 1; return c; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Static - local with no initializer is allowed (zero-init)", "[static][semantic]") {
     auto result = analyzeString(R"(
-        i32 next() { static i32 c; c = c + 1; return c; }
+        i32 next() { static mut i32 c; c = c + 1; return c; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -399,7 +399,7 @@ TEST_CASE("Static - non-primitive static local is an error", "[static][semantic]
 
 TEST_CASE("Static - local is emitted as an internal global", "[static][codegen]") {
     auto ir = codegenString(R"(
-        i32 next() { static i32 counter = 0; counter = counter + 1; return counter; }
+        i32 next() { static mut i32 counter = 0; counter = counter + 1; return counter; }
     )");
     REQUIRE(ir.find("@next$counter = internal global i32 zeroinitializer") != std::string::npos);
 }
@@ -415,7 +415,7 @@ TEST_CASE("Static - local non-zero initializer runs in gg_static_init", "[static
 
 TEST_CASE("Static - local read/write target the global", "[static][codegen]") {
     auto ir = codegenString(R"(
-        i32 next() { static i32 counter = 0; counter = counter + 1; return counter; }
+        i32 next() { static mut i32 counter = 0; counter = counter + 1; return counter; }
     )");
     REQUIRE(ir.find("load i32, ptr @next$counter") != std::string::npos);
     REQUIRE(ir.find("store i32 %") != std::string::npos);
@@ -425,7 +425,7 @@ TEST_CASE("Static - local read/write target the global", "[static][codegen]") {
 
 TEST_CASE("Static - local with no initializer emits no gg_static_init", "[static][codegen]") {
     auto ir = codegenString(R"(
-        i32 next() { static i32 counter; counter = counter + 1; return counter; }
+        i32 next() { static mut i32 counter; counter = counter + 1; return counter; }
     )");
     REQUIRE(ir.find("@next$counter = internal global i32 zeroinitializer") != std::string::npos);
     REQUIRE(ir.find("@gg_static_init") == std::string::npos);
@@ -433,8 +433,8 @@ TEST_CASE("Static - local with no initializer emits no gg_static_init", "[static
 
 TEST_CASE("Static - same-named locals in different functions get distinct globals", "[static][codegen]") {
     auto ir = codegenString(R"(
-        i32 a() { static i32 c = 0; c = c + 1; return c; }
-        i32 b() { static i32 c = 0; c = c + 2; return c; }
+        i32 a() { static mut i32 c = 0; c = c + 1; return c; }
+        i32 b() { static mut i32 c = 0; c = c + 2; return c; }
     )");
     REQUIRE(ir.find("@a$c = internal global i32 zeroinitializer") != std::string::npos);
     REQUIRE(ir.find("@b$c = internal global i32 zeroinitializer") != std::string::npos);
@@ -443,7 +443,7 @@ TEST_CASE("Static - same-named locals in different functions get distinct global
 TEST_CASE("Static - local inside a method mangles with the method prefix", "[static][codegen]") {
     auto ir = codegenString(R"(
         class Counter {
-            i32 tick() { static i32 n = 0; n = n + 1; return n; }
+            i32 tick() { static mut i32 n = 0; n = n + 1; return n; }
         }
     )");
     REQUIRE(ir.find("@Counter_tick$n = internal global i32 zeroinitializer") != std::string::npos);

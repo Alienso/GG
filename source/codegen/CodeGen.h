@@ -158,6 +158,16 @@ private:
     std::string genElementAddress(const Expr& object, const Expr& index,
                                   std::string& elementIrTypeOut);
     std::string genThis(const ThisExpr& thisExpr);
+    // Implicit-`this` member access: `name` is a field (or static field) of the current
+    // class, referenced without an explicit `this.`. Returns the loaded value, or ""
+    // when `name` is not a member of the current class (caller falls back to "0").
+    std::string genImplicitFieldLoad(const std::string& name);
+    // GEP pointer for an implicit-`this` instance field, or "" if not such a field.
+    std::string genImplicitFieldPtr(const std::string& name, Type& fieldTypeOut);
+    // Resolve a bare name to its storage pointer + type for an assignment target: a local
+    // (allocaMap), a static field global, or an implicit-`this` instance field GEP.
+    // Returns false when the name is none of these.
+    bool resolveAssignTarget(const std::string& name, std::string& ptrOut, Type& typeOut);
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);

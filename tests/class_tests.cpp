@@ -263,9 +263,9 @@ TEST_CASE("Class - zero-argument constructor call is valid when no constructor d
 TEST_CASE("Class - field type mismatch in assignment is an error", "[class][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        class P { i32 x; }
+        class P { mut i32 x; }
         void main() {
-            P p;
+            mut P p;
             p.x = "hello";
         }
     )");
@@ -525,8 +525,8 @@ TEST_CASE("ObjectParam - a raw value-object parameter is rejected", "[class][sem
 
 TEST_CASE("ObjectParam - a reference parameter is accepted", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
-        class Point { f32 x; f32 y; }
-        void use(Point& p) { p.x = 1.0; }
+        class Point { mut f32 x; f32 y; }
+        void use(mut Point& p) { p.x = 1.0; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -550,7 +550,7 @@ TEST_CASE("ObjectParam - passing a raw value object as an argument is rejected",
 
 TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class][codegen][byref]") {
     std::string ir = codegenString(R"(
-        void use(i32 n) { n = n + 1; }
+        void use(mut i32 n) { n = n + 1; }
     )");
     REQUIRE(ir.find("define void @use(i32 %n)") != std::string::npos);
     REQUIRE(ir.find("%n.addr = alloca i32")      != std::string::npos);
@@ -559,7 +559,7 @@ TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class
 
 TEST_CASE("ObjectParam - reassigning a basic-type parameter is still allowed", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
-        void use(i32 n) { n = 5; }
+        void use(mut i32 n) { n = 5; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -747,7 +747,7 @@ TEST_CASE("Refcount - reference reassignment releases old and retains new", "[ne
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
         void main() {
-            Point& a = new Point(1);
+            mut Point& a = new Point(1);
             Point& b = new Point(2);
             a = b;
         }
@@ -760,7 +760,7 @@ TEST_CASE("Refcount - reassigning a reference to 'new' does not retain", "[new][
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
         void main() {
-            Point& a = new Point(1);
+            mut Point& a = new Point(1);
             a = new Point(2);
         }
     )");
@@ -823,9 +823,9 @@ TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[ref
 
 TEST_CASE("RefField - assigning a reference field retains new and releases old", "[reffield][codegen]") {
     auto ir = codegenString(R"(
-        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } }
+        class Node { i32 v; mut Node& next; Node(i32 x){ this.v=x; } }
         void main() {
-            Node& a = new Node(1);
+            mut Node& a = new Node(1);
             Node& b = new Node(2);
             a.next = b;
         }
@@ -880,7 +880,7 @@ TEST_CASE("Clone - copy constructor type-checks", "[clone][semantic]") {
 TEST_CASE("Clone - value-object assignment deep-copies via clone", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point p(1); Point q(2); q = p; }
+        void main() { Point p(1); mut Point q(2); q = p; }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
 }
@@ -896,7 +896,7 @@ TEST_CASE("Clone - value copy-initialisation uses clone", "[clone][codegen]") {
 TEST_CASE("Clone - value = reference derefs and clones", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& r = new Point(5); Point v(0); v = r; }
+        void main() { Point& r = new Point(5); mut Point v(0); v = r; }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
 }

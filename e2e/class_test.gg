@@ -14,8 +14,8 @@
 // ============================================================
 
 class Point {
-    f32 x;
-    f32 y;
+    mut f32 x;
+    mut f32 y;
 
     Point(f32 x, f32 y) {
         this.x = x;
@@ -25,8 +25,8 @@ class Point {
     f32 getX() { return this.x; }
     f32 getY() { return this.y; }
 
-    void setX(f32 v) { this.x = v; }
-    void setY(f32 v) { this.y = v; }
+    void setX(f32 v) mut { this.x = v; }
+    void setY(f32 v) mut { this.y = v; }
 
     // x² + y²
     f32 squaredLen() {
@@ -46,21 +46,21 @@ class Point {
 // ============================================================
 
 class Counter {
-    i32 count;
+    mut i32 count;
 
     Counter(i32 n) {
         this.count = n;
     }
 
-    void increment() {
+    void increment() mut {
         this.count = this.count + 1;
     }
 
-    void decrement() {
+    void decrement() mut {
         this.count = this.count - 1;
     }
 
-    void addN(i32 n) {
+    void addN(i32 n) mut {
         this.count = this.count + n;
     }
 
@@ -83,7 +83,7 @@ class Counter {
 // ============================================================
 
 class Box {
-    private i32 value;
+    private mut i32 value;
 
     Box(i32 v) {
         this.value = v;
@@ -93,11 +93,11 @@ class Box {
         return this.value;
     }
 
-    void set(i32 v) {
+    void set(i32 v) mut {
         this.value = v;
     }
 
-    void doubleIt() {
+    void doubleIt() mut {
         this.value = this.value * 2;
     }
 }
@@ -107,7 +107,7 @@ class Box {
 // ============================================================
 
 class Flag {
-    bool active;
+    mut bool active;
 
     Flag(bool b) {
         this.active = b;
@@ -117,7 +117,7 @@ class Flag {
         return this.active;
     }
 
-    void toggle() {
+    void toggle() mut {
         this.active = !this.active;
     }
 }
@@ -128,15 +128,15 @@ class Flag {
 // ============================================================
 
 class Accumulator {
-    i32 steps;
-    f64 total;
+    mut i32 steps;
+    mut f64 total;
 
     Accumulator(i32 s, f64 t) {
         this.steps = s;
         this.total = t;
     }
 
-    void add(f64 v) {
+    void add(f64 v) mut {
         this.steps = this.steps + 1;
         this.total = this.total + v;
     }
@@ -160,7 +160,7 @@ i32 main() {
     if (zero.y != 0.0) { return 2; }
 
     // 3-4: Constructor sets both fields
-    Point p(3.0, 4.0);
+    mut Point p(3.0, 4.0);
     if (p.x != 3.0)    { return 3; }
     if (p.y != 4.0)    { return 4; }
 
@@ -183,7 +183,7 @@ i32 main() {
     if (p.twiceSquaredLen() != 50.0) { return 10; }
 
     // 11-12: Two independent instances have separate state
-    Point a(1.0, 2.0);
+    mut Point a(1.0, 2.0);
     Point b(5.0, 6.0);
     if (a.x != 1.0)    { return 11; }
     if (b.x != 5.0)    { return 12; }
@@ -199,7 +199,7 @@ i32 main() {
     if (p.x != 3.0)    { return 16; }  // x unchanged
 
     // 17-18: Direct field arithmetic without going through a method
-    Point arith(3.0, 4.0);
+    mut Point arith(3.0, 4.0);
     f32 manualLen = arith.x * arith.x + arith.y * arith.y;
     if (manualLen != 25.0)   { return 17; }
 
@@ -210,7 +210,7 @@ i32 main() {
     // ==== Counter =============================================================
 
     // 19: Constructor with initial value
-    Counter c(0);
+    mut Counter c(0);
     if (c.get() != 0)  { return 19; }
 
     // 20-21: increment
@@ -242,14 +242,14 @@ i32 main() {
     if (d.doubled() != 14)     { return 27; }
 
     // 28: Counter in a for loop — sum 1+2+3+4+5 = 15
-    Counter sumC(0);
-    for (i32 i = 1; i <= 5; i++) {
+    mut Counter sumC(0);
+    for (mut i32 i = 1; i <= 5; i++) {
         sumC.addN(i);
     }
     if (sumC.get() != 15)      { return 28; }
 
     // 29: Counter as a while-loop condition — count down to zero
-    Counter wc(5);
+    mut Counter wc(5);
     while (wc.get() > 0) {
         wc.decrement();
     }
@@ -257,8 +257,8 @@ i32 main() {
 
     // 30: Fresh objects created inside a loop accumulate correctly
     //     Loop squares:  1² + 2² + 3² + 4² = 1+4+9+16 = 30
-    Counter loopSum(0);
-    for (i32 i = 1; i <= 4; i++) {
+    mut Counter loopSum(0);
+    for (mut i32 i = 1; i <= 4; i++) {
         Counter temp(i * i);
         loopSum.addN(temp.get());
     }
@@ -267,7 +267,7 @@ i32 main() {
     // ==== Box =================================================================
 
     // 31: Private field accessible through getter
-    Box box(42);
+    mut Box box(42);
     if (box.get() != 42)       { return 31; }
 
     // 32: set() replaces private field value
@@ -285,7 +285,7 @@ i32 main() {
     if (box.get() != 20)       { return 34; }
 
     // 35: Two independent Box instances
-    Box box1(3);
+    mut Box box1(3);
     Box box2(7);
     box1.doubleIt();
     if (box1.get() != 6)       { return 35; }
@@ -294,7 +294,7 @@ i32 main() {
     // ==== Flag ================================================================
 
     // 37: Constructor with true sets active field
-    Flag flag(true);
+    mut Flag flag(true);
     if (!flag.isActive())      { return 37; }
 
     // 38: Direct read of bool field
@@ -309,7 +309,7 @@ i32 main() {
     if (!flag.isActive())      { return 40; }
 
     // 41: Constructor with false
-    Flag flag2(false);
+    mut Flag flag2(false);
     if (flag2.active)          { return 41; }
 
     // 42: toggle a false flag → true
@@ -319,7 +319,7 @@ i32 main() {
     // ==== Accumulator (mixed i32 + f64 fields) ================================
 
     // 43: Constructor sets both fields
-    Accumulator acc(0, 0.0);
+    mut Accumulator acc(0, 0.0);
     if (acc.steps != 0)        { return 43; }
 
     // 44-45: add() increments steps and accumulates total
@@ -333,7 +333,7 @@ i32 main() {
     if (acc.average() != 20.0) { return 46; }
 
     // 47: i32 field and f64 field updated independently in add()
-    Accumulator acc2(1, 100.0);
+    mut Accumulator acc2(1, 100.0);
     acc2.add(50.0);
     if (acc2.steps != 2)       { return 47; }
     if (acc2.total != 150.0)   { return 48; }

@@ -12,8 +12,8 @@ i32 factorial(i32 n) {
 }
 
 i32 sumTo(i32 n) {
-    i32 total = 0;
-    for (i32 i = 1; i <= n; i++) {
+    mut i32 total = 0;
+    for (mut i32 i = 1; i <= n; i++) {
         total = total + i;
     }
     return total;

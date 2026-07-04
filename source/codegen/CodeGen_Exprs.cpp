@@ -183,9 +183,33 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
 
 // ---- Identifier ----
 
+// Load an implicit-`this` member (`name` without an explicit `this.`). Static field →
+// load the global; instance field → GEP on `this` + load. Returns "" if not a member.
+std::string CodeGen::genImplicitFieldLoad(const std::string& name) {
+    if (const Type* sft = findStaticField(currentClassName_, name))
+        return emitLoad(irTypeName(*sft), "@" + currentClassName_ + "$" + name);
+    Type fieldType;
+    std::string gep = genImplicitFieldPtr(name, fieldType);
+    if (gep.empty()) return "";
+    return emitLoad(irTypeName(fieldType), gep);
+}
+
+std::string CodeGen::genImplicitFieldPtr(const std::string& name, Type& fieldTypeOut) {
+    auto thisIt = allocaMap.find("this");
+    if (thisIt == allocaMap.end() || currentClassName_.empty()) return "";
+    auto [gep, ft] = resolveFieldGEP(thisIt->second, currentClassName_, name);
+    if (ft.kind == TypeKind::Error) return "";
+    fieldTypeOut = ft;
+    return gep;
+}
+
 std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
     auto allocaIt  = allocaMap.find(identifier.name.lexeme);
-    if (allocaIt == allocaMap.end()) return "0";  // undefined — semantic pass should catch this
+    if (allocaIt == allocaMap.end()) {
+        // Implicit `this`: bare reference to a field of the enclosing class.
+        std::string loaded = genImplicitFieldLoad(identifier.name.lexeme);
+        return loaded.empty() ? "0" : loaded;
+    }
 
     auto varTypeIt = varTypeMap.find(identifier.name.lexeme);
     if (varTypeIt == varTypeMap.end()) return "0";
@@ -237,12 +261,10 @@ std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) 
         case TokenType::DECREMENT: {
             // Prefix ++/-- : load, modify, store, return new value
             const auto& id       = std::get<IdentifierExpr>(*unary.operand->node);
-            auto        varTypeIt = varTypeMap.find(id.name.lexeme);
-            auto        allocaIt  = allocaMap.find(id.name.lexeme);
-            if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
-            Type        variableType = varTypeIt->second;
+            Type        variableType;
+            std::string ptrName;
+            if (!resolveAssignTarget(id.name.lexeme, ptrName, variableType)) return "0";
             std::string irType       = irTypeName(variableType);
-            std::string ptrName      = allocaIt->second;
             std::string oldValue     = emitLoad(irType, ptrName);
             std::string tempName     = freshTemp();
             std::string one          = isFloat(variableType.kind) ? "1.0" : "1";
@@ -325,14 +347,31 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
 
 // ---- Assign ----
 
-std::string CodeGen::genAssign(const AssignExpr& assign) {
-    auto varTypeIt = varTypeMap.find(assign.name.lexeme);
-    auto allocaIt  = allocaMap.find(assign.name.lexeme);
-    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
+bool CodeGen::resolveAssignTarget(const std::string& name, std::string& ptrOut, Type& typeOut) {
+    auto varTypeIt = varTypeMap.find(name);
+    auto allocaIt  = allocaMap.find(name);
+    if (varTypeIt != varTypeMap.end() && allocaIt != allocaMap.end()) {
+        typeOut = varTypeIt->second;
+        ptrOut  = allocaIt->second;
+        return true;
+    }
+    // Implicit `this`: a static field global, or an instance field GEP on `this`.
+    if (const Type* sft = findStaticField(currentClassName_, name)) {
+        typeOut = *sft;
+        ptrOut  = "@" + currentClassName_ + "$" + name;
+        return true;
+    }
+    Type ft;
+    std::string gep = genImplicitFieldPtr(name, ft);
+    if (!gep.empty()) { typeOut = ft; ptrOut = gep; return true; }
+    return false;
+}
 
-    Type        lhsType = varTypeIt->second;
+std::string CodeGen::genAssign(const AssignExpr& assign) {
+    Type        lhsType;
+    std::string ptrName;
+    if (!resolveAssignTarget(assign.name.lexeme, ptrName, lhsType)) return "0";
     std::string irType  = irTypeName(lhsType);
-    std::string ptrName = allocaIt->second;
 
     // Reference rebind: retain the new target, release the old, then store.
     // retain-before-release keeps self-assignment (a = a) safe.
@@ -375,13 +414,10 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
 // ---- CompoundAssign ----
 
 std::string CodeGen::genCompoundAssign(const CompoundAssignExpr& compoundAssign) {
-    auto varTypeIt = varTypeMap.find(compoundAssign.name.lexeme);
-    auto allocaIt  = allocaMap.find(compoundAssign.name.lexeme);
-    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
-
-    Type        lhsType      = varTypeIt->second;
+    Type        lhsType;
+    std::string ptrName;
+    if (!resolveAssignTarget(compoundAssign.name.lexeme, ptrName, lhsType)) return "0";
     std::string irType       = irTypeName(lhsType);
-    std::string ptrName      = allocaIt->second;
 
     // Load current value
     std::string currentValue = emitLoad(irType, ptrName);
@@ -405,13 +441,10 @@ std::string CodeGen::genCompoundAssign(const CompoundAssignExpr& compoundAssign)
 
 std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
     const auto& id       = std::get<IdentifierExpr>(*postfix.operand->node);
-    auto        varTypeIt = varTypeMap.find(id.name.lexeme);
-    auto        allocaIt  = allocaMap.find(id.name.lexeme);
-    if (varTypeIt == varTypeMap.end() || allocaIt == allocaMap.end()) return "0";
-
-    Type        variableType = varTypeIt->second;
+    Type        variableType;
+    std::string ptrName;
+    if (!resolveAssignTarget(id.name.lexeme, ptrName, variableType)) return "0";
     std::string irType       = irTypeName(variableType);
-    std::string ptrName      = allocaIt->second;
 
     // Load old value (this is the result of the postfix expression)
     std::string oldValue = emitLoad(irType, ptrName);
@@ -433,6 +466,34 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
 std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
     auto funcIt = funcParamTypes.find(call.callee.lexeme);
+
+    // Implicit `this`: a bare call with no matching free function targets a method of the
+    // enclosing class. `@Class_method` (mangled) is present in funcParamTypes for methods.
+    if (funcIt == funcParamTypes.end() && !currentClassName_.empty()) {
+        std::string mangled = currentClassName_ + "_" + call.callee.lexeme;
+        auto mp = funcParamTypes.find(mangled);
+        if (mp != funcParamTypes.end()) {
+            std::string argStr = buildArgString(call.args, &mp->second);
+            auto cgIt = cgClasses_.find(currentClassName_);
+            bool isStatic = cgIt != cgClasses_.end()
+                         && cgIt->second.staticMethods.count(call.callee.lexeme) > 0;
+            std::string fullArgs = argStr;
+            if (!isStatic) {
+                std::string thisPtr = allocaMap.count("this") ? allocaMap["this"] : "null";
+                fullArgs = "ptr " + thisPtr + (argStr.empty() ? "" : ", " + argStr);
+            }
+            if (returnIrType == "void") {
+                emit("call void @" + mangled + "(" + fullArgs + ")");
+                return "";
+            }
+            std::string t = freshTemp();
+            emit("%" + t + " = call " + returnIrType + " @" + mangled + "(" + fullArgs + ")");
+            if (resolvedType.kind == TypeKind::Reference)
+                pendingTemps_.push_back({ "%" + t, resolvedType.className });
+            return "%" + t;
+        }
+    }
+
     const std::vector<Type>* declaredParams =
         funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
 

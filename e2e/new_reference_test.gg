@@ -11,11 +11,11 @@
 // Expected result: exit code 0
 
 class Point {
-    i32 x;
-    i32 y;
+    mut i32 x;
+    mut i32 y;
     Point(i32 a, i32 b) { this.x = a; this.y = b; }
     i32  sum()        { return this.x + this.y; }
-    void scale(i32 k) { this.x = this.x * k; this.y = this.y * k; }
+    void scale(i32 k) mut { this.x = this.x * k; this.y = this.y * k; }
 }
 
 // A class with a destructor — exercises the dtor-on-release path
@@ -30,13 +30,13 @@ class Logged {
 // Borrowed reference (read only).
 i32 readX(Point& q) { return q.x; }
 
-// Borrowed reference (mutates the shared object).
-void bump(Point& q) { q.x = q.x + 1; }
+// Borrowed reference (mutates the shared object — needs a mutable borrow).
+void bump(mut Point& q) { q.x = q.x + 1; }
 
 i32 main() {
 
     // ---- 1-2: new + member read --------------------------------------
-    Point& p = new Point(3, 4);
+    mut Point& p = new Point(3, 4);
     if (p.x != 3) { return 1; }
     if (p.y != 4) { return 2; }
 
@@ -53,7 +53,7 @@ i32 main() {
     if (p.y != 8)  { return 6; }
 
     // ---- 7: pass a reference to a function (borrow, read) ------------
-    Point& q = new Point(7, 0);
+    mut Point& q = new Point(7, 0);
     if (readX(q) != 7) { return 7; }
 
     // ---- 8: mutate through a borrowed reference; visible to caller ----
@@ -66,8 +66,8 @@ i32 main() {
     if (a.sum() + b.sum() != 6) { return 9; }
 
     // ---- 10: new inside a loop — allocate + release each iteration ----
-    i32 total = 0;
-    for (i32 i = 1; i <= 3; i++) {
+    mut i32 total = 0;
+    for (mut i32 i = 1; i <= 3; i++) {
         Point& t = new Point(i, i);
         total = total + t.sum();          // 2 + 4 + 6 = 12
     }                                     // t released at end of each iteration

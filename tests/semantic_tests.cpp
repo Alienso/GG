@@ -557,7 +557,7 @@ TEST_CASE("Uninit - compound-assign on uninitialized variable is an error", "[un
     StderrCapture cap;
     auto result = analyzeString(R"(
         i32 main() {
-            i32 x;
+            mut i32 x;
             x += 1;
             return x;
         }
@@ -620,8 +620,8 @@ TEST_CASE("Uninit - for body does not guarantee initialization", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         i32 main() {
-            i32 x;
-            for (i32 i = 0; i < 10; i++) { x = i; }
+            mut i32 x;
+            for (mut i32 i = 0; i < 10; i++) { x = i; }
             return x;
         }
     )");
@@ -649,8 +649,8 @@ TEST_CASE("Uninit - nested if-else: both paths cover all branches is valid", "[u
 TEST_CASE("Uninit - variable initialized before loop body always read is valid", "[uninit]") {
     auto result = analyzeString(R"(
         i32 main() {
-            i32 sum = 0;
-            for (i32 i = 0; i < 10; i++) { sum = sum + i; }
+            mut i32 sum = 0;
+            for (mut i32 i = 0; i < 10; i++) { sum = sum + i; }
             return sum;
         }
     )");

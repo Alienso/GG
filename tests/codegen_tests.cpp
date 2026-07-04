@@ -62,7 +62,7 @@ TEST_CASE("CodeGen - reading a variable produces load", "[codegen]") {
 TEST_CASE("CodeGen - assignment stores new value", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 x = 1;
+            mut i32 x = 1;
             x = 2;
             return x;
         }
@@ -158,7 +158,7 @@ TEST_CASE("CodeGen - less-than comparison", "[codegen]") {
 TEST_CASE("CodeGen - if statement produces branch labels", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 x = 1;
+            mut i32 x = 1;
             if (x) { x = 2; }
             return x;
         }
@@ -170,7 +170,7 @@ TEST_CASE("CodeGen - if statement produces branch labels", "[codegen]") {
 TEST_CASE("CodeGen - if/else produces else label", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 x = 1;
+            mut i32 x = 1;
             if (x) { x = 2; } else { x = 3; }
             return x;
         }
@@ -183,7 +183,7 @@ TEST_CASE("CodeGen - if/else produces else label", "[codegen]") {
 TEST_CASE("CodeGen - while loop produces cond and body labels", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 i = 0;
+            mut i32 i = 0;
             while (i < 10) { i = i + 1; }
             return i;
         }
@@ -196,8 +196,8 @@ TEST_CASE("CodeGen - while loop produces cond and body labels", "[codegen]") {
 TEST_CASE("CodeGen - for loop produces cond, body, and inc labels", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 s = 0;
-            for (i32 i = 0; i < 5; i++) { s = s + i; }
+            mut i32 s = 0;
+            for (mut i32 i = 0; i < 5; i++) { s = s + i; }
             return s;
         }
     )");
@@ -255,7 +255,7 @@ TEST_CASE("CodeGen - integer to float uses sitofp", "[codegen]") {
 TEST_CASE("CodeGen - postfix increment stores updated value", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 i = 0;
+            mut i32 i = 0;
             i++;
             return i;
         }
@@ -267,7 +267,7 @@ TEST_CASE("CodeGen - postfix increment stores updated value", "[codegen]") {
 TEST_CASE("CodeGen - prefix increment stores updated value", "[codegen]") {
     auto ir = codegenString(R"(
         i32 main() {
-            i32 i = 0;
+            mut i32 i = 0;
             ++i;
             return i;
         }
@@ -472,14 +472,14 @@ TEST_CASE("CodeGen - logical NOT emits xor i1 with true", "[codegen]") {
 
 TEST_CASE("CodeGen - postfix decrement emits sub", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 i = 5; i--; return i; }
+        i32 main() { mut i32 i = 5; i--; return i; }
     )");
     REQUIRE(irContains(ir, "sub i32"));
 }
 
 TEST_CASE("CodeGen - prefix decrement emits sub and stores updated value", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 i = 5; --i; return i; }
+        i32 main() { mut i32 i = 5; --i; return i; }
     )");
     REQUIRE(irContains(ir, "sub i32"));
     REQUIRE(irContains(ir, "store i32"));
@@ -491,7 +491,7 @@ TEST_CASE("CodeGen - prefix decrement emits sub and stores updated value", "[cod
 
 TEST_CASE("CodeGen - += loads, adds, and stores", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 5; x += 3; return x; }
+        i32 main() { mut i32 x = 5; x += 3; return x; }
     )");
     REQUIRE(irContains(ir, "add i32"));
     // Two stores: initializer + compound assignment
@@ -503,28 +503,28 @@ TEST_CASE("CodeGen - += loads, adds, and stores", "[codegen]") {
 
 TEST_CASE("CodeGen - -= loads, subtracts, and stores", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 10; x -= 3; return x; }
+        i32 main() { mut i32 x = 10; x -= 3; return x; }
     )");
     REQUIRE(irContains(ir, "sub i32"));
 }
 
 TEST_CASE("CodeGen - *= loads, multiplies, and stores", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 4; x *= 3; return x; }
+        i32 main() { mut i32 x = 4; x *= 3; return x; }
     )");
     REQUIRE(irContains(ir, "mul i32"));
 }
 
 TEST_CASE("CodeGen - |= uses or instruction", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 5; x |= 2; return x; }
+        i32 main() { mut i32 x = 5; x |= 2; return x; }
     )");
     REQUIRE(irContains(ir, "or i32"));
 }
 
 TEST_CASE("CodeGen - ^= uses xor instruction", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 5; x ^= 3; return x; }
+        i32 main() { mut i32 x = 5; x ^= 3; return x; }
     )");
     REQUIRE(irContains(ir, "xor i32"));
 }
@@ -626,7 +626,7 @@ TEST_CASE("CodeGen - alloca strategy produces no phi nodes", "[codegen]") {
     // All mutable state lives in alloca slots — phi nodes are never needed.
     auto ir = codegenString(R"(
         i32 main() {
-            i32 x = 0;
+            mut i32 x = 0;
             if (x) { x = 1; } else { x = 2; }
             while (x < 10) { x++; }
             return x;
@@ -637,7 +637,7 @@ TEST_CASE("CodeGen - alloca strategy produces no phi nodes", "[codegen]") {
 
 TEST_CASE("CodeGen - conditional branches use br i1", "[codegen]") {
     auto ir = codegenString(R"(
-        i32 main() { i32 x = 1; if (x) { x = 2; } return x; }
+        i32 main() { mut i32 x = 1; if (x) { x = 2; } return x; }
     )");
     REQUIRE(irContains(ir, "br i1"));
 }
@@ -645,7 +645,7 @@ TEST_CASE("CodeGen - conditional branches use br i1", "[codegen]") {
 TEST_CASE("CodeGen - while loop body branches back to condition block", "[codegen]") {
     // The back-edge is what makes it a loop in the CFG.
     auto ir = codegenString(R"(
-        i32 main() { i32 i = 0; while (i < 5) { i++; } return i; }
+        i32 main() { mut i32 i = 0; while (i < 5) { i++; } return i; }
     )");
     REQUIRE(irContains(ir, "br label %while.cond."));
 }
@@ -686,9 +686,9 @@ TEST_CASE("CodeGen - nested loops produce unique label names", "[codegen]") {
     // Each loop gets its own label index so labels never collide.
     auto ir = codegenString(R"(
         i32 main() {
-            i32 s = 0;
-            for (i32 i = 0; i < 3; i++) {
-                for (i32 j = 0; j < 3; j++) {
+            mut i32 s = 0;
+            for (mut i32 i = 0; i < 3; i++) {
+                for (mut i32 j = 0; j < 3; j++) {
                     s = s + 1;
                 }
             }
@@ -756,7 +756,7 @@ TEST_CASE("CodeGen - continue in while jumps back to condition block", "[codegen
 TEST_CASE("CodeGen - break in for loop jumps to merge block", "[codegen]") {
     auto ir = codegenString(R"(
         void foo() {
-            for (i32 i = 0; i < 10; i++) { break; }
+            for (mut i32 i = 0; i < 10; i++) { break; }
         }
     )");
     REQUIRE(irContains(ir, "br label %for.merge."));
@@ -766,7 +766,7 @@ TEST_CASE("CodeGen - continue in for loop jumps to increment block", "[codegen]"
     // In a for loop, continue re-enters at the increment, not the condition.
     auto ir = codegenString(R"(
         void foo() {
-            for (i32 i = 0; i < 10; i++) { continue; }
+            for (mut i32 i = 0; i < 10; i++) { continue; }
         }
     )");
     REQUIRE(irContains(ir, "br label %for.inc."));
@@ -776,8 +776,8 @@ TEST_CASE("CodeGen - nested loops break targets innermost merge", "[codegen]") {
     // The inner break must jump to for.merge.2, not for.merge.1.
     auto ir = codegenString(R"(
         void foo() {
-            for (i32 i = 0; i < 3; i++) {
-                for (i32 j = 0; j < 3; j++) {
+            for (mut i32 i = 0; i < 3; i++) {
+                for (mut i32 j = 0; j < 3; j++) {
                     break;
                 }
             }
@@ -1064,8 +1064,8 @@ TEST_CASE("Generics - generic class type-checks", "[generics][semantic]") {
 
 TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Node<T> { T value; Node<T>& next; Node(T v){ this.value=v; } }
-        void main() { Node<i32>& n = new Node<i32>(1); n.next = new Node<i32>(2); }
+        class Node<T> { T value; mut Node<T>& next; Node(T v){ this.value=v; } }
+        void main() { mut Node<i32>& n = new Node<i32>(1); n.next = new Node<i32>(2); }
     )");
     REQUIRE(irContains(ir, "%Node$i32 = type { i32, ptr }"));
     REQUIRE(irContains(ir, "define void @Node$i32_dtor(ptr %self)"));
@@ -1151,10 +1151,10 @@ TEST_CASE("Generics - '&' after '>>' binds to the outer type, not the argument",
     // argument is the value type Box<i32> (not Box<i32>&).
     auto r = analyzeString(R"(
         class Box<T> { T value; Box(T v){ this.value=v; } }
-        class Holder<T> { T& item; }
+        class Holder<T> { mut T& item; }
         void main() {
             Box<i32>& b = new Box<i32>(1);
-            Holder<Box<i32>>& h = new Holder<Box<i32>>();
+            mut Holder<Box<i32>>& h = new Holder<Box<i32>>();
             h.item = b;
         }
     )");

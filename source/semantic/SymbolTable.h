@@ -20,6 +20,8 @@ struct Symbol {
     std::vector<Type> paramTypes;       // non-empty for Function symbols only
     bool              isParameter    = false; // true for function/method parameters (object params are immutable references)
     bool              isInitialized  = false; // true once the variable has been definitely assigned a value
+    bool              isMutable      = false; // `mut` — reassignable; otherwise const (single-assignment)
+    std::vector<bool> paramMut     = {};      // per-parameter `mut` flag (Function symbols only)
 };
 
 class SymbolTable {

@@ -14,14 +14,14 @@ extern void free(ptr p);
 
 class IntVec {
     ptr<i32> data;
-    i32 len;
+    mut i32 len;
 
     IntVec(i32 capacity) {
         this.data = malloc(sizeof(i32) * capacity);
         this.len  = 0;
     }
 
-    void push(i32 v) {
+    void push(i32 v) mut {
         this.data[this.len] = v;
         this.len = this.len + 1;
     }
@@ -36,7 +36,7 @@ class IntVec {
 }
 
 i32 main() {
-    IntVec v(8);
+    mut IntVec v(8);
     v.push(10);
     v.push(20);
     v.push(30);

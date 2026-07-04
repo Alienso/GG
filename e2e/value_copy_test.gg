@@ -11,16 +11,16 @@
 // Expected result: exit code 0
 
 class Point {
-    i32 x;
-    i32 y;
+    mut i32 x;
+    mut i32 y;
     Point(i32 a, i32 b) { this.x = a; this.y = b; }
 }
 
 i32 main() {
 
     // ---- value = value : deep copy, independent --------------------
-    Point p(1, 2);
-    Point q(9, 9);
+    mut Point p(1, 2);
+    mut Point q(9, 9);
     q = p;
     p.x = 100;
     if (q.x != 1) { return 1; }
@@ -33,8 +33,8 @@ i32 main() {
     if (r.x != 100) { return 4; }      // r is independent of p
 
     // ---- value = ref : deref + clone -------------------------------
-    Point& heap = new Point(5, 6);
-    Point v(0, 0);
+    mut Point& heap = new Point(5, 6);
+    mut Point v(0, 0);
     v = heap;
     if (v.x != 5) { return 5; }
     if (v.y != 6) { return 6; }
@@ -42,7 +42,7 @@ i32 main() {
     if (v.x != 5) { return 7; }        // ... must not affect the snapshot
 
     // ---- copy initialisation from a reference ----------------------
-    Point w = heap;                    // heap.x is now 500
+    mut Point w = heap;                // heap.x is now 500
     if (w.x != 500) { return 8; }
 
     // ---- clone-to-heap copy constructor ----------------------------

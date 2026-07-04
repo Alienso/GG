@@ -521,10 +521,7 @@ Stmt Parser::parseExternFuncDecl(const Token& keyword) {
     std::vector<ParamDecl> params;
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
-            if (!isTypeName()) throw error(peek(), "expected parameter type");
-            Token paramType = consumeType();
-            Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
-            params.push_back(ParamDecl{ paramType, paramName });
+            params.push_back(parseParam());
         } while (match({ TokenType::COMMA }));
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
@@ -539,16 +536,21 @@ Stmt Parser::parseImportStmt(const Token& keyword) {
     return makeStmt(ImportStmt{ keyword, path });
 }
 
+ParamDecl Parser::parseParam() {
+    bool isMut = match({ TokenType::MUT });
+    if (!isTypeName()) throw error(peek(), "expected parameter type");
+    Token paramType = consumeType();
+    Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
+    return ParamDecl{ paramType, paramName, isMut };
+}
+
 Stmt Parser::parseFunctionDecl(const Token& returnType, const Token& name) {
     consume(TokenType::LEFT_PAREN, "expected '(' after function name");
 
     std::vector<ParamDecl> params;
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
-            if (!isTypeName()) throw error(peek(), "expected parameter type");
-            Token paramType = consumeType();
-            Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
-            params.push_back(ParamDecl{ paramType, paramName });
+            params.push_back(parseParam());
         } while (match({ TokenType::COMMA }));
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
@@ -567,7 +569,7 @@ Stmt Parser::parseClassDecl() {
 
     std::deque<FieldDecl> fields;
     std::deque<MethodDecl> methods;
-    parseMemberList(name, fields, methods, /*allowDestructor=*/true);
+    parseMemberList(name, fields, methods, /*allowDestructor=*/true, /*isEnum=*/false);
 
     consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
     return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
@@ -601,7 +603,7 @@ Stmt Parser::parseEnumDecl() {
     // Parse a destructor if present so the semantic analyser can reject it with a
     // clear "enums cannot declare a destructor" diagnostic (rather than a generic
     // parse error). allowDestructor=true here; the rejection happens in semantics.
-    parseMemberList(name, fields, methods, /*allowDestructor=*/true);
+    parseMemberList(name, fields, methods, /*allowDestructor=*/true, /*isEnum=*/true);
 
     consume(TokenType::RIGHT_BRACE, "expected '}' after enum body");
     return makeStmt(EnumDeclStmt{ name, std::move(variants), std::move(fields), std::move(methods) });
@@ -610,17 +612,23 @@ Stmt Parser::parseEnumDecl() {
 void Parser::parseMemberList(const Token& name,
                              std::deque<FieldDecl>& fields,
                              std::deque<MethodDecl>& methods,
-                             bool allowDestructor) {
+                             bool allowDestructor,
+                             bool isEnum) {
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
-        // Members are public by default; 'private' opts out. `static` (in either
-        // order relative to private) marks a class-level field.
+        // Members are public by default; 'private' opts out. `static` marks a
+        // class-level field; `mut` marks a reassignable (non-const) field. All
+        // three may appear in any order.
         bool isPublic = true;
         bool isStatic = false;
+        bool isMut    = false;
         for (;;) {
             if (match({ TokenType::PRIVATE })) { isPublic = false; continue; }
             if (match({ TokenType::STATIC  })) { isStatic = true;  continue; }
+            if (match({ TokenType::MUT     })) { isMut    = true;  continue; }
             break;
         }
+        if (isMut && isEnum)
+            throw error(previous(), "enum fields are always immutable; 'mut' is not allowed");
 
         // Destructor: ~ClassName()
         if (allowDestructor
@@ -643,7 +651,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/true, /*isStatic=*/false,
-                dtorName, dtorName, {}, std::move(dtorBody)
+                /*isMut=*/false, dtorName, dtorName, {}, std::move(dtorBody)
             });
             continue;
         }
@@ -657,10 +665,7 @@ void Parser::parseMemberList(const Token& name,
             std::vector<ParamDecl> params;
             if (!check(TokenType::RIGHT_PAREN)) {
                 do {
-                    if (!isTypeName()) throw error(peek(), "expected parameter type");
-                    Token paramType = consumeType();
-                    Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
-                    params.push_back(ParamDecl{ paramType, paramName });
+                    params.push_back(parseParam());
                 } while (match({ TokenType::COMMA }));
             }
             consume(TokenType::RIGHT_PAREN, "expected ')' after constructor parameters");
@@ -672,6 +677,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/true, /*isDestructor=*/false, /*isStatic=*/false,
+                /*isMut=*/false,
                 ctorName,   // returnType token = class name token (no actual return type)
                 ctorName,   // name token
                 std::move(params), std::move(body)
@@ -686,17 +692,22 @@ void Parser::parseMemberList(const Token& name,
 
         if (check(TokenType::LEFT_PAREN)) {
             // Method (static methods carry no implicit `this`).
+            if (isMut)
+                throw error(memberName, "'mut' is not allowed on methods");
             consume(TokenType::LEFT_PAREN, "");
             std::vector<ParamDecl> params;
             if (!check(TokenType::RIGHT_PAREN)) {
                 do {
-                    if (!isTypeName()) throw error(peek(), "expected parameter type");
-                    Token paramType = consumeType();
-                    Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
-                    params.push_back(ParamDecl{ paramType, paramName });
+                    params.push_back(parseParam());
                 } while (match({ TokenType::COMMA }));
             }
             consume(TokenType::RIGHT_PAREN, "expected ')' after method parameters");
+            // Trailing `mut` marks a method that may mutate `this` (Rust-like &mut self).
+            bool methodMut = match({ TokenType::MUT });
+            if (methodMut && isStatic)
+                throw error(memberName, "static methods cannot be 'mut' (there is no implicit 'this')");
+            if (methodMut && isEnum)
+                throw error(memberName, "enum methods cannot be 'mut' — enums are immutable");
             consume(TokenType::LEFT_BRACE,  "expected '{' before method body");
             bool savedIF2 = insideFunction;
             insideFunction = true;
@@ -705,6 +716,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/false, isStatic,
+                /*isMut=*/methodMut,
                 memberType, memberName,
                 std::move(params), std::move(body)
             });
@@ -716,7 +728,7 @@ void Parser::parseMemberList(const Token& name,
             }
             consume(TokenType::SEMICOLON, "expected ';' after field declaration");
             fields.push_back(FieldDecl{
-                isPublic, isStatic, memberType, memberName, std::move(initializer)
+                isPublic, isStatic, isMut, memberType, memberName, std::move(initializer)
             });
         }
     }
@@ -836,9 +848,16 @@ Stmt Parser::parseExprStmt() {
 // ============================================================
 
 Expr Parser::parseExpression() {
-    // C-style static local: `static <type> name = const;`. Only valid as a
-    // declaration; the leading keyword unambiguously introduces a VarDeclExpr.
-    bool isStatic = match({ TokenType::STATIC });
+    // Leading declaration modifiers: `static` (C-style static local) and `mut`
+    // (reassignable binding). Either order is accepted; both unambiguously
+    // introduce a VarDeclExpr.
+    bool isStatic = false;
+    bool isMut    = false;
+    for (;;) {
+        if (!isStatic && match({ TokenType::STATIC })) { isStatic = true; continue; }
+        if (!isMut    && match({ TokenType::MUT    })) { isMut    = true; continue; }
+        break;
+    }
 
     // Array declaration: typeName [ NUMBER ] IDENTIFIER ( = expr )?
     if (isTypeName() && peekNext().type == TokenType::LEFT_BRACKET) {
@@ -850,7 +869,7 @@ Expr Parser::parseExpression() {
         Token  name      = consume(TokenType::IDENTIFIER, "expected variable name after array type");
         std::unique_ptr<Expr> initializer = nullptr;
         if (match({ TokenType::EQUAL })) initializer = box(parseExpression());
-        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize, isStatic });
+        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), arraySize, isStatic, isMut });
     }
 
     // Variable declaration of any type form: <type> IDENTIFIER ...
@@ -875,11 +894,12 @@ Expr Parser::parseExpression() {
             // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
             initializer = box(makeExpr(CallExpr{ typeName, std::move(args) }));
         }
-        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), /*arraySize=*/0, isStatic });
+        return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), /*arraySize=*/0, isStatic, isMut });
     }
 
-    if (isStatic)
-        throw error(peek(), "expected a variable declaration after 'static'");
+    if (isStatic || isMut)
+        throw error(peek(), "expected a variable declaration after '"
+                    + std::string(isStatic ? "static" : "mut") + "'");
     return parseAssignment();
 }
 
@@ -1028,9 +1048,10 @@ Expr Parser::parseCast() {
     Expr expr = parseUnary();
     while (check(TokenType::AS)) {
         advance();  // consume 'as'
+        bool isMut = match({ TokenType::MUT });   // `expr as mut T` — mutable reference view
         if (!isTypeName()) throw error(peek(), "expected type name after 'as'");
-        Token targetType = advance();
-        expr = makeExpr(CastExpr{ box(std::move(expr)), targetType });
+        Token targetType = consumeType();          // supports Class& / ptr<T> / generics
+        expr = makeExpr(CastExpr{ box(std::move(expr)), targetType, isMut });
     }
     return expr;
 }

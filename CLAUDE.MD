@@ -96,6 +96,56 @@ Both the semantic resolver (`resolveTypeToken`) and codegen resolvers
 making it neither copyable nor noexcept-moveable. `std::deque` avoids the
 vector-reallocation copy-fallback that would hit the deleted assignment operator.
 
+### Const-by-default / `mut` keyword (Rust-like)
+Bindings and instance fields are **immutable by default**; `mut` on the declaration opts
+into mutability. Enforced entirely at compile time (semantic analyzer) — **codegen is
+unchanged**. `mut` token mirrors `static`. Flags: `VarDeclExpr::isMut`, `ParamDecl::isMut`,
+`FieldDecl::isMut`, `CastExpr::isMut`; `Symbol::isMutable`/`Symbol::paramMut`;
+`ClassInfo::Field::isMut`; `ClassInfo::Method::paramMut`.
+- **Locals**: const = *single assignment* (deferred init OK). `analyzeAssign` permits a write
+  only when `isMutable` **or** not-yet-`isInitialized` (the one defining assignment);
+  `analyzeCompoundAssign` and `analyzeUnary`/`analyzePostfix` (`++`/`--`) require `isMutable`.
+- **Parameters**: const by default; `mut` allowed on primitives **and references**
+  (`mut Point&` = mutable borrow). A reference param still may **not** be rebound
+  (the isParameter+Reference block in `analyzeAssign` fires first); `mut` only unlocks field
+  writes. `paramIsMutable()` just returns `param.isMut`.
+- **Instance fields — two gates** (both required for `obj.field = v`): (1) *field-level* —
+  field is `mut`, or a const field set via `this.field =` in the ctor (`inConstructor` flag);
+  (2) *binding-level / transitive* — the receiver must be a mutable place (`exprIsMutablePlace`:
+  `mut` binding, `new`/call result, `this` **iff `currentThisMutable`**, or a `mut`-field chain
+  on a mutable root). So a const object/ref binding forbids field writes even to `mut` fields.
+- **Methods — Rust `&mut self`** (trailing `mut`: `void f() mut`). `MethodDecl::isMut`,
+  `ClassInfo::Method::isMut`. `currentThisMutable = md.isMut || md.isConstructor ||
+  md.isDestructor` (save/restored per method in `analyzeClassDecl`) drives
+  `exprIsMutablePlace(ThisExpr)`. A non-`mut` method writing `this.field` → error ("read-only
+  method"); calling a `mut` method requires a mutable receiver (gated in `analyzeMethodCall`).
+  Parser: trailing `mut` after `)`; rejected on ctor/dtor(implicit)/static/enum methods.
+- **const→mut cast warning** (`warnConstToMut`): coercing a read-only reference into a `mut`
+  binding — at `mut T&` init (`analyzeVarDecl`), `mut T&` reassignment (`analyzeAssign`), or a
+  `mut T&` argument (`analyzeCallArgs`, via `paramMut`) — warns unless the source is an explicit
+  cast. References only (value copies are independent). `expr as mut T` (parser: `parseCast`
+  accepts `mut` + `consumeType`) marks `CastExpr::isMut`, producing a mutable place / silencing.
+- **Not gated**: array/`ptr<T>` element writes (`a[i] = v`), `static` fields (stay mutable),
+  enum fields (always immutable — parser rejects `mut` on them, as it does on methods).
+- Parser: `mut`/`static` accepted in either order on locals (`parseExpression`) and members
+  (`parseMemberList` gained an `isEnum` param); params via the `parseParam()` helper.
+
+### Implicit `this` — members without `this.`
+A bare name in a method resolves to a local/param/free-function **first** (they shadow), and
+only falls back to a member of the enclosing class — so members have the **lowest** priority.
+Because fields/methods aren't in the symbol table, this falls out of doing the member lookup
+only when `symbolTable.lookup` misses. Semantic helpers `currentInstanceField` /
+`currentStaticFieldType` / `currentClassMethod` (all keyed on `currentClassName`, instance
+fields gated by `!currentMethodIsStatic`); fallbacks in `analyzeIdentifier` (read),
+`analyzeAssign`/`analyzeCompoundAssign` (write, with the same field-mut + `currentThisMutable`
+gating), `incDecTargetOk` (`++`/`--` for both locals and fields), and `analyzeCall` (bare
+`foo()` → this-method or static call; instance-method-in-static-context and mut-method-in-
+read-only-method are errors). Codegen mirrors it: `genImplicitFieldLoad`/`genImplicitFieldPtr`
++ `resolveAssignTarget` (used by genAssign/genCompoundAssign/genPostfix/genUnary) route a
+bare name to a static global or a GEP on `this`; `genCall` falls back to `@Class_method`
+(mangled name present in `funcParamTypes`) with a `ptr this` prefix for instance methods.
+Purely additive — existing `this.`-prefixed code is unaffected.
+
 ## Architecture summary
 
 ### Compiler pipeline (per source file)
@@ -245,7 +295,7 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**448 test cases / 912 assertions** (as of static local variables — Phase 3).
+**517 test cases / 1051 assertions** (as of implicit `this` — this-less member access).
 
 ## Keeping CLAUDE.md current
 

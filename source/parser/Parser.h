@@ -122,8 +122,11 @@ private:
     void                    parseMemberList(const Token& typeName,
                                             std::deque<FieldDecl>& fields,
                                             std::deque<MethodDecl>& methods,
-                                            bool allowDestructor);
+                                            bool allowDestructor,
+                                            bool isEnum);
     [[nodiscard]] Stmt      parseFunctionDecl(const Token& returnType, const Token& name);
+    // Parses one parameter: an optional leading `mut`, then `<type> IDENTIFIER`.
+    [[nodiscard]] ParamDecl parseParam();
     [[nodiscard]] Stmt      parseExternFuncDecl(const Token& keyword);
     [[nodiscard]] Stmt      parseImportStmt(const Token& keyword);
     [[nodiscard]] Stmt      parseStatement();

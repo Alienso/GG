@@ -29,6 +29,15 @@ const Token& exprFirstToken(const Expr& expr) {
     return std::visit(Visitor{}, *expr.node);
 }
 
+// Effective mutability of a parameter. `mut` on a primitive makes it reassignable; on a
+// reference (`mut Point&`) it makes it a mutable borrow (its object's mut fields may be
+// written). A reference parameter still may not be *rebound* (that would corrupt the
+// borrow's refcount) — that is enforced separately in analyzeAssign. Object *value*
+// parameters are rejected earlier (they must be references), so `mut` there is moot.
+bool SemanticAnalyzer::paramIsMutable(const ParamDecl& param, const Type& /*resolvedType*/) {
+    return param.isMut;
+}
+
 // ============================================================
 // Internal helper — control-flow return analysis
 // Returns true when every execution path through `stmt` ends in a return.
@@ -214,13 +223,15 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
                   + "' must be passed by reference; declare it as '" + paramType.className + "&'");
             paramType = Type{TypeKind::Error};
         }
+        bool paramMutable = paramIsMutable(param, paramType);
         Symbol sym{
             Symbol::Kind::Variable,
             paramType,
             param.name,
             {},
             /*isParameter=*/true,
-            /*isInitialized=*/true   // parameters are always initialized at call entry
+            /*isInitialized=*/true,   // parameters are always initialized at call entry
+            /*isMutable=*/paramMutable
         };
         if (!symbolTable.declare(param.name.lexeme, sym))
             error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
@@ -274,7 +285,12 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
         bool                savedStatic     = currentMethodIsStatic;
+        bool                savedInCtor     = inConstructor;
+        bool                savedThisMut    = currentThisMutable;
         currentMethodIsStatic               = md.isStatic;
+        inConstructor                       = md.isConstructor;
+        // `this` is mutable inside a `mut` method, a constructor, or a destructor.
+        currentThisMutable                  = md.isMut || md.isConstructor || md.isDestructor;
 
         currentReturnType = (md.isConstructor || md.isDestructor)
                                 ? Type{TypeKind::Void}
@@ -316,7 +332,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
                     Symbol::Kind::Variable, paramType, param.name, {},
-                    /*isParameter=*/true, /*isInitialized=*/true}))
+                    /*isParameter=*/true, /*isInitialized=*/true,
+                    /*isMutable=*/paramIsMutable(param, paramType)}))
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 
@@ -336,6 +353,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         currentReturnType     = savedReturnType;
         loopDepth             = savedLoopDepth;
         currentMethodIsStatic = savedStatic;
+        inConstructor         = savedInCtor;
+        currentThisMutable    = savedThisMut;
     }
 
     currentClassName = savedClassName;
@@ -467,7 +486,8 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
                     Symbol::Kind::Variable, paramType, param.name, {},
-                    /*isParameter=*/true, /*isInitialized=*/true}))
+                    /*isParameter=*/true, /*isInitialized=*/true,
+                    /*isMutable=*/paramIsMutable(param, paramType)}))
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 

@@ -146,6 +146,31 @@ bare name to a static global or a GEP on `this`; `genCall` falls back to `@Class
 (mangled name present in `funcParamTypes`) with a `ptr this` prefix for instance methods.
 Purely additive — existing `this.`-prefixed code is unaffected.
 
+### Overloading (functions, constructors, methods)
+Functions, constructors, and methods (instance & static) may be **overloaded** by parameter
+signature **and/or return type**. Enums are excluded (single ctor, no member overloading).
+- **Storage as overload sets**: `ClassInfo::methods` is `unordered_map<string, vector<Method>>`;
+  free functions live in `SemanticAnalyzer::functionRegistry` (`vector<FunctionOverload>` per
+  name) with a single Function marker kept in the symbol table for shadowing / "not a value".
+  Exact-signature duplicate = redefinition error; `extern`/`main` can't be overloaded.
+- **Resolution** (`resolveOverload`, `SemanticAnalyzer_Exprs.cpp`): analyze args once, keep
+  candidates with matching arity + all args implicitly convertible, rank by conversion cost
+  (exact 0 / `Silent` 1 / `Warn` 2 via `canImplicitlyCast`), pick unique min; ties broken by
+  the **contextual expected type** on the return type (`expectedType_`, threaded via
+  `analyzeWithExpected` at var-init / assign / return / member-assign / cast-target). No
+  context + tie ⇒ "ambiguous" (fix with `expr as T`). Zero viable ⇒ "no matching overload"
+  (single-candidate arity mismatch keeps the friendlier "expects N argument(s)").
+- **Mangling** (`mangleOverload`/`mangleType` in `Type.cpp`): `base$p1$p2$ret$R`, e.g.
+  `foo$i32$f64$ret$void`, ctor `Point_Point$i32$ret$void`. Applied **only when a name is
+  actually overloaded** (decl count > 1) so non-overloaded symbols keep their plain names
+  (`@foo`, `@Point_dist`) and existing IR-name assertions stay valid. `main`/`extern` never
+  mangled.
+- **Semantic→codegen handoff**: `SemanticResult::resolvedCallee` (`const void*` call/new node
+  address → chosen mangled name; empty ⇒ plain). Codegen: `overloadedBases_` + `freeFnBases_`
+  computed in `generate()`; `genFunction`/`genMethod` emit `overloadEmittedName(...)`;
+  `funcParamTypes` keyed by the emitted name; call sites (`genCall`/`genMethodCall`/
+  `genStaticCall`/`genNew` + stack-ctor + implicit-`this`) resolve via `calleeName(node, base)`.
+
 ## Architecture summary
 
 ### Compiler pipeline (per source file)
@@ -295,7 +320,7 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**523 test cases / 1057 assertions** (as of implicit `this` — this-less member access).
+**543 test cases / 1089 assertions** (as of function/constructor/method overloading).
 
 ## Keeping CLAUDE.md current
 

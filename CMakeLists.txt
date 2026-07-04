@@ -109,6 +109,8 @@ add_executable(GG_tests
         tests/implicit_this_tests.cpp
         tests/overload_tests.cpp
         tests/cast_tests.cpp
+        tests/trait_tests.cpp
+        tests/generic_bounds_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

@@ -231,8 +231,14 @@ std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
 std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) {
     switch (unary.operatorToken.type) {
         case TokenType::MINUS: {
+            Type operandType = exprType(*unary.operand);
+            // Operator overloading: unary '-' on a class → the Neg trait's `neg` method.
+            if (operandType.kind == TypeKind::Object || operandType.kind == TypeKind::Reference) {
+                std::string recv = genExpr(*unary.operand);
+                Type callRet;
+                return genTraitMethodCall(&unary, operandType.className, "neg", recv, {}, {}, callRet);
+            }
             std::string value      = genExpr(*unary.operand);
-            Type        operandType = exprType(*unary.operand);
             std::string irType     = irTypeName(operandType);
             std::string tempName   = freshTemp();
             if (isFloat(operandType.kind))
@@ -283,8 +289,56 @@ std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) 
 
 // ---- Binary ----
 
+// Binary operator → trait method name, or nullptr if the operator isn't overloadable.
+static const char* binaryOperatorMethod(TokenType op) {
+    switch (op) {
+        case TokenType::PLUS:    return "add";
+        case TokenType::MINUS:   return "sub";
+        case TokenType::STAR:    return "mul";
+        case TokenType::SLASH:   return "div";
+        case TokenType::PERCENT: return "rem";
+        case TokenType::EQUAL_EQUAL:
+        case TokenType::BANG_EQUAL:    return "eq";
+        case TokenType::LESS:
+        case TokenType::LESS_EQUAL:
+        case TokenType::GREATER:
+        case TokenType::GREATER_EQUAL: return "cmp";
+        default: return nullptr;
+    }
+}
+
 std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedType) {
     TokenType operatorType = binary.operatorToken.type;
+
+    // Operator overloading: a class-typed left operand desugars to a trait method call.
+    {
+        Type leftType = exprType(*binary.left);
+        const char* method = binaryOperatorMethod(operatorType);
+        if (method && (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference)) {
+            std::string recv   = genExpr(*binary.left);
+            Type        rt     = exprType(*binary.right);
+            std::string rv     = genExpr(*binary.right);
+            Type        callRet;
+            std::string res = genTraitMethodCall(&binary, leftType.className, method, recv,
+                                                 { rt }, { rv }, callRet);
+            if (operatorType == TokenType::EQUAL_EQUAL) return res;   // eq → bool
+            if (operatorType == TokenType::BANG_EQUAL) {
+                std::string t = freshTemp();
+                emit("%" + t + " = xor i1 " + res + ", true");
+                return "%" + t;
+            }
+            if (operatorType == TokenType::LESS || operatorType == TokenType::LESS_EQUAL
+                || operatorType == TokenType::GREATER || operatorType == TokenType::GREATER_EQUAL) {
+                const char* pred = operatorType == TokenType::LESS        ? "slt"
+                                 : operatorType == TokenType::LESS_EQUAL  ? "sle"
+                                 : operatorType == TokenType::GREATER     ? "sgt" : "sge";
+                std::string t = freshTemp();
+                emit("%" + t + " = icmp " + pred + " " + irTypeName(callRet) + " " + res + ", 0");
+                return "%" + t;
+            }
+            return res;   // arithmetic — result is the method's return value
+        }
+    }
 
     // Short-circuit logical ops
     if (operatorType == TokenType::AND || operatorType == TokenType::OR) {
@@ -770,6 +824,16 @@ std::string CodeGen::genElementAddress(const Expr& object, const Expr& index,
 }
 
 std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
+    // Operator overloading: a[i] on a class → the Index trait's `get` method.
+    Type objType = exprType(*indexExpr.object);
+    if (objType.kind == TypeKind::Object || objType.kind == TypeKind::Reference) {
+        std::string recv = genExpr(*indexExpr.object);
+        Type idxType = exprType(*indexExpr.index);
+        std::string idx = genExpr(*indexExpr.index);
+        Type callRet;
+        return genTraitMethodCall(&indexExpr, objType.className, "get", recv,
+                                  { idxType }, { idx }, callRet);
+    }
     std::string elementIrType;
     std::string elemPtr = genElementAddress(*indexExpr.object, *indexExpr.index, elementIrType);
     return emitLoad(elementIrType, elemPtr);
@@ -778,6 +842,21 @@ std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
 // ---- IndexAssign (array / pointer write) ----
 
 std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
+    // Operator overloading: a[i] = v on a class → the Index trait's `set(i, v)` method.
+    {
+        Type objType = exprType(*indexAssign.object);
+        if (objType.kind == TypeKind::Object || objType.kind == TypeKind::Reference) {
+            std::string recv    = genExpr(*indexAssign.object);
+            Type        idxType = exprType(*indexAssign.index);
+            std::string idx     = genExpr(*indexAssign.index);
+            Type        valType = exprType(*indexAssign.value);
+            std::string val     = genExpr(*indexAssign.value);
+            Type callRet;
+            genTraitMethodCall(&indexAssign, objType.className, "set", recv,
+                               { idxType, valType }, { idx, val }, callRet);
+            return val;   // the assignment expression yields the stored value
+        }
+    }
     std::string elementIrType;
     std::string elemPtr = genElementAddress(*indexAssign.object, *indexAssign.index, elementIrType);
 

@@ -171,6 +171,40 @@ signature **and/or return type**. Enums are excluded (single ctor, no member ove
   `funcParamTypes` keyed by the emitted name; call sites (`genCall`/`genMethodCall`/
   `genStaticCall`/`genNew` + stack-ctor + implicit-`this`) resolve via `calleeName(node, base)`.
 
+### Traits & operator overloading
+Rust-style traits with **static dispatch only** — no vtables, no trait objects, no generic
+bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operator desugaring.
+- **Tokens/AST**: `trait`/`impl`/`Self` (`TRAIT`/`IMPL`/`SELF`). `MethodDecl` gained
+  `bool hasBody` (trait signature-only methods set it false). New stmt nodes
+  `TraitDeclStmt{ name; deque<MethodDecl> methods }` and
+  `ImplDeclStmt{ traitName; typeName; deque<MethodDecl> methods }`. `Self` is a type keyword,
+  accepted by `isTypeName()`/`consumeType()` (synth tokens `"Self"` / `"Self&"`).
+- **`impl` methods ARE class methods**: `collectImpls` registers each into the target class's
+  `ClassInfo::methods` overload set (with `Self`→type) and codegen emits them via
+  `genMethod(impl.typeName, md)` as `@Type_method`. So overloading, `mut`, implicit-`this`,
+  mangling, and `funcParamTypes`/`funcReturnTypes` all apply unchanged. Impl target must be a
+  **class** (not primitive/enum). `Self` substitution: `resolveTypeToken` (semantic, via
+  `currentSelfType_`) and `resolveParamType`/`resolveReturnType` (codegen, via
+  `currentClassName_`).
+- **Registries** (semantic): `traitRegistry` (name→`TraitDeclStmt*`), `implementedTraits`
+  (type→set of trait names). `collectTraits`/`collectImpls` run after `collectClasses`.
+  Conformance: builtin trait ⇒ the conventional method must exist; user trait ⇒ every required
+  signature present (after `Self` subst). **Default (bodied) trait methods are rejected** —
+  `collectTraits` errors on `md.hasBody` ("not yet supported"). v1 = required-methods-only.
+- **Built-in operator traits** (no prelude; recognised by name via `operatorTraitFor(TokenType)`
+  + `isBuiltinTrait`): Add/Sub/Mul/Div/Rem → `add/sub/mul/div/rem`; `Eq` → `bool eq(Self&)`;
+  `Ord` → `i32 cmp(Self&)`; `Neg` → `neg()`; `Index` → `get(i)` / `set(i,v)`.
+- **Desugaring** (semantic records `resolvedCallee[node]` when the method is overloaded;
+  codegen emits via `genTraitMethodCall`): `analyzeBinary`/`genBinary` (arith + `==`/`!=`
+  (eq then `xor i1 …, true`) + `<`/`<=`/`>`/`>=` (cmp `i32` then `icmp slt/sle/sgt/sge …, 0`)),
+  `analyzeUnary`/`genUnary` (`Neg`), `analyzeIndex`/`genIndex` (`get`),
+  `analyzeIndexAssign`/`genIndexAssign` (`set`). Overload active **only if** the operand's
+  class is in `implementedTraits` for that trait; else the built-in numeric rules stand.
+  `Eq`/`Ord` operators type as `bool`; others as the method's return type.
+- **Codegen** adds `funcReturnTypes` (needed so operator calls emit the right return IR, esp.
+  `cmp`→`i32`), `genTraitMethodCall` (`CodeGen_Classes.cpp`), and counts impl methods into
+  `overloadedBases_`/`funcParamTypes`.
+
 ## Architecture summary
 
 ### Compiler pipeline (per source file)
@@ -209,6 +243,24 @@ signature **and/or return type**. Enums are excluded (single ctor, no member ove
   - `Pair<i32,f64>`  → `Pair$i32$f64`
   - `Vec<Box<i32>>`  → `Vec$Box$i32`
   - `Vec<Point&>`    → `Vec$Point.ref`
+- **Generic functions may return a reference** (`T& maxOf<T>(...)`): `tryCaptureFunctionTemplate`
+  / `prescanTemplateNames` accept an optional `&` between the return type and the name.
+
+### Generic trait bounds (static dispatch)
+`<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
+trait(s) — user traits **and** built-in operator traits (`Add`/`Ord`/…). Enforced at each
+**instantiation site**, not by pre-checking the generic body (the type param never reaches
+semantics; bodies may still call any method the concrete type has).
+- **Parser**: `GenericTemplate::bounds` (parallel to `typeParams`, `bounds[i]` = trait names).
+  Both capture functions call `scanTypeParamList(from, typeParams, bounds)` which parses
+  `T [: Trait (+ Trait)*] [, …]` (COLON/PLUS are separators). At monomorphization,
+  `runMonomorphization` pushes a `GenericBoundCheck{typeName, traitName, context, line}` (in
+  `Ast.h`, on `Program::genericBoundChecks`) per bounded param — `typeName` = the arg's head
+  token lexeme (base type, `&` stripped), `context` = the instantiation's mangled name.
+- **Semantic**: `checkGenericBounds(program)` runs after `collectImpls` (pass 0d). For each
+  obligation: unknown trait (not built-in, not in `traitRegistry`) → error; else the type must
+  be in `implementedTraits[typeName]` for that trait (both user + built-in impls populate it).
+  Primitives / non-implementing classes → "type 'X' does not satisfy bound 'Trait' …".
 
 ### Memory model
 - **Value objects** (`Point p`): stack-allocated struct; copied on assignment.
@@ -320,7 +372,7 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**543 test cases / 1089 assertions** (as of function/constructor/method overloading).
+**573 test cases / 1140 assertions** (as of generic trait bounds).
 
 ## Keeping CLAUDE.md current
 

@@ -336,6 +336,25 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             }
             indent--;
         },
+        [&](const TraitDeclStmt& tr) {
+            out("TraitDecl '" + tr.name.lexeme + "'");
+            indent++;
+            for (const MethodDecl& md : tr.methods)
+                out(std::string(md.hasBody ? "default method '" : "required method '")
+                    + md.name.lexeme + "'");
+            indent--;
+        },
+        [&](const ImplDeclStmt& impl) {
+            out("ImplDecl '" + impl.traitName.lexeme + "' for '" + impl.typeName.lexeme + "'");
+            indent++;
+            for (const MethodDecl& md : impl.methods) {
+                out("method '" + md.name.lexeme + "'");
+                indent++;
+                printBlock(md.body);
+                indent--;
+            }
+            indent--;
+        },
 
     }, *stmt.node);
 }

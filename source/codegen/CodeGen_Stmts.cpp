@@ -21,6 +21,8 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const ImportStmt&)               { /* resolved before codegen pass */ },
         [&](const ClassDeclStmt&)            { /* handled at module level in generate() */ },
         [&](const EnumDeclStmt&)             { /* handled at module level in generate() */ },
+        [&](const TraitDeclStmt&)            { /* no code — a contract only */ },
+        [&](const ImplDeclStmt&)             { /* handled at module level in generate() */ },
     }, *stmt.node);
 }
 

@@ -24,6 +24,9 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     classRegistry.clear();
     enumRegistry.clear();
     functionRegistry.clear();
+    traitRegistry.clear();
+    implementedTraits.clear();
+    currentSelfType_ = "";
     resolvedCallee.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
@@ -31,6 +34,9 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     symbolTable.enterScope();   // global scope
 
     collectClasses(program);    // pass 0: build class registry
+    collectTraits(program);     // pass 0b: register trait contracts
+    collectImpls(program);      // pass 0c: attach impl methods to their class + check conformance
+    checkGenericBounds(program);// pass 0d: verify generic trait-bound obligations
     collectFunctions(program);  // pass 1: hoist function signatures
 
     for (const Stmt& stmt : program.declarations)
@@ -179,6 +185,156 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
 }
 
 // ============================================================
+// Traits & impls
+// ============================================================
+
+bool SemanticAnalyzer::isBuiltinTrait(const std::string& name) {
+    static const std::unordered_set<std::string> builtins = {
+        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index"
+    };
+    return builtins.count(name) > 0;
+}
+
+const std::pair<const char*, const char*>* SemanticAnalyzer::operatorTraitFor(TokenType op) {
+    switch (op) {
+        case TokenType::PLUS:          { static const std::pair<const char*, const char*> t{"Add", "add"}; return &t; }
+        case TokenType::MINUS:         { static const std::pair<const char*, const char*> t{"Sub", "sub"}; return &t; }
+        case TokenType::STAR:          { static const std::pair<const char*, const char*> t{"Mul", "mul"}; return &t; }
+        case TokenType::SLASH:         { static const std::pair<const char*, const char*> t{"Div", "div"}; return &t; }
+        case TokenType::PERCENT:       { static const std::pair<const char*, const char*> t{"Rem", "rem"}; return &t; }
+        case TokenType::EQUAL_EQUAL:
+        case TokenType::BANG_EQUAL:    { static const std::pair<const char*, const char*> t{"Eq",  "eq"};  return &t; }
+        case TokenType::LESS:
+        case TokenType::LESS_EQUAL:
+        case TokenType::GREATER:
+        case TokenType::GREATER_EQUAL: { static const std::pair<const char*, const char*> t{"Ord", "cmp"}; return &t; }
+        default: return nullptr;
+    }
+}
+
+void SemanticAnalyzer::collectTraits(const Program& program) {
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<TraitDeclStmt>(*stmt.node)) continue;
+        const auto& tr = std::get<TraitDeclStmt>(*stmt.node);
+        if (isBuiltinTrait(tr.name.lexeme))
+            error(tr.name, "'" + tr.name.lexeme + "' is a built-in operator trait and cannot be redeclared");
+        else if (traitRegistry.count(tr.name.lexeme) || classRegistry.count(tr.name.lexeme))
+            error(tr.name, "'" + tr.name.lexeme + "' is already declared");
+        // v1: default method bodies are not supported (static dispatch would need per-impl
+        // materialisation of the shared body — deferred).
+        for (const MethodDecl& md : tr.methods)
+            if (md.hasBody)
+                error(md.name, "default trait method bodies are not yet supported; "
+                      "declare a signature ending in ';'");
+        traitRegistry[tr.name.lexeme] = &tr;
+    }
+}
+
+void SemanticAnalyzer::collectImpls(const Program& program) {
+    // Built-in operator trait → the conventional method name an impl must define.
+    static const std::unordered_map<std::string, std::string> builtinMethod = {
+        {"Add", "add"}, {"Sub", "sub"}, {"Mul", "mul"}, {"Div", "div"}, {"Rem", "rem"},
+        {"Eq", "eq"}, {"Ord", "cmp"}, {"Neg", "neg"}, {"Index", "get"}
+    };
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<ImplDeclStmt>(*stmt.node)) continue;
+        const auto& impl = std::get<ImplDeclStmt>(*stmt.node);
+        const std::string& type  = impl.typeName.lexeme;
+        const std::string& trait = impl.traitName.lexeme;
+
+        if (enumRegistry.count(type)) {
+            error(impl.typeName, "cannot 'impl' a trait for enum '" + type + "'");
+            continue;
+        }
+        auto clsIt = classRegistry.find(type);
+        if (clsIt == classRegistry.end()) {
+            error(impl.typeName, "unknown class '" + type + "' in 'impl'");
+            continue;
+        }
+        const bool builtin = isBuiltinTrait(trait);
+        const TraitDeclStmt* traitDecl = nullptr;
+        if (!builtin) {
+            auto tIt = traitRegistry.find(trait);
+            if (tIt == traitRegistry.end()) {
+                error(impl.traitName, "unknown trait '" + trait + "'");
+                continue;
+            }
+            traitDecl = tIt->second;
+        }
+
+        // Register impl methods as methods on the target class (with Self → the type).
+        currentSelfType_ = type;
+        ClassInfo& info = clsIt->second;
+        for (const MethodDecl& md : impl.methods) {
+            Type ret = resolveTypeToken(md.returnType);
+            std::vector<Type> paramTypes;
+            std::vector<bool> paramMut;
+            for (const ParamDecl& p : md.params) {
+                paramTypes.push_back(resolveTypeToken(p.typeName));
+                paramMut.push_back(p.isMut);
+            }
+            std::vector<ClassInfo::Method>& set = info.methods[md.name.lexeme];
+            bool redef = false;
+            for (const ClassInfo::Method& e : set)
+                if (e.paramTypes == paramTypes && e.returnType == ret) { redef = true; break; }
+            if (redef) {
+                error(md.name, "'" + type + "::" + md.name.lexeme + "' is already defined with the same signature");
+                continue;
+            }
+            set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, ret,
+                                            std::move(paramTypes), std::move(paramMut), md.name});
+        }
+
+        implementedTraits[type].insert(trait);
+
+        // Conformance check.
+        if (builtin) {
+            const std::string& need = builtinMethod.at(trait);
+            if (!info.methods.count(need))
+                error(impl.traitName, "impl of built-in trait '" + trait + "' for '" + type
+                      + "' must define method '" + need + "'");
+        } else {
+            for (const MethodDecl& req : traitDecl->methods) {
+                std::vector<Type> reqParams;
+                for (const ParamDecl& p : req.params) reqParams.push_back(resolveTypeToken(p.typeName));
+                Type reqRet = resolveTypeToken(req.returnType);
+                auto it = info.methods.find(req.name.lexeme);
+                bool found = false;
+                if (it != info.methods.end())
+                    for (const ClassInfo::Method& c : it->second)
+                        if (c.paramTypes == reqParams && c.returnType == reqRet) { found = true; break; }
+                if (!found)
+                    error(impl.typeName, "impl of trait '" + trait + "' for '" + type
+                          + "' is missing required method '" + req.name.lexeme + "'");
+            }
+        }
+        currentSelfType_ = "";
+    }
+}
+
+// ============================================================
+// Pass 0d — verify generic trait-bound obligations
+// ============================================================
+// Each obligation (recorded by the parser at monomorphization) says a concrete type
+// argument must implement a named trait. Static dispatch: the check is that the type
+// appears in `implementedTraits` for that trait (both user and built-in impls populate
+// it). Primitives and non-implementing classes produce a clear instantiation-site error.
+void SemanticAnalyzer::checkGenericBounds(const Program& program) {
+    for (const GenericBoundCheck& bc : program.genericBoundChecks) {
+        Token where{TokenType::IDENTIFIER, bc.typeName, bc.line};
+        if (!isBuiltinTrait(bc.traitName) && !traitRegistry.count(bc.traitName)) {
+            error(where, "unknown trait '" + bc.traitName + "' in bound for '" + bc.context + "'");
+            continue;
+        }
+        auto it = implementedTraits.find(bc.typeName);
+        bool ok = it != implementedTraits.end() && it->second.count(bc.traitName);
+        if (!ok)
+            error(where, "type '" + bc.typeName + "' does not satisfy bound '" + bc.traitName
+                  + "' required by '" + bc.context + "'");
+    }
+}
+
+// ============================================================
 // Pass 1 — collect top-level function signatures
 // ============================================================
 
@@ -282,7 +438,14 @@ void SemanticAnalyzer::checkRawPtrAllowed(const Token& typeToken, const Token& s
 Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
     // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
     Type synth = decodeSynthesizedType(typeToken);
-    if (!isError(synth)) return synth;
+    if (!isError(synth)) {
+        // `Self&` inside a trait/impl → a reference to the implementing type.
+        if (synth.className == "Self") synth.className = currentSelfType_;
+        return synth;
+    }
+    // Bare `Self` → the implementing type (object). Valid only inside a trait/impl body.
+    if (typeToken.type == TokenType::SELF)
+        return currentSelfType_.empty() ? Type{TypeKind::Error} : makeObjectType(currentSelfType_);
     if (typeToken.type == TokenType::IDENTIFIER && enumRegistry.count(typeToken.lexeme))
         return makeEnumType(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))

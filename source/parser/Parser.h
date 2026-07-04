@@ -27,8 +27,9 @@ public:
 // the type arguments and re-parses each request into a concrete declaration,
 // so semantic analysis and codegen only ever see ordinary (mangled) decls.
 struct GenericTemplate {
-    std::vector<std::string> typeParams;
-    std::vector<Token>       tokens;   // decl tokens; tokens[1] is the name; <...> stripped
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;   // bounds[i] = trait names required of typeParams[i]
+    std::vector<Token>                    tokens;    // decl tokens; tokens[1] is the name; <...> stripped
 };
 struct GenericInstantiation {
     std::string                     templateName;
@@ -100,6 +101,10 @@ private:
     // ---- Generics helpers ----
     bool tryCaptureFunctionTemplate();                       // capture a generic fn decl
     bool tryCaptureClassTemplate();                          // capture a generic class decl
+    // Scan a `<T, U: Trait + ...>` param list from index `from`; fills typeParams +
+    // parallel bounds, returns the closing '>' index (0 if malformed).
+    size_t scanTypeParamList(size_t from, std::vector<std::string>& typeParams,
+                             std::vector<std::vector<std::string>>& bounds) const;
     // Number of tokens a complete type occupies at `from` (base + optional <...> + optional &),
     // or 0 if `from` is not the start of a type. Used by declaration-detection lookahead.
     [[nodiscard]] size_t typeSpanAt(size_t from) const;
@@ -116,6 +121,11 @@ private:
     [[nodiscard]] Stmt      parseDeclaration();
     [[nodiscard]] Stmt      parseClassDecl();
     [[nodiscard]] Stmt      parseEnumDecl();
+    [[nodiscard]] Stmt      parseTraitDecl();
+    [[nodiscard]] Stmt      parseImplDecl();
+    // Parse one method signature/definition inside a trait or impl body. In a trait, a `;`
+    // after the header means a required (bodyless) method; a `{` means a default body.
+    [[nodiscard]] MethodDecl parseTraitMethod(bool bodyOptional);
     // Parse the member list (fields, methods, optional constructor/destructor) of a
     // class or enum body until the closing '}'. `typeName` is used to detect the
     // constructor (a method whose name matches). Destructors are only valid for classes.

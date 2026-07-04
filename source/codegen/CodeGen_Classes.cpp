@@ -130,6 +130,28 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
 
 // ---- Method call ----
 
+std::string CodeGen::genTraitMethodCall(const void* node, const std::string& className,
+                                        const std::string& method, const std::string& recvPtr,
+                                        const std::vector<Type>& argTypes,
+                                        const std::vector<std::string>& argVals, Type& retOut) {
+    std::string sym = calleeName(node, className + "_" + method);
+    auto pit = funcParamTypes.find(sym);
+    std::string argStr = "ptr " + recvPtr;
+    for (size_t i = 0; i < argVals.size(); ++i) {
+        Type pt = (pit != funcParamTypes.end() && i < pit->second.size()) ? pit->second[i] : argTypes[i];
+        std::string v = emitCast(argVals[i], argTypes[i], pt);
+        argStr += ", " + irTypeName(pt) + " " + v;
+    }
+    Type ret = funcReturnTypes.count(sym) ? funcReturnTypes.at(sym) : Type{TypeKind::Void};
+    retOut = ret;
+    std::string retIr = irTypeName(ret);
+    if (retIr == "void") { emit("call void @" + sym + "(" + argStr + ")"); return ""; }
+    std::string t = freshTemp();
+    emit("%" + t + " = call " + retIr + " @" + sym + "(" + argStr + ")");
+    if (ret.kind == TypeKind::Reference) pendingTemps_.push_back({ "%" + t, ret.className });
+    return "%" + t;
+}
+
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
 

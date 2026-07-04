@@ -75,6 +75,8 @@ private:
 
     // funcName (possibly overload-mangled) → ordered parameter types (populated in generate())
     std::unordered_map<std::string, std::vector<Type>> funcParamTypes;
+    // funcName (same key) → return type. Used to emit operator-desugared method calls.
+    std::unordered_map<std::string, Type> funcReturnTypes;
     // Base symbol names (free-fn name, or `Class_method`) declared more than once ⇒ overloaded
     // ⇒ their definitions/calls use the overload-mangled name.
     std::unordered_set<std::string> overloadedBases_;
@@ -185,6 +187,12 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
+    // Emit a desugared trait-method call `recvPtr.method(args)` for an overloaded operator.
+    // Returns the result register ("" for void); writes the callee's return type to retOut.
+    std::string genTraitMethodCall(const void* node, const std::string& className,
+                                   const std::string& method, const std::string& recvPtr,
+                                   const std::vector<Type>& argTypes,
+                                   const std::vector<std::string>& argVals, Type& retOut);
     // Emit a static method call (no implicit `this`): @ClassName_method(args).
     std::string genStaticCall(const std::string& className,
                               const MethodCallExpr& methodCall,

@@ -50,9 +50,13 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
     // so call sites are recognised regardless of declaration order.
     for (size_t i = 0; i + 2 < toks.size(); ++i) {
         bool startsType = toks[i].type == TokenType::IDENTIFIER || isTypeKeyword(toks[i].type);
-        if (startsType && toks[i + 1].type == TokenType::IDENTIFIER
-            && toks[i + 2].type == TokenType::LESS) {
-            size_t j = i + 3; int depth = 1;
+        if (!startsType) continue;
+        size_t nameIdx = i + 1;
+        if (nameIdx < toks.size() && toks[nameIdx].type == TokenType::AMPERSAND) nameIdx++;  // `T&` return
+        if (nameIdx + 1 < toks.size()
+            && toks[nameIdx].type == TokenType::IDENTIFIER
+            && toks[nameIdx + 1].type == TokenType::LESS) {
+            size_t j = nameIdx + 2; int depth = 1;
             while (j < toks.size() && depth > 0) {
                 if (toks[j].type == TokenType::LESS)             depth++;
                 else if (toks[j].type == TokenType::GREATER)     depth--;
@@ -60,7 +64,7 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
                 j++;
             }
             if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN)
-                gen_->funcNames.insert(toks[i + 1].lexeme);
+                gen_->funcNames.insert(toks[nameIdx].lexeme);
         }
     }
 }
@@ -91,30 +95,30 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
 // ============================================================
 
 bool Parser::tryCaptureFunctionTemplate() {
-    if (!((isTypeName() || peek().type == TokenType::IDENTIFIER)
-          && peekNext().type == TokenType::IDENTIFIER
-          && current + 2 < tokens.size() && tokens[current + 2].type == TokenType::LESS))
+    // Return type: one type/type-parameter token, optionally followed by '&' (a
+    // reference return such as `T&`). The name then precedes the '<' type-param list.
+    if (!(isTypeName() || peek().type == TokenType::IDENTIFIER)) return false;
+    size_t nameIdx = current + 1;
+    if (nameIdx < tokens.size() && tokens[nameIdx].type == TokenType::AMPERSAND) nameIdx++;
+    if (nameIdx + 1 >= tokens.size()
+        || tokens[nameIdx].type != TokenType::IDENTIFIER
+        || tokens[nameIdx + 1].type != TokenType::LESS)
         return false;
 
-    // Collect type-parameter names between '<' and '>'; verify the decl continues with '('.
-    std::vector<std::string> typeParams;
-    size_t j = current + 3; int depth = 1;
-    while (j < tokens.size() && depth > 0) {
-        if (tokens[j].type == TokenType::LESS)            { depth++; }
-        else if (tokens[j].type == TokenType::GREATER)    { depth--; if (depth == 0) break; }
-        else if (tokens[j].type == TokenType::SHIFT_RIGHT){ depth -= 2; if (depth <= 0) break; }
-        else if (tokens[j].type == TokenType::IDENTIFIER && depth == 1) typeParams.push_back(tokens[j].lexeme);
-        j++;
-    }
-    if (j >= tokens.size() || tokens[j].type != TokenType::GREATER) return false;
+    // Collect type-parameter names (and optional `: Trait + Trait` bounds) between
+    // '<' and '>'; verify the decl continues with '('.
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;
+    size_t j = scanTypeParamList(nameIdx + 2, typeParams, bounds);
+    if (j == 0 || tokens[j].type != TokenType::GREATER) return false;
     size_t afterGt = j + 1;
     if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_PAREN) return false;
     if (typeParams.empty()) return false;
 
-    // Capture: retType, name, then the parameter list and body verbatim.
+    // Capture: return-type token(s), name, then the parameter list and body verbatim.
     std::vector<Token> captured;
-    captured.push_back(tokens[current]);       // return type
-    captured.push_back(tokens[current + 1]);   // function name
+    for (size_t t = current; t < nameIdx; ++t) captured.push_back(tokens[t]);  // retType (+ '&')
+    captured.push_back(tokens[nameIdx]);                                        // function name
 
     size_t k = afterGt;
     int parenDepth = 0;
@@ -134,11 +138,37 @@ bool Parser::tryCaptureFunctionTemplate() {
         ++k;
     } while (k < tokens.size() && braceDepth > 0);
 
-    const std::string& name = tokens[current + 1].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(captured) };
+    const std::string& name = tokens[nameIdx].lexeme;
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds), std::move(captured) };
     gen_->funcNames.insert(name);
     current = k;   // advance past the captured declaration
     return true;
+}
+
+// Scan a `<T, U: Trait + Trait2, ...>` type-parameter list starting at token index
+// `from` (the first token after '<'). Fills `typeParams` and a parallel `bounds`
+// (bounds[i] = trait names on typeParams[i], empty if unbounded). Returns the index
+// of the closing '>' token, or 0 if the list is malformed / unterminated.
+size_t Parser::scanTypeParamList(size_t from, std::vector<std::string>& typeParams,
+                                 std::vector<std::vector<std::string>>& bounds) const {
+    bool   expectParam = true;
+    int    depth = 1;
+    size_t j = from;
+    for (; j < tokens.size() && depth > 0; ++j) {
+        TokenType tt = tokens[j].type;
+        if (tt == TokenType::LESS)             { depth++; continue; }
+        if (tt == TokenType::GREATER)          { depth--; if (depth == 0) break; continue; }
+        if (tt == TokenType::SHIFT_RIGHT)      { depth -= 2; if (depth <= 0) return 0; continue; }
+        if (depth != 1) continue;
+        if (tt == TokenType::COMMA)            { expectParam = true; }
+        else if (tt == TokenType::IDENTIFIER) {
+            if (expectParam) { typeParams.push_back(tokens[j].lexeme); bounds.push_back({}); expectParam = false; }
+            else if (!bounds.empty()) bounds.back().push_back(tokens[j].lexeme);
+        }
+        // COLON / PLUS are separators inside a bound list — ignored.
+    }
+    if (j >= tokens.size() || tokens[j].type != TokenType::GREATER) return 0;
+    return j;
 }
 
 bool Parser::tryCaptureClassTemplate() {
@@ -147,16 +177,10 @@ bool Parser::tryCaptureClassTemplate() {
           && current + 2 < tokens.size() && tokens[current + 2].type == TokenType::LESS))
         return false;
 
-    std::vector<std::string> typeParams;
-    size_t j = current + 3; int depth = 1;
-    while (j < tokens.size() && depth > 0) {
-        if (tokens[j].type == TokenType::LESS)             { depth++; }
-        else if (tokens[j].type == TokenType::GREATER)     { depth--; if (depth == 0) break; }
-        else if (tokens[j].type == TokenType::SHIFT_RIGHT) { depth -= 2; if (depth <= 0) break; }
-        else if (tokens[j].type == TokenType::IDENTIFIER && depth == 1) typeParams.push_back(tokens[j].lexeme);
-        j++;
-    }
-    if (j >= tokens.size() || tokens[j].type != TokenType::GREATER) return false;
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;
+    size_t j = scanTypeParamList(current + 3, typeParams, bounds);
+    if (j == 0 || tokens[j].type != TokenType::GREATER) return false;
     size_t afterGt = j + 1;
     if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_BRACE) return false;
     if (typeParams.empty()) return false;
@@ -175,7 +199,7 @@ bool Parser::tryCaptureClassTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[current + 1].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(captured) };
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds), std::move(captured) };
     gen_->classNames.insert(name);
     current = k;
     return true;
@@ -284,6 +308,17 @@ void Parser::runMonomorphization(Program& program) {
         std::unordered_map<std::string, std::vector<Token>> sub;
         for (size_t i = 0; i < tmpl.typeParams.size() && i < inst.args.size(); ++i)
             sub.emplace(tmpl.typeParams[i], inst.args[i]);
+
+        // Record trait-bound obligations: each bounded type parameter's concrete
+        // argument must implement the named trait(s). Verified in the semantic pass
+        // (static dispatch — the type param itself never reaches semantics/codegen).
+        for (size_t i = 0; i < tmpl.typeParams.size() && i < inst.args.size(); ++i) {
+            if (i >= tmpl.bounds.size() || tmpl.bounds[i].empty() || inst.args[i].empty()) continue;
+            const Token& argHead = inst.args[i].front();   // base type token ('&' is separate)
+            for (const std::string& tr : tmpl.bounds[i])
+                program.genericBoundChecks.push_back(
+                    GenericBoundCheck{ argHead.lexeme, tr, inst.mangledName, argHead.line });
+        }
 
         // Substitute. Rename the declaration name and any constructor/destructor name
         // (a token == templateName that is NOT followed by '<'); self-references like
@@ -423,6 +458,8 @@ bool Parser::isTypeName() const {
         case TokenType::VOID:
         case TokenType::PTR:
             return true;
+        case TokenType::SELF:
+            return true;   // valid only inside trait/impl bodies; semantic enforces that
         case TokenType::IDENTIFIER:
             return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
         default:
@@ -434,7 +471,8 @@ Token Parser::consumeType() {
     Token base = advance();  // caller has verified isTypeName()
     std::string lexeme = base.lexeme;
     int         line   = base.line;
-    bool        classLike = base.type == TokenType::IDENTIFIER;  // class / mangled instantiation
+    // `Self` (SELF) and class identifiers are the reference-capable ("class-like") types.
+    bool        classLike = base.type == TokenType::IDENTIFIER || base.type == TokenType::SELF;
 
     // Typed raw pointer: ptr<T> -> synthesized "ptr<elem>" token (internal type).
     if (base.type == TokenType::PTR && check(TokenType::LESS)) {
@@ -455,7 +493,8 @@ Token Parser::consumeType() {
     }
 
     if (check(TokenType::AMPERSAND)) {
-        if (!(classLike && classNames.count(lexeme) > 0))
+        bool refOk = base.type == TokenType::SELF || (classLike && classNames.count(lexeme) > 0);
+        if (!refOk)
             throw error(peek(), "'&' reference type is only allowed on class types, not '" + lexeme + "'");
         advance();  // consume '&'
         // Synthesize a single reference-type token; resolvers decode the trailing '&'.
@@ -489,6 +528,14 @@ Stmt Parser::parseDeclaration() {
 
     if (match({ TokenType::ENUM })) {
         return parseEnumDecl();
+    }
+
+    if (match({ TokenType::TRAIT })) {
+        return parseTraitDecl();
+    }
+
+    if (match({ TokenType::IMPL })) {
+        return parseImplDecl();
     }
 
     // Function decl: typeName IDENTIFIER ( ...
@@ -575,6 +622,60 @@ Stmt Parser::parseClassDecl() {
     return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
 }
 
+// One method inside a trait or impl body: `RetType name(params) [mut] (';' | '{ body }')`.
+// In a trait, `bodyOptional` is true and a `;` yields a required (bodyless) method.
+MethodDecl Parser::parseTraitMethod(bool bodyOptional) {
+    if (!isTypeName()) throw error(peek(), "expected method return type");
+    Token retType = consumeType();
+    Token mname   = consume(TokenType::IDENTIFIER, "expected method name");
+    consume(TokenType::LEFT_PAREN, "expected '(' after method name");
+    std::vector<ParamDecl> params;
+    if (!check(TokenType::RIGHT_PAREN)) {
+        do { params.push_back(parseParam()); } while (match({ TokenType::COMMA }));
+    }
+    consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
+    bool methodMut = match({ TokenType::MUT });
+
+    bool      hasBody = true;
+    BlockStmt body;
+    if (bodyOptional && match({ TokenType::SEMICOLON })) {
+        hasBody = false;   // required (bodyless) trait method
+    } else {
+        consume(TokenType::LEFT_BRACE, bodyOptional ? "expected '{' or ';'" : "expected '{' before method body");
+        bool saved = insideFunction;
+        insideFunction = true;
+        body = parseBlockBody();
+        insideFunction = saved;
+    }
+    return MethodDecl{
+        /*isPublic=*/true, /*isConstructor=*/false, /*isDestructor=*/false, /*isStatic=*/false,
+        /*isMut=*/methodMut, hasBody, retType, mname, std::move(params), std::move(body)
+    };
+}
+
+Stmt Parser::parseTraitDecl() {
+    Token name = consume(TokenType::IDENTIFIER, "expected trait name after 'trait'");
+    consume(TokenType::LEFT_BRACE, "expected '{' after trait name");
+    std::deque<MethodDecl> methods;
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd())
+        methods.push_back(parseTraitMethod(/*bodyOptional=*/true));
+    consume(TokenType::RIGHT_BRACE, "expected '}' after trait body");
+    return makeStmt(TraitDeclStmt{ name, std::move(methods) });
+}
+
+Stmt Parser::parseImplDecl() {
+    Token traitName = consume(TokenType::IDENTIFIER, "expected trait name after 'impl'");
+    consume(TokenType::FOR, "expected 'for' in 'impl <Trait> for <Type>'");
+    if (!isTypeName()) throw error(peek(), "expected a type name after 'for'");
+    Token typeName = consumeType();
+    consume(TokenType::LEFT_BRACE, "expected '{' after impl header");
+    std::deque<MethodDecl> methods;
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd())
+        methods.push_back(parseTraitMethod(/*bodyOptional=*/false));
+    consume(TokenType::RIGHT_BRACE, "expected '}' after impl body");
+    return makeStmt(ImplDeclStmt{ traitName, typeName, std::move(methods) });
+}
+
 Stmt Parser::parseEnumDecl() {
     Token name = consume(TokenType::IDENTIFIER, "expected enum name after 'enum'");
     classNames.insert(name.lexeme);   // recognise the enum name as a type name
@@ -651,7 +752,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/true, /*isStatic=*/false,
-                /*isMut=*/false, dtorName, dtorName, {}, std::move(dtorBody)
+                /*isMut=*/false, /*hasBody=*/true, dtorName, dtorName, {}, std::move(dtorBody)
             });
             continue;
         }
@@ -677,7 +778,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/true, /*isDestructor=*/false, /*isStatic=*/false,
-                /*isMut=*/false,
+                /*isMut=*/false, /*hasBody=*/true,
                 ctorName,   // returnType token = class name token (no actual return type)
                 ctorName,   // name token
                 std::move(params), std::move(body)
@@ -716,7 +817,7 @@ void Parser::parseMemberList(const Token& name,
 
             methods.push_back(MethodDecl{
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/false, isStatic,
-                /*isMut=*/methodMut,
+                /*isMut=*/methodMut, /*hasBody=*/true,
                 memberType, memberName,
                 std::move(params), std::move(body)
             });

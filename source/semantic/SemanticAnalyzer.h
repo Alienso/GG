@@ -113,8 +113,12 @@ private:
     bool                inEnumConstructor  = false; // true while analysing an enum's constructor body
     bool                inConstructor      = false; // true while analysing a class's constructor body
     bool                currentThisMutable = false; // true while analysing a `mut` method / ctor / dtor
+    std::string         currentSelfType_;           // the `Self` type while in a trait/impl body
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
+    // Trait declarations (name → AST node) and, per type, the set of traits it implements.
+    std::unordered_map<std::string, const TraitDeclStmt*>          traitRegistry;
+    std::unordered_map<std::string, std::unordered_set<std::string>> implementedTraits;
     // Free-function overload sets (name → overloads). >1 entry ⇒ overloaded ⇒ mangled.
     std::unordered_map<std::string, std::vector<FunctionOverload>> functionRegistry;
     // Chosen overload mangled name per call/new node address (copied to SemanticResult).
@@ -126,6 +130,18 @@ private:
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);
+    // Trait/impl passes: register trait contracts, then attach impl methods to their target
+    // class and check conformance.
+    void collectTraits(const Program& program);
+    void collectImpls(const Program& program);
+    void analyzeImplDecl(const ImplDeclStmt& impl);
+    // Verify generic trait-bound obligations recorded during monomorphization:
+    // each instantiation's concrete type argument must implement its declared trait(s).
+    void checkGenericBounds(const Program& program);
+    // Operator → (built-in trait name, method name), or nullptr if the operator isn't
+    // overloadable. Also recognises the built-in operator-trait names.
+    [[nodiscard]] static const std::pair<const char*, const char*>* operatorTraitFor(TokenType op);
+    [[nodiscard]] static bool isBuiltinTrait(const std::string& name);
     // Build the shared ClassInfo (fields + methods + optional destructor) for a
     // class or enum body. allowDestructor is false for enums.
     [[nodiscard]] ClassInfo buildClassInfo(const std::string& ownerName,

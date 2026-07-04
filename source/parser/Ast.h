@@ -240,6 +240,7 @@ struct MethodDecl {
     bool                   isDestructor  = false;   // true for ~ClassName() — no params, no return type
     bool                   isStatic      = false;   // true for `static T method(...)` — no implicit `this`
     bool                   isMut         = false;   // true for `T method(...) mut` — may mutate `this`
+    bool                   hasBody       = true;    // false for a trait's required (bodyless) method
     Token                  returnType;     // for constructors/destructors: class-name token
     Token                  name;
     std::vector<ParamDecl> params;
@@ -274,6 +275,20 @@ struct EnumDeclStmt {
 
 // ---- Stmt wrapper ----
 
+// A trait declaration: a named contract of method signatures (required = no body) and/or
+// default methods (with a body). `Self` in signatures denotes the implementing type.
+struct TraitDeclStmt {
+    Token                  name;
+    std::deque<MethodDecl> methods;
+};
+
+// An `impl Trait for Type { ... }` block: the methods become methods on `typeName`.
+struct ImplDeclStmt {
+    Token                  traitName;
+    Token                  typeName;
+    std::deque<MethodDecl> methods;
+};
+
 struct Stmt {
     using Variant = std::variant<
         ExprStmt,
@@ -288,15 +303,28 @@ struct Stmt {
         ExternFuncDeclStmt,
         ImportStmt,
         ClassDeclStmt,
-        EnumDeclStmt
+        EnumDeclStmt,
+        TraitDeclStmt,
+        ImplDeclStmt
     >;
     std::unique_ptr<Variant> node;
 };
 
 // ---- Program root ----
 
+// A generic trait-bound obligation recorded when a template is monomorphized:
+// the concrete type argument `typeName` must implement trait `traitName`. Verified
+// by the semantic analyzer (static dispatch — see SemanticAnalyzer::checkGenericBounds).
+struct GenericBoundCheck {
+    std::string typeName;    // concrete type argument (e.g. "Point", "i32", "Vec$i32")
+    std::string traitName;   // required trait (user trait or built-in operator trait)
+    std::string context;     // e.g. "maxOf<Point>" — for the error message
+    int         line = 0;    // use-site line for diagnostics
+};
+
 struct Program {
-    std::vector<Stmt> declarations;
+    std::vector<Stmt>              declarations;
+    std::vector<GenericBoundCheck> genericBoundChecks;
 };
 
 // ============================================================

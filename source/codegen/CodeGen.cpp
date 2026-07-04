@@ -31,6 +31,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     usesRefcount_    = false;
     clonesNeeded_.clear();
     funcParamTypes.clear();
+    funcReturnTypes.clear();
     overloadedBases_.clear();
     freeFnBases_.clear();
     cgClasses_.clear();
@@ -108,6 +109,10 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 const auto& en = std::get<EnumDeclStmt>(*decl.node);
                 for (const MethodDecl& md : en.methods)
                     baseCount[en.name.lexeme + "_" + md.name.lexeme]++;
+            } else if (std::holds_alternative<ImplDeclStmt>(*decl.node)) {
+                const auto& impl = std::get<ImplDeclStmt>(*decl.node);
+                for (const MethodDecl& md : impl.methods)
+                    baseCount[impl.typeName.lexeme + "_" + md.name.lexeme]++;
             }
         }
         for (const auto& [b, c] : baseCount) if (c > 1) overloadedBases_.insert(b);
@@ -123,8 +128,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             std::vector<Type> paramTypes;
             for (const auto& param : function.params)
                 paramTypes.push_back(resolveParamType(param));
-            std::string name = overloadEmittedName(function.name.lexeme, paramTypes,
-                                                    resolveReturnType(function.returnType));
+            Type ret = resolveReturnType(function.returnType);
+            std::string name = overloadEmittedName(function.name.lexeme, paramTypes, ret);
+            funcReturnTypes[name] = ret;
             funcParamTypes[name] = std::move(paramTypes);
         } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
             const auto& externDecl = std::get<ExternFuncDeclStmt>(*decl.node);
@@ -132,6 +138,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             std::vector<Type> paramTypes;
             for (const auto& param : externDecl.params)
                 paramTypes.push_back(typeFromToken(param.typeName.type));
+            funcReturnTypes[externDecl.name.lexeme] = typeFromToken(externDecl.returnType.type);
             funcParamTypes[externDecl.name.lexeme] = std::move(paramTypes);
         } else if (std::holds_alternative<ClassDeclStmt>(*decl.node)) {
             const auto& cls = std::get<ClassDeclStmt>(*decl.node);
@@ -143,7 +150,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                     paramTypes.push_back(resolveParamType(param));
                 Type ret = (md.isConstructor || md.isDestructor)
                          ? Type{TypeKind::Void} : resolveReturnType(md.returnType);
-                funcParamTypes[overloadEmittedName(base, paramTypes, ret)] = std::move(paramTypes);
+                std::string en2 = overloadEmittedName(base, paramTypes, ret);
+                funcReturnTypes[en2] = ret;
+                funcParamTypes[en2] = std::move(paramTypes);
             }
         } else if (std::holds_alternative<EnumDeclStmt>(*decl.node)) {
             const auto& en = std::get<EnumDeclStmt>(*decl.node);
@@ -152,8 +161,23 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
+                funcReturnTypes[mangledName] = resolveReturnType(md.returnType);
                 funcParamTypes[mangledName] = std::move(paramTypes);
             }
+        } else if (std::holds_alternative<ImplDeclStmt>(*decl.node)) {
+            const auto& impl = std::get<ImplDeclStmt>(*decl.node);
+            currentClassName_ = impl.typeName.lexeme;   // so `Self` in signatures resolves
+            for (const MethodDecl& md : impl.methods) {
+                std::string base = impl.typeName.lexeme + "_" + md.name.lexeme;
+                std::vector<Type> paramTypes;
+                for (const auto& param : md.params)
+                    paramTypes.push_back(resolveParamType(param));
+                Type ret = resolveReturnType(md.returnType);
+                std::string en3 = overloadEmittedName(base, paramTypes, ret);
+                funcReturnTypes[en3] = ret;
+                funcParamTypes[en3] = std::move(paramTypes);
+            }
+            currentClassName_ = "";
         }
     }
 
@@ -172,6 +196,12 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             genFunction(std::get<FunctionDeclStmt>(*decl.node));
         else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node))
             genExternDecl(std::get<ExternFuncDeclStmt>(*decl.node));
+        else if (std::holds_alternative<ImplDeclStmt>(*decl.node)) {
+            // An impl block's methods are emitted as methods on the target class.
+            const auto& impl = std::get<ImplDeclStmt>(*decl.node);
+            for (const MethodDecl& md : impl.methods)
+                genMethod(impl.typeName.lexeme, md);
+        }
     }
 
     // Emit the pre-main initializers (enum variant singletons, then static fields).

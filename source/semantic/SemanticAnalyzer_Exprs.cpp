@@ -1,5 +1,9 @@
 #include "SemanticAnalyzer.h"
 
+// Best-match overload pick for operator desugaring (defined below).
+static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
+                              const std::vector<Type>& argTypes);
+
 // ============================================================
 // Expression analysis
 // ============================================================
@@ -227,6 +231,27 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
             return Type{TypeKind::Bool};
 
         case TokenType::MINUS:
+            // Operator overloading: unary '-' on a class → the Neg trait's `neg` method.
+            if (operandType.kind == TypeKind::Object || operandType.kind == TypeKind::Reference) {
+                auto implIt = implementedTraits.find(operandType.className);
+                if (implIt == implementedTraits.end() || !implIt->second.count("Neg")) {
+                    error(unary.operatorToken, "type '" + operandType.className
+                          + "' does not implement 'Neg' for unary '-'");
+                    return Type{TypeKind::Error};
+                }
+                ClassInfo& info = classRegistry.at(operandType.className);
+                auto mit = info.methods.find("neg");
+                int idx = (mit == info.methods.end()) ? -1 : pickOverloadByArgs(mit->second, {});
+                if (idx < 0) {
+                    error(unary.operatorToken, "no matching 'neg' method on '" + operandType.className + "'");
+                    return Type{TypeKind::Error};
+                }
+                const ClassInfo::Method& m = mit->second[idx];
+                if (mit->second.size() > 1)
+                    resolvedCallee[&unary] = mangleOverload(operandType.className + "_neg",
+                                                            m.paramTypes, m.returnType);
+                return m.returnType;
+            }
             if (!isError(operandType) && !isNumeric(operandType.kind)) {
                 error(unary.operatorToken, "operand of unary '-' must be numeric, got " + typeName(operandType));
                 return Type{TypeKind::Error};
@@ -263,11 +288,59 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
     }
 }
 
+// Pick the best-matching overload in `set` for the given argument types (exact > widening >
+// narrowing), or -1 if none is viable. A lightweight resolver for operator desugaring.
+static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
+                              const std::vector<Type>& argTypes) {
+    int best = -1, bestCost = 0;
+    for (int i = 0; i < static_cast<int>(set.size()); ++i) {
+        const ClassInfo::Method& m = set[i];
+        if (m.paramTypes.size() != argTypes.size()) continue;
+        bool ok = true;
+        int  cost = 0;
+        for (size_t k = 0; k < argTypes.size(); ++k) {
+            if (argTypes[k] == m.paramTypes[k]) continue;
+            CastResult cr = canImplicitlyCast(argTypes[k], m.paramTypes[k]);
+            if (cr == CastResult::None) { ok = false; break; }
+            cost += (cr == CastResult::Warn) ? 2 : 1;
+        }
+        if (ok && (best < 0 || cost < bestCost)) { best = i; bestCost = cost; }
+    }
+    return best;
+}
+
 Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
     Type leftType  = analyzeExpr(*binary.left);
     Type rightType = analyzeExpr(*binary.right);
 
     if (isError(leftType) || isError(rightType)) return Type{TypeKind::Error};
+
+    // Operator overloading: if the left operand is a class, desugar to its trait method.
+    if (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference) {
+        if (const auto* ot = operatorTraitFor(binary.operatorToken.type)) {
+            const std::string trait  = ot->first;
+            const std::string method = ot->second;
+            auto implIt = implementedTraits.find(leftType.className);
+            if (implIt == implementedTraits.end() || !implIt->second.count(trait)) {
+                error(binary.operatorToken, "type '" + leftType.className + "' does not implement '"
+                      + trait + "' for operator '" + binary.operatorToken.lexeme + "'");
+                return Type{TypeKind::Error};
+            }
+            ClassInfo& info = classRegistry.at(leftType.className);
+            auto mit = info.methods.find(method);
+            int idx = (mit == info.methods.end()) ? -1 : pickOverloadByArgs(mit->second, { rightType });
+            if (idx < 0) {
+                error(binary.operatorToken, "no matching '" + method + "' method on '"
+                      + leftType.className + "' for operator '" + binary.operatorToken.lexeme + "'");
+                return Type{TypeKind::Error};
+            }
+            const ClassInfo::Method& m = mit->second[idx];
+            if (mit->second.size() > 1)
+                resolvedCallee[&binary] = mangleOverload(leftType.className + "_" + method,
+                                                         m.paramTypes, m.returnType);
+            return (trait == "Eq" || trait == "Ord") ? Type{TypeKind::Bool} : m.returnType;
+        }
+    }
 
     switch (binary.operatorToken.type) {
         // Arithmetic
@@ -707,13 +780,34 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
 Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
     const Token& site = exprFirstToken(*indexExpr.object);
     Type objectType   = analyzeExpr(*indexExpr.object);
-
-    // Index must be an integer (validate before bailing on object errors).
-    Type indexType = analyzeExpr(*indexExpr.index);
-    if (!isError(indexType) && !isInteger(indexType.kind))
-        error(site, "index must be an integer type, got " + typeName(indexType));
+    Type indexType    = analyzeExpr(*indexExpr.index);
 
     if (isError(objectType)) return Type{TypeKind::Error};
+
+    // Operator overloading: a[i] on a class → the Index trait's `get` method.
+    if (objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference) {
+        auto implIt = implementedTraits.find(objectType.className);
+        if (implIt == implementedTraits.end() || !implIt->second.count("Index")) {
+            error(site, "type '" + objectType.className + "' does not implement 'Index' for '[]'");
+            return Type{TypeKind::Error};
+        }
+        ClassInfo& info = classRegistry.at(objectType.className);
+        auto mit = info.methods.find("get");
+        int idx = (mit == info.methods.end()) ? -1 : pickOverloadByArgs(mit->second, { indexType });
+        if (idx < 0) {
+            error(site, "no matching 'get' method on '" + objectType.className + "' for '[]'");
+            return Type{TypeKind::Error};
+        }
+        const ClassInfo::Method& m = mit->second[idx];
+        if (mit->second.size() > 1)
+            resolvedCallee[&indexExpr] = mangleOverload(objectType.className + "_get",
+                                                        m.paramTypes, m.returnType);
+        return m.returnType;
+    }
+
+    // Index must be an integer for built-in array / pointer indexing.
+    if (!isError(indexType) && !isInteger(indexType.kind))
+        error(site, "index must be an integer type, got " + typeName(indexType));
 
     if (objectType.kind == TypeKind::Array) {
         if (!isError(indexType))
@@ -733,13 +827,36 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
     Type objectType   = analyzeExpr(*indexAssign.object);
 
     Type indexType = analyzeExpr(*indexAssign.index);
-    if (!isError(indexType) && !isInteger(indexType.kind))
-        error(site, "index must be an integer type, got " + typeName(indexType));
 
     if (isError(objectType)) {
         analyzeExpr(*indexAssign.value);
         return Type{TypeKind::Error};
     }
+
+    // Operator overloading: a[i] = v on a class → the Index trait's `set(i, v)` method.
+    if (objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference) {
+        Type valueType = analyzeExpr(*indexAssign.value);
+        auto implIt = implementedTraits.find(objectType.className);
+        if (implIt == implementedTraits.end() || !implIt->second.count("Index")) {
+            error(site, "type '" + objectType.className + "' does not implement 'Index' for '[]'");
+            return Type{TypeKind::Error};
+        }
+        ClassInfo& info = classRegistry.at(objectType.className);
+        auto mit = info.methods.find("set");
+        int idx = (mit == info.methods.end()) ? -1 : pickOverloadByArgs(mit->second, { indexType, valueType });
+        if (idx < 0) {
+            error(site, "no matching 'set' method on '" + objectType.className + "' for indexed assignment");
+            return Type{TypeKind::Error};
+        }
+        const ClassInfo::Method& m = mit->second[idx];
+        if (mit->second.size() > 1)
+            resolvedCallee[&indexAssign] = mangleOverload(objectType.className + "_set",
+                                                          m.paramTypes, m.returnType);
+        return valueType;
+    }
+
+    if (!isError(indexType) && !isInteger(indexType.kind))
+        error(site, "index must be an integer type, got " + typeName(indexType));
 
     Type elementType;
     if (objectType.kind == TypeKind::Array) {

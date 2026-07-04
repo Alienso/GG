@@ -166,7 +166,12 @@ Type CodeGen::exprType(const Expr& expression) const {
 Type CodeGen::resolveParamType(const ParamDecl& param) const {
     // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
     Type synth = decodeSynthesizedType(param.typeName);
-    if (!isError(synth)) return synth;
+    if (!isError(synth)) {
+        if (synth.className == "Self") synth.className = currentClassName_;   // `Self&` in an impl
+        return synth;
+    }
+    if (param.typeName.type == TokenType::SELF)
+        return makeObjectType(currentClassName_);
     if (param.typeName.type == TokenType::IDENTIFIER && cgClasses_.count(param.typeName.lexeme))
         return makeObjectType(param.typeName.lexeme);
     return typeFromToken(param.typeName.type);
@@ -176,7 +181,12 @@ Type CodeGen::resolveReturnType(const Token& typeToken) const {
     // "Class&" → reference return (lowers to ptr); "ptr<Elem>" → typed pointer.
     // Bare class returns (by value) are unsupported and fall through to typeFromToken.
     Type synth = decodeSynthesizedType(typeToken);
-    if (!isError(synth)) return synth;
+    if (!isError(synth)) {
+        if (synth.className == "Self") synth.className = currentClassName_;   // `Self&` in an impl
+        return synth;
+    }
+    if (typeToken.type == TokenType::SELF)
+        return makeObjectType(currentClassName_);
     // Enum return-by-value: an enum value is a pointer to a singleton, so a bare
     // enum return type lowers to `ptr` (unlike bare class-by-value, which is rejected).
     if (typeToken.type == TokenType::IDENTIFIER && cgEnumNames_.count(typeToken.lexeme))

@@ -21,7 +21,8 @@ via monomorphization.
 10. [Memory model](#10-memory-model)
 11. [Generics](#11-generics)
 12. [Imports & extern](#12-imports--extern)
-13. [What GG does NOT support](#13-what-gg-does-not-support)
+13. [Traits & operator overloading](#13-traits--operator-overloading)
+14. [What GG does NOT support](#14-what-gg-does-not-support)
 
 ---
 
@@ -881,10 +882,37 @@ import "box_lib.gg";
 Box<i32>& b = new Box<i32>(99);   // Box<T> was declared in box_lib.gg
 ```
 
-### Constraints
-- There are **no type constraints** (`where T: Comparable` etc.) — the compiler
-  just monomorphizes and will produce a type error if the body is invalid for that `T`.
+### Trait bounds
+A type parameter may carry **trait bounds** requiring the concrete type argument to
+implement one or more traits (see §13). Use `T: Trait`, or `T: TraitA + TraitB` for
+several, and bound each parameter independently:
+```gg
+trait Comparable { i32 compareTo(Self& other); }
+
+T& maxOf<T: Comparable>(T& a, T& b) {
+    if (a.compareTo(b) >= 0) { return a; }
+    return b;
+}
+
+class Wrapper<T: Show + Ord> { T& inner; /* ... */ }
+```
+Bounds accept **user traits and the built-in operator traits** (`Add`, `Ord`, `Eq`, …).
+Dispatch is static — bounds add no runtime cost.
+
+Enforcement is at each **instantiation site**: `maxOf<Point>` requires `Point` to
+implement `Comparable`, otherwise you get a clear error —
+`type 'Point' does not satisfy bound 'Comparable' required by 'maxOf$Point'`. A
+primitive argument (`maxOf<i32>`) or an unknown trait name in a bound is likewise
+rejected.
+
+Because generics are monomorphized before type checking, the bound is **not** used to
+pre-check the generic body against the trait interface — a body may call any method the
+concrete type happens to have, not only those declared by its bounds. Bounds document
+intent and guarantee a clean instantiation-site error when a type doesn't conform.
+
+### Other constraints
 - Recursive instantiation (e.g. `Node<Node<T>>`) is supported.
+- There are no `where` clauses, associated types, or trait objects (`dyn`).
 
 ---
 
@@ -922,7 +950,102 @@ Standard library modules in `stdlib/` wrap the most commonly needed C functions:
 
 ---
 
-## 13. What GG does NOT support
+## 13. Traits & operator overloading
+
+GG has no inheritance, so shared contracts across types are expressed with **traits**
+(similar to Rust). A trait is a set of method signatures; a type opts in with a separate
+`impl Trait for Type { … }` block. Dispatch is **static** — there are no vtables and no
+trait objects. Traits can also bound generic type parameters (`<T: Trait>`, see §11).
+
+### Declaring a trait
+```gg
+trait Describe {
+    i32 size();            // required method — signature only, ends with ';'
+    Self& merge(Self& other);
+}
+```
+- A trait body contains **method signatures only** (no fields, no constructors).
+- `Self` is a type keyword meaning "the implementing type"; it may appear in parameter and
+  return positions (including as `Self&`).
+- A trailing `mut` marks a self-mutating method, exactly as on a class method
+  (`void reset() mut;`).
+- **Default (bodied) trait methods are not supported yet** — every trait method must be a
+  bare signature ending in `;`. Giving a trait method a `{ … }` body is a compile error.
+
+### Implementing a trait
+```gg
+class Acc {
+    mut i32 n;
+    Acc(i32 x) { n = x; }
+    i32 get() { return n; }
+}
+
+impl Describe for Acc {
+    i32 size() { return n; }
+    Acc& merge(Acc& other) { return new Acc(n + other.n); }   // Self → Acc
+}
+```
+- An impl's methods simply **become methods on the target type** (mangled `@Acc_size`,
+  `@Acc_merge`, …). They may use implicit `this`, call other methods, and read/write fields
+  under the usual `mut` rules.
+- The target of an `impl` must be a **class** — not a primitive and not an enum.
+- The compiler checks conformance: every required method must be provided with a matching
+  signature (after `Self` substitution). A missing or mismatched method is an error.
+- Impl methods participate in the normal overload machinery — you can overload alongside them.
+
+### Operator overloading
+
+Operators desugar to **named trait methods**. An operator is only overloaded when the
+left/receiver operand's class `impl`s the corresponding built-in trait; otherwise the usual
+"operands must be numeric" rules apply. The built-in operator traits need **no declaration** —
+they are recognised by name.
+
+| Operator(s)            | Trait  | Method to implement          | Result type            |
+|------------------------|--------|------------------------------|------------------------|
+| `+`                    | `Add`  | `T add(T& rhs)`              | the method's return    |
+| `-` (binary)           | `Sub`  | `T sub(T& rhs)`              | the method's return    |
+| `*`                    | `Mul`  | `T mul(T& rhs)`              | the method's return    |
+| `/`                    | `Div`  | `T div(T& rhs)`              | the method's return    |
+| `%`                    | `Rem`  | `T rem(T& rhs)`              | the method's return    |
+| `==`, `!=`             | `Eq`   | `bool eq(T& rhs)`            | `bool`                 |
+| `<`, `<=`, `>`, `>=`   | `Ord`  | `i32 cmp(T& rhs)`            | `bool`                 |
+| `-` (unary)            | `Neg`  | `T neg()`                    | the method's return    |
+| `a[i]`                 | `Index`| `E get(I i)`                 | the element type `E`   |
+| `a[i] = v`             | `Index`| `void set(I i, E v)`         | —                      |
+
+- `a == b` calls `a.eq(b)`; `a != b` calls `a.eq(b)` then negates it.
+- `a < b` calls `a.cmp(b)` and compares the `i32` result against `0` (`< 0`, `<= 0`, `> 0`,
+  `>= 0` for `<`, `<=`, `>`, `>=`).
+- Unary `-a` calls `a.neg()`; `a[i]` calls `a.get(i)`; `a[i] = v` calls `a.set(i, v)`.
+
+```gg
+class Vec2 {
+    mut i32 x; mut i32 y;
+    Vec2(i32 a, i32 b) { x = a; y = b; }
+    i32 sum() { return x + y; }
+}
+impl Add   for Vec2 { Vec2& add(Vec2& r) { return new Vec2(x + r.x, y + r.y); } }
+impl Eq    for Vec2 { bool  eq(Vec2& r)  { return x == r.x && y == r.y; } }
+impl Ord   for Vec2 { i32   cmp(Vec2& r) { return sum() - r.sum(); } }
+impl Neg   for Vec2 { Vec2& neg()        { return new Vec2(0 - x, 0 - y); } }
+impl Index for Vec2 {
+    i32  get(i32 i)          { if (i == 0) { return x; } return y; }
+    void set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
+}
+
+i32 main() {
+    Vec2& a = new Vec2(1, 2);
+    Vec2& b = new Vec2(3, 4);
+    Vec2& c = a + b;          // (4, 6)
+    bool  lt = a < b;         // true  (3 < 7)
+    Vec2& n = -a;             // (-1, -2)
+    return c[0] + c[1];       // Index get → 10
+}
+```
+
+---
+
+## 14. What GG does NOT support
 
 The following features are **currently absent** from the current implementation. They may be added in the future.
 Attempting them will produce a compile error (or will simply not parse).
@@ -944,13 +1067,12 @@ Attempting them will produce a compile error (or will simply not parse).
 | Variadic functions | No `...` — use `extern` to call C variadics |
 | Closures / lambdas | No anonymous functions or captures |
 | Multiple return values | Return a class instance instead |
-| Operator overloading | Arithmetic operators always mean their built-in operations |
 
 ### Classes
 | Missing feature | Notes |
 |-----------------|-------|
 | Inheritance / subclassing | No `extends` or base classes |
-| Virtual methods / interfaces | No dynamic dispatch; no vtable |
+| Virtual methods / dynamic dispatch | Traits (§13) are statically dispatched; no vtable, no trait objects (`dyn`) |
 | `const`-qualified *types* | There is no `const T` type qualifier; immutability is a property of the *binding* (`mut` opts out), not the type. See §2/§8 for const-by-default. |
 | File-scope / internal linkage for statics | Static fields keep external linkage; no `private`-style linkage control |
 | Access modifiers beyond `private` | No `public` keyword, no `protected`; `private` is advisory (warning only) |

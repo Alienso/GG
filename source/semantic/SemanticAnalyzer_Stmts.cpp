@@ -72,6 +72,8 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ImportStmt&)          { return false; },
         [](const ClassDeclStmt&)       { return false; },
         [](const EnumDeclStmt&)        { return false; },
+        [](const TraitDeclStmt&)       { return false; },
+        [](const ImplDeclStmt&)        { return false; },
     }, *stmt.node);
 }
 
@@ -94,6 +96,8 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ImportStmt&)                       { /* resolved before semantic pass */ },
         [&](const ClassDeclStmt& classDecl)          { analyzeClassDecl(classDecl); },
         [&](const EnumDeclStmt& enumDecl)            { analyzeEnumDecl(enumDecl); },
+        [&](const TraitDeclStmt&)                    { /* validated in collectTraits */ },
+        [&](const ImplDeclStmt& impl)                { analyzeImplDecl(impl); },
     }, *stmt.node);
 }
 
@@ -359,6 +363,78 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     }
 
     currentClassName = savedClassName;
+}
+
+// Analyse the method bodies of an `impl Trait for Type { … }` block. The methods were
+// already registered onto the target class in collectImpls; here we type-check bodies with
+// `this`/`Self` bound to the target type. Mirrors analyzeClassDecl's per-method loop.
+void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
+    const std::string& type = impl.typeName.lexeme;
+    if (!classRegistry.count(type)) return;   // unknown target — collectImpls already reported it
+
+    std::string savedClassName = currentClassName;
+    std::string savedSelfType  = currentSelfType_;
+    currentClassName = type;
+    currentSelfType_ = type;
+
+    for (const MethodDecl& md : impl.methods) {
+        if (!md.hasBody) continue;   // impl methods always have bodies; defensive
+
+        std::optional<Type> savedReturnType = currentReturnType;
+        int                 savedLoopDepth  = loopDepth;
+        bool                savedStatic     = currentMethodIsStatic;
+        bool                savedInCtor     = inConstructor;
+        bool                savedThisMut    = currentThisMutable;
+        currentMethodIsStatic = md.isStatic;
+        inConstructor         = false;
+        currentThisMutable    = md.isMut;
+        currentReturnType     = resolveTypeToken(md.returnType);
+        loopDepth             = 0;
+
+        checkRawPtrAllowed(md.returnType, md.name);
+        for (const ParamDecl& param : md.params)
+            checkRawPtrAllowed(param.typeName, param.name);
+
+        enterScope();
+        if (!md.isStatic)
+            symbolTable.declare("this", Symbol{
+                Symbol::Kind::Variable, makeObjectType(type), impl.typeName, {},
+                /*isParameter=*/false, /*isInitialized=*/true});
+
+        for (const ParamDecl& param : md.params) {
+            Type paramType = resolveTypeToken(param.typeName);
+            if (paramType.kind == TypeKind::Void) {
+                error(param.typeName, "parameter '" + param.name.lexeme + "' cannot have type 'void'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (paramType.kind == TypeKind::Object) {
+                error(param.typeName, "object parameter '" + param.name.lexeme
+                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
+                paramType = Type{TypeKind::Error};
+            }
+            if (!symbolTable.declare(param.name.lexeme, Symbol{
+                    Symbol::Kind::Variable, paramType, param.name, {},
+                    /*isParameter=*/true, /*isInitialized=*/true,
+                    /*isMutable=*/paramIsMutable(param, paramType)}))
+                error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
+        }
+
+        for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
+
+        if (currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
+            warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+
+        exitScope();
+
+        currentReturnType     = savedReturnType;
+        loopDepth             = savedLoopDepth;
+        currentMethodIsStatic = savedStatic;
+        inConstructor         = savedInCtor;
+        currentThisMutable    = savedThisMut;
+    }
+
+    currentClassName = savedClassName;
+    currentSelfType_ = savedSelfType;
 }
 
 // ============================================================

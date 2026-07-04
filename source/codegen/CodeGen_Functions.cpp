@@ -223,18 +223,24 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
 
     currentReturnType        = resolveReturnType(function.returnType);
     std::string returnIrType = irTypeName(currentReturnType);
-    currentStaticPrefix_     = function.name.lexeme;
 
+    std::vector<Type> paramTypes;
     std::string paramStr;
     bool first = true;
     for (const auto& p : function.params) {
+        Type pt = resolveParamType(p);
+        paramTypes.push_back(pt);
         if (!first) paramStr += ", ";
         first = false;
-        paramStr += paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
+        paramStr += paramIrType(pt) + " %" + p.name.lexeme;
     }
 
+    // Overloaded free functions emit an overload-mangled symbol; others keep the plain name.
+    std::string emitName = overloadEmittedName(function.name.lexeme, paramTypes, currentReturnType);
+    currentStaticPrefix_     = emitName;
+
     IRFunction irFunc;
-    irFunc.signature = "define " + returnIrType + " @" + function.name.lexeme + "(" + paramStr + ")";
+    irFunc.signature = "define " + returnIrType + " @" + emitName + "(" + paramStr + ")";
     module.functions.push_back(std::move(irFunc));
     currentFunction = &module.functions.back();
     currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
@@ -261,17 +267,23 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     currentReturnType        = isVoidLike ? Type{TypeKind::Void} : resolveReturnType(method.returnType);
     std::string returnIrType = isVoidLike ? "void" : irTypeName(currentReturnType);
 
-    std::string mangledName = method.isDestructor
+    std::string base = method.isDestructor
         ? className + "_dtor"
         : className + "_" + method.name.lexeme;
-    currentStaticPrefix_ = mangledName;
 
     // Static methods are class-level: no implicit `this`/`%self` parameter.
+    std::vector<Type> paramTypes;
     std::string paramStr = method.isStatic ? "" : "ptr %self";
     for (const auto& p : method.params) {
+        Type pt = resolveParamType(p);
+        paramTypes.push_back(pt);
         if (!paramStr.empty()) paramStr += ", ";
-        paramStr += paramIrType(resolveParamType(p)) + " %" + p.name.lexeme;
+        paramStr += paramIrType(pt) + " %" + p.name.lexeme;
     }
+
+    // Overloaded methods/constructors emit an overload-mangled symbol.
+    std::string mangledName = overloadEmittedName(base, paramTypes, currentReturnType);
+    currentStaticPrefix_ = mangledName;
 
     IRFunction irFunc;
     irFunc.signature = "define " + returnIrType + " @" + mangledName + "(" + paramStr + ")";

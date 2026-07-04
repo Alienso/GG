@@ -8,15 +8,31 @@
 // Public entry point
 // ============================================================
 
+std::string CodeGen::overloadEmittedName(const std::string& base,
+                                         const std::vector<Type>& params, const Type& ret) const {
+    return overloadedBases_.count(base) ? mangleOverload(base, params, ret) : base;
+}
+
+std::string CodeGen::calleeName(const void* node, const std::string& plainBase) const {
+    if (resolvedCallee_) {
+        auto it = resolvedCallee_->find(node);
+        if (it != resolvedCallee_->end() && !it->second.empty()) return it->second;
+    }
+    return plainBase;
+}
+
 IRModule CodeGen::generate(const Program& program, const SemanticResult& semanticResult, const CompilerOptions& options) {
     module           = {};
     this->typeMap    = &semanticResult.typeMap;
+    this->resolvedCallee_ = &semanticResult.resolvedCallee;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;
     usesRefcount_    = false;
     clonesNeeded_.clear();
     funcParamTypes.clear();
+    overloadedBases_.clear();
+    freeFnBases_.clear();
     cgClasses_.clear();
     cgEnumNames_.clear();
     globalCtors_.clear();
@@ -73,17 +89,46 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         cgClasses_[en.name.lexeme] = std::move(cgi);
     }
 
-    // Build function parameter type table (used in genCall to cast arguments).
+    // Determine which base symbol names are overloaded (declared more than once) — only
+    // those get overload-mangled names. Bases: free-fn name, `Class_method` / `Class_dtor`.
+    {
+        std::unordered_map<std::string, int> baseCount;
+        for (const auto& decl : program.declarations) {
+            if (!decl.node) continue;
+            if (std::holds_alternative<FunctionDeclStmt>(*decl.node))
+                baseCount[std::get<FunctionDeclStmt>(*decl.node).name.lexeme]++;
+            else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node))
+                baseCount[std::get<ExternFuncDeclStmt>(*decl.node).name.lexeme]++;
+            else if (std::holds_alternative<ClassDeclStmt>(*decl.node)) {
+                const auto& cls = std::get<ClassDeclStmt>(*decl.node);
+                for (const MethodDecl& md : cls.methods)
+                    baseCount[md.isDestructor ? cls.name.lexeme + "_dtor"
+                                              : cls.name.lexeme + "_" + md.name.lexeme]++;
+            } else if (std::holds_alternative<EnumDeclStmt>(*decl.node)) {
+                const auto& en = std::get<EnumDeclStmt>(*decl.node);
+                for (const MethodDecl& md : en.methods)
+                    baseCount[en.name.lexeme + "_" + md.name.lexeme]++;
+            }
+        }
+        for (const auto& [b, c] : baseCount) if (c > 1) overloadedBases_.insert(b);
+    }
+
+    // Build function parameter type table (used in genCall to cast arguments), keyed by the
+    // emitted symbol name (overload-mangled when the base is overloaded).
     for (const auto& decl : program.declarations) {
         if (!decl.node) continue;
         if (std::holds_alternative<FunctionDeclStmt>(*decl.node)) {
             const auto& function = std::get<FunctionDeclStmt>(*decl.node);
+            freeFnBases_.insert(function.name.lexeme);
             std::vector<Type> paramTypes;
             for (const auto& param : function.params)
                 paramTypes.push_back(resolveParamType(param));
-            funcParamTypes[function.name.lexeme] = std::move(paramTypes);
+            std::string name = overloadEmittedName(function.name.lexeme, paramTypes,
+                                                    resolveReturnType(function.returnType));
+            funcParamTypes[name] = std::move(paramTypes);
         } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
             const auto& externDecl = std::get<ExternFuncDeclStmt>(*decl.node);
+            freeFnBases_.insert(externDecl.name.lexeme);
             std::vector<Type> paramTypes;
             for (const auto& param : externDecl.params)
                 paramTypes.push_back(typeFromToken(param.typeName.type));
@@ -91,14 +136,14 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         } else if (std::holds_alternative<ClassDeclStmt>(*decl.node)) {
             const auto& cls = std::get<ClassDeclStmt>(*decl.node);
             for (const MethodDecl& md : cls.methods) {
-                // Destructor is mangled as ClassName_dtor
-                std::string mangledName = md.isDestructor
-                    ? cls.name.lexeme + "_dtor"
-                    : cls.name.lexeme + "_" + md.name.lexeme;
+                std::string base = md.isDestructor ? cls.name.lexeme + "_dtor"
+                                                   : cls.name.lexeme + "_" + md.name.lexeme;
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
-                funcParamTypes[mangledName] = std::move(paramTypes);
+                Type ret = (md.isConstructor || md.isDestructor)
+                         ? Type{TypeKind::Void} : resolveReturnType(md.returnType);
+                funcParamTypes[overloadEmittedName(base, paramTypes, ret)] = std::move(paramTypes);
             }
         } else if (std::holds_alternative<EnumDeclStmt>(*decl.node)) {
             const auto& en = std::get<EnumDeclStmt>(*decl.node);

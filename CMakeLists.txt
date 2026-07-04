@@ -107,6 +107,7 @@ add_executable(GG_tests
         tests/static_tests.cpp
         tests/const_tests.cpp
         tests/implicit_this_tests.cpp
+        tests/overload_tests.cpp
         tests/cast_tests.cpp
         ${GG_SOURCES}
 )

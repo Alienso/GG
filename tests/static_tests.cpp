@@ -220,8 +220,8 @@ TEST_CASE("Static - method registered with isStatic in classRegistry", "[static]
     )");
     REQUIRE_FALSE(result.hadError);
     const auto& info = result.classRegistry.at("C");
-    REQUIRE(info.methods.at("get").isStatic);
-    REQUIRE_FALSE(info.methods.at("inst").isStatic);
+    REQUIRE(info.methods.at("get").front().isStatic);
+    REQUIRE_FALSE(info.methods.at("inst").front().isStatic);
 }
 
 TEST_CASE("Static - call via ClassName::method type-checks", "[static][semantic]") {

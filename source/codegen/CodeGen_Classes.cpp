@@ -153,7 +153,7 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
             return genStaticCall(objType.className, mc, resolvedType, returnIrType);
     }
 
-    std::string mangledName  = objType.className + "_" + mc.method.lexeme;
+    std::string mangledName  = calleeName(&mc, objType.className + "_" + mc.method.lexeme);
 
     auto funcIt = funcParamTypes.find(mangledName);
     const std::vector<Type>* declaredParams =
@@ -178,7 +178,7 @@ std::string CodeGen::genStaticCall(const std::string& className,
                                    const MethodCallExpr& mc,
                                    const Type& resolvedType,
                                    const std::string& returnIrType) {
-    std::string mangledName = className + "_" + mc.method.lexeme;
+    std::string mangledName = calleeName(&mc, className + "_" + mc.method.lexeme);
 
     auto funcIt = funcParamTypes.find(mangledName);
     const std::vector<Type>* declaredParams =

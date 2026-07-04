@@ -53,8 +53,25 @@ struct ClassInfo {
     std::vector<std::string>              fieldOrder;   // preserves declaration order
     std::unordered_map<std::string, Field>  fields;
     std::unordered_map<std::string, StaticField> staticFields;
-    std::unordered_map<std::string, Method> methods;
+    // Overload set per method/constructor name (>1 entry ⇒ overloaded ⇒ mangled).
+    std::unordered_map<std::string, std::vector<Method>> methods;
     std::optional<Method>                   destructor; // at most one per class
+};
+
+// A free-function overload (or extern). Overload sets live in SemanticAnalyzer::functionRegistry.
+struct FunctionOverload {
+    Type              returnType;
+    std::vector<Type> paramTypes;
+    std::vector<bool> paramMut;
+    bool              isExtern = false;
+    Token             decl;
+};
+
+// One overload candidate for resolution: pointers into a registry entry + its return type.
+struct OverloadCand {
+    const std::vector<Type>* params;
+    const std::vector<bool>* paramMut;
+    Type                     returnType;
 };
 
 // ---- EnumInfo: semantic information about a Java-style enum ----
@@ -72,6 +89,9 @@ struct SemanticResult {
     ExprTypeMap typeMap;
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
+    // Chosen overload's mangled symbol name per call/new expression node (keyed by the
+    // node's address). Absent/empty ⇒ the callee is not overloaded ⇒ use its plain name.
+    std::unordered_map<const void*, std::string> resolvedCallee;
 };
 
 class SemanticAnalyzer {
@@ -95,6 +115,13 @@ private:
     bool                currentThisMutable = false; // true while analysing a `mut` method / ctor / dtor
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
+    // Free-function overload sets (name → overloads). >1 entry ⇒ overloaded ⇒ mangled.
+    std::unordered_map<std::string, std::vector<FunctionOverload>> functionRegistry;
+    // Chosen overload mangled name per call/new node address (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> resolvedCallee;
+    // Contextual "expected type" for return-type overload disambiguation (set/restored
+    // around initializer / rhs / return / field-assign / cast-target sub-analysis).
+    std::optional<Type> expectedType_;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
 
     // Pass 0: collect class declarations (before collectFunctions)
@@ -142,7 +169,17 @@ private:
     // may refer to a member of the enclosing class. Returns nullptr when not applicable.
     [[nodiscard]] const ClassInfo::Field* currentInstanceField(const std::string& name) const;
     [[nodiscard]] const Type*             currentStaticFieldType(const std::string& name) const;
-    [[nodiscard]] const ClassInfo::Method* currentClassMethod(const std::string& name) const;
+    [[nodiscard]] const std::vector<ClassInfo::Method>* currentClassMethods(const std::string& name) const;
+    // Best-match overload resolution. Analyzes `args` once, ranks candidates by argument
+    // conversion cost (exact > widening > narrowing), breaks ties on return type via
+    // expectedType_, emits the final arg cast/mut diagnostics on the winner, and returns
+    // the winning candidate index — or -1 (having reported no-match/ambiguity).
+    int resolveOverload(const Token& at, const std::string& what,
+                        const std::vector<OverloadCand>& cands,
+                        const std::vector<std::unique_ptr<Expr>>& args);
+    // Analyze `e` with a contextual expected type set (for return-type overload
+    // disambiguation), restoring the previous expected type afterward.
+    Type analyzeWithExpected(const Expr& e, const Type& expected);
     // Validate a `++`/`--` target (local, or implicit-`this` field). Emits an error and
     // returns false if the target is immutable; returns true otherwise.
     bool incDecTargetOk(const Token& op, const std::string& name);

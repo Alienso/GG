@@ -211,6 +211,31 @@ std::string typeName(const Type& t) {
 }
 
 // ============================================================
+// Overload name mangling — a symbol-safe, deterministic encoding of a type and of a
+// full (name, params, return) signature. `$` separates components and `.` marks a
+// reference/element; both are valid unquoted LLVM identifier characters.
+// ============================================================
+
+std::string mangleType(const Type& t) {
+    switch (t.kind) {
+        case TypeKind::Object:    return t.className;
+        case TypeKind::Enum:      return t.className;
+        case TypeKind::Reference: return t.className + ".ref";
+        case TypeKind::Ptr:       return "ptr";
+        case TypeKind::TypedPtr:  return "ptr." + mangleType(typedPtrElement(t));
+        case TypeKind::Array:     return mangleType(Type{t.elementKind}) + ".arr" + std::to_string(t.arraySize);
+        default:                  return typeName(t);   // primitives, void
+    }
+}
+
+std::string mangleOverload(const std::string& base, const std::vector<Type>& params, const Type& ret) {
+    std::string out = base;
+    for (const Type& p : params) out += "$" + mangleType(p);
+    out += "$ret$" + mangleType(ret);
+    return out;
+}
+
+// ============================================================
 // typeKindFromName — primitive keyword spelling → TypeKind
 // ============================================================
 

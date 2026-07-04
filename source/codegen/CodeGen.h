@@ -73,8 +73,22 @@ private:
     int          labelCounter       = 0;
     Type         currentReturnType  = Type{TypeKind::Void};
 
-    // funcName → ordered list of declared parameter types (populated in generate())
+    // funcName (possibly overload-mangled) → ordered parameter types (populated in generate())
     std::unordered_map<std::string, std::vector<Type>> funcParamTypes;
+    // Base symbol names (free-fn name, or `Class_method`) declared more than once ⇒ overloaded
+    // ⇒ their definitions/calls use the overload-mangled name.
+    std::unordered_set<std::string> overloadedBases_;
+    // Base names of all free functions + externs — used to give free functions priority over
+    // an implicit-`this` method of the same name at a bare call site.
+    std::unordered_set<std::string> freeFnBases_;
+    // Chosen overload's mangled name per call/new node (from SemanticResult; may be null).
+    const std::unordered_map<const void*, std::string>* resolvedCallee_ = nullptr;
+    // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
+    // overloaded, otherwise `plainBase`.
+    std::string calleeName(const void* node, const std::string& plainBase) const;
+    // The emitted definition name for a base symbol: overload-mangled when `base` is overloaded.
+    std::string overloadEmittedName(const std::string& base,
+                                    const std::vector<Type>& params, const Type& ret) const;
 
     bool boundsCheck = true;   // from CompilerOptions; false disables runtime checks
 

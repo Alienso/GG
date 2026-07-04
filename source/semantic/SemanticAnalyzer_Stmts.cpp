@@ -195,7 +195,8 @@ void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
         return;
     }
 
-    Type actualType = analyzeExpr(*returnStmt.value);
+    // The function's return type is the overload-resolution context for the value.
+    Type actualType = analyzeWithExpected(*returnStmt.value, *currentReturnType);
     checkCast(actualType, *currentReturnType, returnStmt.keyword, "return");
 }
 

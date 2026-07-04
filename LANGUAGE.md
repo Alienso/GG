@@ -388,9 +388,39 @@ void mutate(mut Point& p) { p.x = 5; }       // mutable borrow — may write the
 ### Calling conventions
 - Primitive types pass by value.
 - `ClassName&` passes the heap pointer by value (a borrow — no extra retain/release at the call site).
-- There is **no function overloading** — each function name must be unique.
 - There are **no default parameter values**.
 - There are **no variadic functions** (use `extern` + C variadics if needed).
+
+### Overloading
+Functions may be **overloaded** — several may share a name if they differ in parameter
+signature and/or return type:
+
+```gg
+i32 add(i32 a, i32 b)        { return a + b; }
+i32 add(i32 a, i32 b, i32 c) { return a + b + c; }
+f64 add(f64 a, f64 b)        { return a + b; }
+
+i32 make() { return 7; }     // differs from…
+f64 make() { return 2.5; }   // …only by return type
+```
+
+Resolution is **best-match**: the compiler keeps candidates whose arguments are implicitly
+convertible, then picks the one with the lowest total conversion cost (exact match beats a
+widening conversion, which beats a narrowing one). Ties are an **ambiguous call** error.
+
+**Return-type overloading** is disambiguated by the **expected type** of the call's context —
+a variable's declared type, an assignment target, a `return`, or an explicit cast:
+
+```gg
+i32 a = make();          // picks i32 make()
+f64 b = make();          // picks f64 make()
+i32 c = make() as i32;   // cast selects the i32 overload
+make();                  // ERROR: ambiguous — no context to choose; add a cast
+```
+
+Rules: two entities with the **same** parameter types **and** the same return type is a
+redefinition error; parameter `mut`-ness is not part of the signature. `extern` functions and
+`main` cannot be overloaded.
 
 ---
 
@@ -580,11 +610,14 @@ Rules:
   `mut` methods without being marked). `static` and `enum` methods **cannot** be `mut`.
 
 ### Rules & restrictions
-- **One constructor per class** — constructor overloading is not supported.
+- **Constructors may be overloaded** — a class may declare several constructors that differ
+  in parameter signature (resolved by best-match at `new Point(…)` / `Point p(…)`). Enums keep
+  exactly one constructor.
+- **Methods may be overloaded** too (instance and static), by signature and/or return type —
+  same rules as free functions (see §6).
 - **At most one destructor** per class — `~ClassName()` takes no parameters.
 - **No inheritance** — classes cannot extend other classes.
 - **No virtual methods** — there is no vtable or dynamic dispatch.
-- **No method overloading** — each method name must be unique within the class.
 - Destructors **cannot be called explicitly** — the compiler injects calls automatically.
 - Destructor injection order: **last declared, first destroyed** (LIFO) within a scope.
 
@@ -906,7 +939,6 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Functions & methods
 | Missing feature | Notes |
 |-----------------|-------|
-| Function overloading | Each function/method name must be unique in its scope |
 | Default parameter values | All parameters must be supplied at the call site |
 | Named parameters | Positional only |
 | Variadic functions | No `...` — use `extern` to call C variadics |
@@ -919,7 +951,6 @@ Attempting them will produce a compile error (or will simply not parse).
 |-----------------|-------|
 | Inheritance / subclassing | No `extends` or base classes |
 | Virtual methods / interfaces | No dynamic dispatch; no vtable |
-| Constructor overloading | At most one constructor per class |
 | `const`-qualified *types* | There is no `const T` type qualifier; immutability is a property of the *binding* (`mut` opts out), not the type. See §2/§8 for const-by-default. |
 | File-scope / internal linkage for statics | Static fields keep external linkage; no `private`-style linkage control |
 | Access modifiers beyond `private` | No `public` keyword, no `protected`; `private` is advisory (warning only) |

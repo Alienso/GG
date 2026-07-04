@@ -7,6 +7,7 @@
 
 #include <string>
 #include <cstddef>
+#include <vector>
 #include "../lexer/Token.h"
 
 // ---- TypeKind ----
@@ -114,6 +115,10 @@ bool isError(const Type& t);
 // ---- Type operations ----
 
 CastResult  canImplicitlyCast(const Type& from, const Type& to);
+// Overload mangling: a symbol-safe encoding of a type / of a full signature. Used by both
+// the semantic analyzer (to name the chosen overload) and codegen (to name definitions).
+std::string mangleType(const Type& t);
+std::string mangleOverload(const std::string& base, const std::vector<Type>& params, const Type& ret);
 Type        commonArithmeticType(const Type& a, const Type& b);
 Type        typeFromToken(TokenType tt);
 std::string typeName(const Type& t);

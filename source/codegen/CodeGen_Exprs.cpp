@@ -465,13 +465,12 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
 
 std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
-    auto funcIt = funcParamTypes.find(call.callee.lexeme);
 
     // Implicit `this`: a bare call with no matching free function targets a method of the
-    // enclosing class. `@Class_method` (mangled) is present in funcParamTypes for methods.
-    if (funcIt == funcParamTypes.end() && !currentClassName_.empty()) {
-        std::string mangled = currentClassName_ + "_" + call.callee.lexeme;
-        auto mp = funcParamTypes.find(mangled);
+    // enclosing class (free functions take priority — mirrors the semantic resolution).
+    if (!freeFnBases_.count(call.callee.lexeme) && !currentClassName_.empty()) {
+        std::string mName = calleeName(&call, currentClassName_ + "_" + call.callee.lexeme);
+        auto mp = funcParamTypes.find(mName);
         if (mp != funcParamTypes.end()) {
             std::string argStr = buildArgString(call.args, &mp->second);
             auto cgIt = cgClasses_.find(currentClassName_);
@@ -483,28 +482,31 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
                 fullArgs = "ptr " + thisPtr + (argStr.empty() ? "" : ", " + argStr);
             }
             if (returnIrType == "void") {
-                emit("call void @" + mangled + "(" + fullArgs + ")");
+                emit("call void @" + mName + "(" + fullArgs + ")");
                 return "";
             }
             std::string t = freshTemp();
-            emit("%" + t + " = call " + returnIrType + " @" + mangled + "(" + fullArgs + ")");
+            emit("%" + t + " = call " + returnIrType + " @" + mName + "(" + fullArgs + ")");
             if (resolvedType.kind == TypeKind::Reference)
                 pendingTemps_.push_back({ "%" + t, resolvedType.className });
             return "%" + t;
         }
     }
 
+    // Free-function call — use the resolved (possibly overload-mangled) symbol name.
+    std::string fnName = calleeName(&call, call.callee.lexeme);
+    auto funcIt = funcParamTypes.find(fnName);
     const std::vector<Type>* declaredParams =
         funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
 
     std::string argStr = buildArgString(call.args, declaredParams);
 
     if (returnIrType == "void") {
-        emit("call void @" + call.callee.lexeme + "(" + argStr + ")");
+        emit("call void @" + fnName + "(" + argStr + ")");
         return "";
     }
     std::string t = freshTemp();
-    emit("%" + t + " = call " + returnIrType + " @" + call.callee.lexeme + "(" + argStr + ")");
+    emit("%" + t + " = call " + returnIrType + " @" + fnName + "(" + argStr + ")");
     if (resolvedType.kind == TypeKind::Reference)   // a reference-returning call hands back a +1
         pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
@@ -645,7 +647,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         if (varDecl.initializer) {
             if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
                 const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
-                std::string mangledCtor = className + "_" + className;
+                std::string mangledCtor = calleeName(&ctorCall, className + "_" + className);
                 auto funcIt = funcParamTypes.find(mangledCtor);
                 const std::vector<Type>* ctorParams =
                     funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
@@ -897,7 +899,7 @@ std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/
     }
 
     // Run the constructor if the class defines one.
-    std::string mangledCtor = className + "_" + className;
+    std::string mangledCtor = calleeName(&newExpr, className + "_" + className);
     auto funcIt = funcParamTypes.find(mangledCtor);
     if (funcIt != funcParamTypes.end()) {
         std::string argStr = buildArgString(newExpr.args, &funcIt->second);

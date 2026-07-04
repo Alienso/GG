@@ -23,6 +23,9 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     inEnumConstructor  = false;
     classRegistry.clear();
     enumRegistry.clear();
+    functionRegistry.clear();
+    resolvedCallee.clear();
+    expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
 
     symbolTable.enterScope();   // global scope
@@ -35,7 +38,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
 
     symbolTable.exitScope();
 
-    return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry };
+    return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
+                          std::move(resolvedCallee) };
 }
 
 // ============================================================
@@ -120,9 +124,24 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             paramTypes.push_back(resolveTypeToken(p.typeName));
             paramMut.push_back(p.isMut);
         }
-        info.methods.emplace(md.name.lexeme,
-            ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
-                              std::move(paramTypes), std::move(paramMut), md.name});
+        // Overload set per name. Enums may not overload (single ctor / fixed method set).
+        std::vector<ClassInfo::Method>& set = info.methods[md.name.lexeme];
+        const bool isEnum = !allowDestructor;
+        if (isEnum && !set.empty()) {
+            error(md.name, "enum '" + ownerName + "' cannot overload '" + md.name.lexeme
+                  + "' — overloading is not supported for enums");
+            continue;
+        }
+        bool redef = false;
+        for (const ClassInfo::Method& e : set)
+            if (e.paramTypes == paramTypes && e.returnType == returnType) { redef = true; break; }
+        if (redef) {
+            error(md.name, "'" + ownerName + "::" + md.name.lexeme
+                  + "' is already defined with the same signature");
+            continue;
+        }
+        set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
+                                        std::move(paramTypes), std::move(paramMut), md.name});
     }
     return info;
 }
@@ -167,6 +186,7 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
     for (const Stmt& stmt : program.declarations) {
         if (std::holds_alternative<FunctionDeclStmt>(*stmt.node)) {
             const auto& function = std::get<FunctionDeclStmt>(*stmt.node);
+            const std::string& name = function.name.lexeme;
 
             std::vector<Type> paramTypes;
             std::vector<bool> paramMut;
@@ -174,41 +194,43 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                 paramTypes.push_back(resolveTypeToken(param.typeName));
                 paramMut.push_back(param.isMut);
             }
+            Type returnType = resolveTypeToken(function.returnType);
 
-            Symbol sym{
-                Symbol::Kind::Function,
-                resolveTypeToken(function.returnType),
-                function.name,
-                std::move(paramTypes)
-            };
-            sym.paramMut = std::move(paramMut);
-
-            if (!symbolTable.declare(function.name.lexeme, sym)) {
-                const Symbol* prev = symbolTable.lookupCurrentScope(function.name.lexeme);
-                error(function.name, "function '" + function.name.lexeme + "' already declared in this scope"
-                      + (prev ? " (previously declared at line "
-                               + std::to_string(prev->declarationToken.line) + ")" : ""));
+            std::vector<FunctionOverload>& set = functionRegistry[name];
+            if (name == "main" && !set.empty()) {
+                error(function.name, "'main' cannot be overloaded");
+            } else if (!set.empty() && set.front().isExtern) {
+                error(function.name, "cannot overload extern function '" + name + "'");
+            } else {
+                bool redef = false;
+                for (const FunctionOverload& e : set)
+                    if (e.paramTypes == paramTypes && e.returnType == returnType) { redef = true; break; }
+                if (redef)
+                    error(function.name, "function '" + name + "' is already defined with the same signature");
+                else
+                    set.push_back(FunctionOverload{returnType, paramTypes, paramMut, /*isExtern=*/false, function.name});
             }
+
+            // Symbol-table marker (first declaration wins) so a local can shadow the name
+            // and bare use as a value still reports "cannot use function as a value".
+            symbolTable.declare(name, Symbol{Symbol::Kind::Function, returnType, function.name, {}});
         }
         else if (std::holds_alternative<ExternFuncDeclStmt>(*stmt.node)) {
             const auto& externDecl = std::get<ExternFuncDeclStmt>(*stmt.node);
+            const std::string& name = externDecl.name.lexeme;
 
             std::vector<Type> paramTypes;
             for (const ParamDecl& param : externDecl.params)
                 paramTypes.push_back(typeFromToken(param.typeName.type));
+            Type returnType = typeFromToken(externDecl.returnType.type);
 
-            Symbol sym{
-                Symbol::Kind::Function,
-                typeFromToken(externDecl.returnType.type),
-                externDecl.name,
-                std::move(paramTypes)
-            };
-
-            if (!symbolTable.declare(externDecl.name.lexeme, sym)) {
-                const Symbol* prev = symbolTable.lookupCurrentScope(externDecl.name.lexeme);
-                error(externDecl.name, "extern '" + externDecl.name.lexeme + "' already declared in this scope"
-                      + (prev ? " (previously declared at line "
-                               + std::to_string(prev->declarationToken.line) + ")" : ""));
+            std::vector<FunctionOverload>& set = functionRegistry[name];
+            if (!set.empty()) {
+                error(externDecl.name, "extern '" + name + "' cannot be overloaded or redefined");
+            } else {
+                set.push_back(FunctionOverload{returnType, paramTypes, std::vector<bool>{},
+                                               /*isExtern=*/true, externDecl.name});
+                symbolTable.declare(name, Symbol{Symbol::Kind::Function, returnType, externDecl.name, {}});
             }
         }
     }

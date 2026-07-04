@@ -64,12 +64,107 @@ const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) co
     return sfit == cit->second.staticFields.end() ? nullptr : &sfit->second.type;
 }
 
-const ClassInfo::Method* SemanticAnalyzer::currentClassMethod(const std::string& name) const {
+const std::vector<ClassInfo::Method>* SemanticAnalyzer::currentClassMethods(const std::string& name) const {
     if (currentClassName.empty()) return nullptr;
     auto cit = classRegistry.find(currentClassName);
     if (cit == classRegistry.end()) return nullptr;
     auto mit = cit->second.methods.find(name);
     return mit == cit->second.methods.end() ? nullptr : &mit->second;
+}
+
+Type SemanticAnalyzer::analyzeWithExpected(const Expr& e, const Type& expected) {
+    std::optional<Type> saved = expectedType_;
+    expectedType_ = expected;
+    Type t = analyzeExpr(e);
+    expectedType_ = saved;
+    return t;
+}
+
+// Best-match overload resolution — see the header for the algorithm.
+int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
+                                      const std::vector<OverloadCand>& cands,
+                                      const std::vector<std::unique_ptr<Expr>>& args) {
+    // The expected type applies to THIS call's return, not to its arguments — snapshot and
+    // clear it so it doesn't leak into argument sub-expression resolution.
+    std::optional<Type> expected = expectedType_;
+    expectedType_ = std::nullopt;
+
+    std::vector<Type> argTypes;
+    argTypes.reserve(args.size());
+    bool anyArgError = false;
+    for (const auto& a : args) {
+        Type t = analyzeExpr(*a);
+        if (isError(t)) anyArgError = true;
+        argTypes.push_back(t);
+    }
+    if (anyArgError) return -1;   // a bad argument already reported an error; avoid cascades
+
+    struct Viable { int idx; int cost; };
+    std::vector<Viable> viable;
+    for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
+        const OverloadCand& c = cands[i];
+        if (c.params->size() != args.size()) continue;
+        bool ok = true;
+        int  cost = 0;
+        for (size_t k = 0; k < args.size(); ++k) {
+            const Type& pt = (*c.params)[k];
+            if (argTypes[k] == pt) continue;                       // exact: cost 0
+            CastResult cr = canImplicitlyCast(argTypes[k], pt);
+            if (cr == CastResult::None) { ok = false; break; }
+            cost += (cr == CastResult::Warn) ? 2 : 1;              // narrowing worse than widening
+        }
+        if (ok) viable.push_back({i, cost});
+    }
+
+    if (viable.empty()) {
+        // Non-overloaded case: keep the precise arity diagnostic.
+        if (cands.size() == 1 && cands[0].params->size() != args.size())
+            error(at, what + " expects " + std::to_string(cands[0].params->size())
+                  + " argument(s), got " + std::to_string(args.size()));
+        else
+            error(at, "no matching overload for " + what + " with the given argument types");
+        return -1;
+    }
+
+    int minCost = viable.front().cost;
+    for (const Viable& v : viable) if (v.cost < minCost) minCost = v.cost;
+    std::vector<int> best;
+    for (const Viable& v : viable) if (v.cost == minCost) best.push_back(v.idx);
+
+    int chosen = -1;
+    if (best.size() == 1) {
+        chosen = best[0];
+    } else if (expected) {
+        // Tie on argument cost → disambiguate on return type via the contextual expected type.
+        int rtBest = -1, rtCost = -1, rtTies = 0;
+        for (int i : best) {
+            const Type& rt = cands[i].returnType;
+            int c;
+            if (rt == *expected) c = 0;
+            else {
+                CastResult cr = canImplicitlyCast(rt, *expected);
+                if (cr == CastResult::None) continue;
+                c = (cr == CastResult::Warn) ? 2 : 1;
+            }
+            if (rtBest < 0 || c < rtCost) { rtBest = i; rtCost = c; rtTies = 1; }
+            else if (c == rtCost) rtTies++;
+        }
+        if (rtBest >= 0 && rtTies == 1) chosen = rtBest;
+    }
+    if (chosen < 0) {
+        error(at, "ambiguous call to overloaded " + what
+              + "; add an explicit cast to select an overload");
+        return -1;
+    }
+
+    // Emit the normal per-argument cast / mut diagnostics on the chosen overload only.
+    const OverloadCand& w = cands[chosen];
+    for (size_t k = 0; k < args.size(); ++k) {
+        checkCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
+        if (w.paramMut && k < w.paramMut->size() && (*w.paramMut)[k])
+            warnConstToMut(at, *args[k], (*w.params)[k]);
+    }
+    return chosen;
 }
 
 Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
@@ -285,12 +380,12 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
                 analyzeExpr(*assign.value);
                 return f->type;
             }
-            Type rhs = analyzeExpr(*assign.value);
+            Type rhs = analyzeWithExpected(*assign.value, f->type);
             checkCast(rhs, f->type, assign.name, "field assignment");
             return f->type;
         }
         if (const Type* sft = currentStaticFieldType(assign.name.lexeme)) {
-            Type rhs = analyzeExpr(*assign.value);
+            Type rhs = analyzeWithExpected(*assign.value, *sft);
             checkCast(rhs, *sft, assign.name, "static field assignment");
             return *sft;
         }
@@ -326,7 +421,7 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     }
 
     Type lhsType = sym->type;
-    Type rhsType = analyzeExpr(*assign.value);
+    Type rhsType = analyzeWithExpected(*assign.value, lhsType);
     checkCast(rhsType, lhsType, assign.name, "assignment");
     // Rebinding a `mut` reference from a read-only reference is a const→mut coercion.
     if (sym->isMutable)
@@ -451,83 +546,72 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
         for (const auto& arg : call.args) analyzeExpr(*arg);
         return makeEnumType(call.callee.lexeme);
     }
-    // Constructor call: callee is a class name
-    if (classRegistry.count(call.callee.lexeme)) {
-        const ClassInfo& cls = classRegistry.at(call.callee.lexeme);
-        auto ctorIt = cls.methods.find(call.callee.lexeme);
-        if (ctorIt == cls.methods.end()) {
-            // No explicit constructor — only allow zero-arg call
-            if (!call.args.empty()) {
-                error(call.callee, "class '" + call.callee.lexeme
-                      + "' has no constructor but was called with arguments");
-            }
+    const std::string& name = call.callee.lexeme;
+
+    // Constructor call: callee is a class name → resolve among the constructor overloads.
+    if (classRegistry.count(name)) {
+        const ClassInfo& cls = classRegistry.at(name);
+        auto ctorIt = cls.methods.find(name);
+        if (ctorIt == cls.methods.end() || ctorIt->second.empty()) {
+            if (!call.args.empty())
+                error(call.callee, "class '" + name + "' has no constructor but was called with arguments");
             for (const auto& arg : call.args) analyzeExpr(*arg);
-            return makeObjectType(call.callee.lexeme);
+            return makeObjectType(name);
         }
-        const ClassInfo::Method& ctor = ctorIt->second;
-        if (call.args.size() != ctor.paramTypes.size()) {
-            error(call.callee, "constructor '" + call.callee.lexeme + "' expects "
-                  + std::to_string(ctor.paramTypes.size()) + " argument(s), got "
-                  + std::to_string(call.args.size()));
-            for (const auto& arg : call.args) analyzeExpr(*arg);
-            return makeObjectType(call.callee.lexeme);
-        }
-        analyzeCallArgs(call.args, ctor.paramTypes, call.callee,
-                        "constructor '" + call.callee.lexeme + "'", ctor.paramMut);
-        return makeObjectType(call.callee.lexeme);
+        const std::vector<ClassInfo::Method>& set = ctorIt->second;
+        std::vector<OverloadCand> cands;
+        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+        int idx = resolveOverload(call.callee, "constructor '" + name + "'", cands, call.args);
+        if (idx >= 0 && set.size() > 1)
+            resolvedCallee[&call] = mangleOverload(name + "_" + name, set[idx].paramTypes, set[idx].returnType);
+        return makeObjectType(name);
     }
 
-    const Symbol* sym = symbolTable.lookup(call.callee.lexeme);
-    if (!sym) {
-        // Implicit `this`: a bare call may target a method of the enclosing class
-        // (only when no local/parameter/free-function shadows the name).
-        if (const ClassInfo::Method* m = currentClassMethod(call.callee.lexeme)) {
-            if (!m->isStatic && currentMethodIsStatic) {
-                error(call.callee, "cannot call instance method '" + call.callee.lexeme
-                      + "' from a static method");
-                for (const auto& arg : call.args) analyzeExpr(*arg);
-                return m->returnType;
-            }
-            if (m->isMut && !currentThisMutable) {
-                error(call.callee, "cannot call mutating method '" + call.callee.lexeme
-                      + "' on 'this' in a read-only method; declare the calling method 'mut'");
-                for (const auto& arg : call.args) analyzeExpr(*arg);
-                return m->returnType;
-            }
-            if (call.args.size() != m->paramTypes.size()) {
-                error(call.callee, "method '" + call.callee.lexeme + "' expects "
-                      + std::to_string(m->paramTypes.size()) + " argument(s), got "
-                      + std::to_string(call.args.size()));
-                for (const auto& arg : call.args) analyzeExpr(*arg);
-                return m->returnType;
-            }
-            analyzeCallArgs(call.args, m->paramTypes, call.callee,
-                            "method '" + call.callee.lexeme + "'", m->paramMut);
-            return m->returnType;
-        }
-        error(call.callee, "undeclared function '" + call.callee.lexeme + "'");
-        for (const auto& arg : call.args) analyzeExpr(*arg);
-        return Type{TypeKind::Error};
-    }
-    if (sym->kind != Symbol::Kind::Function) {
-        error(call.callee, "'" + call.callee.lexeme + "' is not a function");
+    // A local/parameter variable shadows any same-named function.
+    const Symbol* sym = symbolTable.lookup(name);
+    if (sym && sym->kind == Symbol::Kind::Variable) {
+        error(call.callee, "'" + name + "' is not a function");
         for (const auto& arg : call.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
     }
 
-    // Check argument count
-    if (call.args.size() != sym->paramTypes.size()) {
-        error(call.callee, "function '" + call.callee.lexeme + "' expects "
-              + std::to_string(sym->paramTypes.size()) + " argument(s), got "
-              + std::to_string(call.args.size()));
-        for (const auto& arg : call.args) analyzeExpr(*arg);
-        return sym->type;
+    // Free-function overload set (higher priority than an implicit-`this` method).
+    auto fit = functionRegistry.find(name);
+    if (fit != functionRegistry.end()) {
+        const std::vector<FunctionOverload>& set = fit->second;
+        std::vector<OverloadCand> cands;
+        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType});
+        int idx = resolveOverload(call.callee, "function '" + name + "'", cands, call.args);
+        if (idx < 0) return Type{TypeKind::Error};
+        if (set.size() > 1 && !set[idx].isExtern)
+            resolvedCallee[&call] = mangleOverload(name, set[idx].paramTypes, set[idx].returnType);
+        return set[idx].returnType;
     }
 
-    analyzeCallArgs(call.args, sym->paramTypes, call.callee,
-                    "'" + call.callee.lexeme + "'", sym->paramMut);
+    // Implicit `this`: a bare call may target a method of the enclosing class.
+    if (const std::vector<ClassInfo::Method>* ms = currentClassMethods(name)) {
+        std::vector<OverloadCand> cands;
+        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+        int idx = resolveOverload(call.callee, "method '" + name + "'", cands, call.args);
+        if (idx < 0) return Type{TypeKind::Error};
+        const ClassInfo::Method& m = (*ms)[idx];
+        if (!m.isStatic && currentMethodIsStatic) {
+            error(call.callee, "cannot call instance method '" + name + "' from a static method");
+            return m.returnType;
+        }
+        if (m.isMut && !currentThisMutable) {
+            error(call.callee, "cannot call mutating method '" + name
+                  + "' on 'this' in a read-only method; declare the calling method 'mut'");
+            return m.returnType;
+        }
+        if (ms->size() > 1)
+            resolvedCallee[&call] = mangleOverload(currentClassName + "_" + name, m.paramTypes, m.returnType);
+        return m.returnType;
+    }
 
-    return sym->type;
+    error(call.callee, "undeclared function '" + name + "'");
+    for (const auto& arg : call.args) analyzeExpr(*arg);
+    return Type{TypeKind::Error};
 }
 
 bool SemanticAnalyzer::isConstantExpr(const Expr& expr) {
@@ -588,9 +672,9 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
         return declaredType;
     }
 
-    // Scalar: analyse initializer
+    // Scalar: analyse initializer (with the declared type as the overload-resolution context)
     if (varDecl.arraySize == 0 && varDecl.initializer) {
-        Type initializerType = analyzeExpr(*varDecl.initializer);
+        Type initializerType = analyzeWithExpected(*varDecl.initializer, declaredType);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
         // Initialising a `mut` reference from a read-only reference is a const→mut coercion.
         if (varDecl.isMut)
@@ -904,7 +988,7 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
              + "' is private in class '" + objectType.className + "'");
     }
 
-    Type valueType = analyzeExpr(*memberAssign.value);
+    Type valueType = analyzeWithExpected(*memberAssign.value, field.type);
     checkCast(valueType, field.type, memberAssign.field, "field assignment");
     return field.type;
 }
@@ -918,31 +1002,30 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
             auto clsIt = classRegistry.find(ident.name.lexeme);
             if (clsIt != classRegistry.end()) {
                 auto mIt = clsIt->second.methods.find(methodCall.method.lexeme);
-                if (mIt == clsIt->second.methods.end()) {
+                if (mIt == clsIt->second.methods.end() || mIt->second.empty()) {
                     error(methodCall.method, "class '" + ident.name.lexeme
                           + "' has no static method '" + methodCall.method.lexeme + "'");
                     for (const auto& arg : methodCall.args) analyzeExpr(*arg);
                     return Type{TypeKind::Error};
                 }
-                const ClassInfo::Method& sm = mIt->second;
+                const std::vector<ClassInfo::Method>& set = mIt->second;
+                std::vector<OverloadCand> cands;
+                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+                int idx = resolveOverload(methodCall.method,
+                            "static method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
+                if (idx < 0) return Type{TypeKind::Error};
+                const ClassInfo::Method& sm = set[idx];
                 if (!sm.isStatic) {
                     error(methodCall.method, "method '" + methodCall.method.lexeme
                           + "' is not static; call it on an instance");
-                    for (const auto& arg : methodCall.args) analyzeExpr(*arg);
                     return sm.returnType;
                 }
                 if (!sm.isPublic && currentClassName != ident.name.lexeme)
                     warn(methodCall.method, "static method '" + methodCall.method.lexeme
                          + "' is private in class '" + ident.name.lexeme + "'");
-                if (methodCall.args.size() != sm.paramTypes.size()) {
-                    error(methodCall.method, "static method '" + methodCall.method.lexeme
-                          + "' expects " + std::to_string(sm.paramTypes.size())
-                          + " argument(s), got " + std::to_string(methodCall.args.size()));
-                    for (const auto& arg : methodCall.args) analyzeExpr(*arg);
-                    return sm.returnType;
-                }
-                analyzeCallArgs(methodCall.args, sm.paramTypes, methodCall.method,
-                                "static method '" + methodCall.method.lexeme + "'", sm.paramMut);
+                if (set.size() > 1)
+                    resolvedCallee[&methodCall] = mangleOverload(
+                        ident.name.lexeme + "_" + methodCall.method.lexeme, sm.paramTypes, sm.returnType);
                 return sm.returnType;
             }
         }
@@ -961,14 +1044,21 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     }
 
     auto methodIt = cls->methods.find(methodCall.method.lexeme);
-    if (methodIt == cls->methods.end()) {
+    if (methodIt == cls->methods.end() || methodIt->second.empty()) {
         error(methodCall.method, "class '" + objectType.className
               + "' has no method '" + methodCall.method.lexeme + "'");
         for (const auto& arg : methodCall.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
     }
 
-    const ClassInfo::Method& method = methodIt->second;
+    const std::vector<ClassInfo::Method>& set = methodIt->second;
+    std::vector<OverloadCand> cands;
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+    int idx = resolveOverload(methodCall.method,
+                "method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
+    if (idx < 0) return Type{TypeKind::Error};
+    const ClassInfo::Method& method = set[idx];
+
     // A `mut` method mutates its receiver, so the receiver must be a mutable place —
     // a `mut` binding, or `this` inside a `mut` method / ctor / dtor.
     if (method.isMut
@@ -980,24 +1070,15 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
         else
             error(methodCall.method, "cannot call mutating method '" + methodCall.method.lexeme
                   + "' through an immutable binding; declare it 'mut'");
-        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
         return method.returnType;
     }
     if (!method.isPublic && currentClassName != objectType.className) {
         warn(methodCall.method, "method '" + methodCall.method.lexeme
              + "' is private in class '" + objectType.className + "'");
     }
-
-    if (methodCall.args.size() != method.paramTypes.size()) {
-        error(methodCall.method, "method '" + methodCall.method.lexeme + "' expects "
-              + std::to_string(method.paramTypes.size()) + " argument(s), got "
-              + std::to_string(methodCall.args.size()));
-        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
-        return method.returnType;
-    }
-
-    analyzeCallArgs(methodCall.args, method.paramTypes, methodCall.method,
-                    "method '" + methodCall.method.lexeme + "'", method.paramMut);
+    if (set.size() > 1)
+        resolvedCallee[&methodCall] = mangleOverload(
+            objectType.className + "_" + methodCall.method.lexeme, method.paramTypes, method.returnType);
     return method.returnType;
 }
 
@@ -1006,8 +1087,10 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
 // ============================================================
 
 Type SemanticAnalyzer::analyzeCast(const CastExpr& castExpr) {
-    Type fromType = analyzeExpr(*castExpr.operand);
     Type toType   = resolveTypeToken(castExpr.targetType);
+    // The cast target is the expected type for the operand (an explicit `as T` selects a
+    // return-type overload).
+    Type fromType = analyzeWithExpected(*castExpr.operand, toType);
 
     if (isError(fromType) || isError(toType)) return Type{TypeKind::Error};
 
@@ -1086,7 +1169,7 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
     }
 
     auto ctorIt = cls.methods.find(className);
-    if (ctorIt == cls.methods.end()) {
+    if (ctorIt == cls.methods.end() || ctorIt->second.empty()) {
         // No explicit constructor — only a zero-argument `new` is allowed.
         if (!newExpr.args.empty())
             error(newExpr.className, "class '" + className
@@ -1095,16 +1178,12 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
         return makeReferenceType(className);
     }
 
-    const ClassInfo::Method& ctor = ctorIt->second;
-    if (newExpr.args.size() != ctor.paramTypes.size()) {
-        error(newExpr.className, "constructor '" + className + "' expects "
-              + std::to_string(ctor.paramTypes.size()) + " argument(s), got "
-              + std::to_string(newExpr.args.size()));
-        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
-        return makeReferenceType(className);
-    }
-
-    analyzeCallArgs(newExpr.args, ctor.paramTypes, newExpr.className,
-                    "constructor '" + className + "'", ctor.paramMut);
+    const std::vector<ClassInfo::Method>& set = ctorIt->second;
+    std::vector<OverloadCand> cands;
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+    int idx = resolveOverload(newExpr.className, "constructor '" + className + "'", cands, newExpr.args);
+    if (idx >= 0 && set.size() > 1)
+        resolvedCallee[&newExpr] = mangleOverload(className + "_" + className,
+                                                  set[idx].paramTypes, set[idx].returnType);
     return makeReferenceType(className);
 }

@@ -1,0 +1,73 @@
+// End-to-end test for generic trait bounds (static dispatch).
+// A bounded type parameter `T: Trait` requires the concrete type argument to
+// implement the trait; the bound is verified at each instantiation site.
+// Expected exit code: 0.
+
+trait Comparable {
+    i32 compareTo(Self& other);
+}
+
+class Money {
+    mut i32 cents;
+    Money(i32 c) { cents = c; }
+    i32 get() { return cents; }
+}
+
+impl Comparable for Money {
+    i32 compareTo(Money& other) { return cents - other.cents; }
+}
+
+class N {
+    mut i32 v;
+    N(i32 x) { v = x; }
+    i32 get() { return v; }
+}
+
+// Built-in operator trait bound (Ord) — the body uses the '<' operator.
+impl Ord for N { i32 cmp(N& r) { return v - r.v; } }
+
+trait Show { i32 tag(); }
+impl Show for N { i32 tag() { return v * 10; } }
+
+// User-trait bound, reference return.
+T& maxOf<T: Comparable>(T& a, T& b) {
+    if (a.compareTo(b) >= 0) { return a; }
+    return b;
+}
+
+// Built-in-trait bound, operator in the body.
+T& biggest<T: Ord>(T& a, T& b) {
+    if (a < b) { return b; }
+    return a;
+}
+
+// Multiple bounds on one parameter.
+T& choose<T: Ord + Show>(T& a, T& b) {
+    if (a < b) { return b; }
+    return a;
+}
+
+// Generic class with a bound.
+class Wrapper<T: Show> {
+    T& inner;
+    Wrapper(T& x) { this.inner = x; }
+    i32 label() { return this.inner.tag(); }
+}
+
+i32 main() {
+    Money& x = new Money(500);
+    Money& y = new Money(750);
+    if (maxOf<Money>(x, y).get() != 750) { return 1; }
+    if (maxOf<Money>(y, x).get() != 750) { return 2; }
+
+    N& a = new N(3);
+    N& b = new N(9);
+    if (biggest<N>(a, b).get() != 9) { return 3; }
+    if (biggest<N>(b, a).get() != 9) { return 4; }
+    if (choose<N>(a, b).get() != 9)  { return 5; }
+
+    Wrapper<N>& w = new Wrapper<N>(b);
+    if (w.label() != 90) { return 6; }
+
+    return 0;
+}

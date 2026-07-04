@@ -1,0 +1,112 @@
+// End-to-end test for traits + operator overloading.
+// Exercises: a user trait method, and every built-in operator trait
+// (Add, Eq, Ord, Neg, Index get/set). Expected exit code: 0.
+
+trait Describe {
+    i32 combined(Self& other);
+}
+
+class Vec2 {
+    mut i32 x;
+    mut i32 y;
+    Vec2(i32 a, i32 b) { x = a; y = b; }
+    i32 sum() { return x + y; }
+}
+
+impl Add for Vec2 {
+    Vec2& add(Vec2& rhs) { return new Vec2(x + rhs.x, y + rhs.y); }
+}
+
+impl Sub for Vec2 {
+    Vec2& sub(Vec2& rhs) { return new Vec2(x - rhs.x, y - rhs.y); }
+}
+
+impl Mul for Vec2 {
+    Vec2& mul(Vec2& rhs) { return new Vec2(x * rhs.x, y * rhs.y); }
+}
+
+impl Div for Vec2 {
+    Vec2& div(Vec2& rhs) { return new Vec2(x / rhs.x, y / rhs.y); }
+}
+
+impl Rem for Vec2 {
+    Vec2& rem(Vec2& rhs) { return new Vec2(x % rhs.x, y % rhs.y); }
+}
+
+impl Eq for Vec2 {
+    bool eq(Vec2& rhs) { return x == rhs.x && y == rhs.y; }
+}
+
+impl Ord for Vec2 {
+    i32 cmp(Vec2& rhs) { return sum() - rhs.sum(); }
+}
+
+impl Neg for Vec2 {
+    Vec2& neg() { return new Vec2(0 - x, 0 - y); }
+}
+
+impl Index for Vec2 {
+    i32 get(i32 i) { if (i == 0) { return x; } return y; }
+    void set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
+}
+
+impl Describe for Vec2 {
+    i32 combined(Vec2& other) { return sum() + other.sum(); }
+}
+
+i32 main() {
+    Vec2& a = new Vec2(1, 2);
+    Vec2& b = new Vec2(3, 4);
+
+    // Add
+    Vec2& c = a + b;                 // (4, 6)
+    if (c.sum() != 10) { return 1; }
+
+    // Sub / Mul / Div / Rem
+    Vec2& d = b - a;                 // (2, 2)
+    if (d.sum() != 4) { return 101; }
+    Vec2& e = a * b;                 // (3, 8)
+    if (e.sum() != 11) { return 102; }
+    Vec2& big = new Vec2(9, 8);
+    Vec2& sm  = new Vec2(2, 3);
+    Vec2& q = big / sm;              // (4, 2)
+    if (q.sum() != 6) { return 103; }
+    Vec2& r = big % sm;             // (1, 2)
+    if (r.sum() != 3) { return 104; }
+
+    // Chained addition: (1,2)+(3,4)+(3,4) = (7,10)
+    Vec2& chain = a + b + b;
+    if (chain.sum() != 17) { return 105; }
+
+    // Eq / Ne
+    if (!(a == a)) { return 2; }
+    if (a == b)    { return 3; }
+    if (!(a != b)) { return 4; }
+
+    // Ord: sum(a)=3 < sum(b)=7
+    if (!(a < b))  { return 5; }
+    if (!(a <= b)) { return 6; }
+    if (b < a)     { return 7; }
+    if (!(b > a))  { return 8; }
+    if (!(b >= a)) { return 9; }
+
+    // Neg
+    Vec2& n = -a;                    // (-1, -2)
+    if (n.sum() != 0 - 3) { return 10; }
+
+    // Index get
+    if (a[0] != 1) { return 11; }
+    if (a[1] != 2) { return 12; }
+
+    // Index set
+    mut Vec2& m = new Vec2(0, 0);
+    m[0] = 5;
+    m[1] = 6;
+    if (m[0] != 5)     { return 13; }
+    if (m.sum() != 11) { return 14; }
+
+    // User trait method
+    if (a.combined(b) != 10) { return 15; }
+
+    return 0;
+}

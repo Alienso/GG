@@ -1,0 +1,67 @@
+// overload_test.gg
+// End-to-end test of function / constructor / method overloading, including
+// return-type overloading disambiguated by context. Returns 0 on success.
+//
+// Expected result: exit code 0
+
+// ---- free-function overloading (by arity and by type) ----
+i32 add(i32 a, i32 b)         { return a + b; }
+i32 add(i32 a, i32 b, i32 c)  { return a + b + c; }
+f64 add(f64 a, f64 b)         { return a + b; }
+
+// ---- return-type overloading (same params, differ only by return type) ----
+i32 make() { return 7; }
+f64 make() { return 2.5; }
+
+// ---- constructor + method overloading ----
+class Vec {
+    mut i32 x;
+    mut i32 y;
+    Vec()             { x = 0; y = 0; }
+    Vec(i32 v)        { x = v; y = v; }
+    Vec(i32 a, i32 b) { x = a; y = b; }
+    i32 sum()                  { return x + y; }
+    i32 combine(i32 k)         { return x + y + k; }
+    i32 combine(i32 k, i32 m)  { return x + y + k + m; }
+    static i32 origin()        { return 0; }
+    static i32 origin(i32 bias) { return bias; }
+}
+
+i32 main() {
+    // free functions
+    if (add(2, 3) != 5)          { return 1; }   // add(i32,i32)
+    if (add(2, 3, 4) != 9)       { return 2; }   // add(i32,i32,i32)
+    f64 f = add(1.5, 2.5);
+    if (f != 4.0)                { return 3; }   // add(f64,f64)
+    if (add(1, 2) != 3)          { return 4; }   // widening not needed; exact i32
+
+    // best-match: add(1, 2.0) prefers add(f64,f64) (one widening) over add(i32,i32)
+    // (which would need a narrowing conversion of 2.0).
+    f64 g = add(1, 2.0);
+    if (g != 3.0)                { return 5; }
+
+    // return-type overloading, selected by the initializer's type / a cast
+    i32 a = make();
+    f64 b = make();
+    if (a != 7)                  { return 6; }
+    if (b != 2.5)                { return 7; }
+    if ((make() as i32) != 7)    { return 8; }
+
+    // constructor overloading (new + stack)
+    Vec& v0 = new Vec();
+    if (v0.sum() != 0)           { return 9; }
+    Vec& v1 = new Vec(6);
+    if (v1.sum() != 12)          { return 10; }
+    mut Vec v2(3, 4);
+    if (v2.sum() != 7)           { return 11; }
+
+    // method overloading
+    if (v2.combine(1) != 8)      { return 12; }
+    if (v2.combine(1, 2) != 10)  { return 13; }
+
+    // static-method overloading
+    if (Vec::origin() != 0)      { return 14; }
+    if (Vec::origin(5) != 5)     { return 15; }
+
+    return 0;
+}

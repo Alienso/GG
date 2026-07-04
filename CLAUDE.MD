@@ -295,7 +295,7 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**517 test cases / 1051 assertions** (as of implicit `this` — this-less member access).
+**523 test cases / 1057 assertions** (as of implicit `this` — this-less member access).
 
 ## Keeping CLAUDE.md current
 

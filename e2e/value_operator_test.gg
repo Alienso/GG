@@ -1,0 +1,47 @@
+// End-to-end test for value-object operators and the object→reference borrow.
+// Exercises: operators that return an object *by value* (sret slot, no heap), stack-value
+// operands borrowed as `Self&`, and a value object borrowed as a plain method's `T&`
+// argument. None of this performs a heap allocation. Expected exit code: 0.
+
+class Vec2 {
+    mut i32 x;
+    mut i32 y;
+    Vec2(i32 a, i32 b) { x = a; y = b; }
+    fn getx() -> i32 { return x; }
+    fn gety() -> i32 { return y; }
+    // A plain method taking a reference — a value-object argument is borrowed here too.
+    fn dot(Vec2& o) -> i32 { return x * o.x + y * o.y; }
+}
+
+impl Add for Vec2 {
+    fn add(Vec2& rhs) -> Vec2 out { out.x = x + rhs.x; out.y = y + rhs.y; return out; }
+}
+
+impl Sub for Vec2 {
+    fn sub(Vec2& rhs) -> Vec2 out { out.x = x - rhs.x; out.y = y - rhs.y; return out; }
+}
+
+fn main() -> i32 {
+    Vec2 a(1, 2);
+    Vec2 b(10, 20);
+
+    // Stack operands, object-value return, chained — all on the stack.
+    Vec2 c = a + b;                 // (11, 22)
+    if (c.getx() != 11) { return 1; }
+    if (c.gety() != 22) { return 2; }
+
+    Vec2 d = c - a;                 // (10, 20)
+    if (d.getx() != 10) { return 3; }
+    if (d.gety() != 20) { return 4; }
+
+    // Value object borrowed as a plain method's Vec2& argument.
+    if (a.dot(b) != 50) { return 5; }   // 1*10 + 2*20 = 50
+
+    // Mixing a heap reference on the left with a stack value on the right.
+    Vec2& e = new Vec2(3, 4);
+    Vec2 f = e + a;                 // (4, 6)
+    if (f.getx() != 4) { return 6; }
+    if (f.gety() != 6) { return 7; }
+
+    return 0;
+}

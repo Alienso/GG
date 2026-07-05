@@ -120,6 +120,20 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
 }
 
 // ============================================================
+// canPassArgument
+// ============================================================
+
+CastResult canPassArgument(const Type& from, const Type& to) {
+    // Borrow a value object as a reference of the same class — address-of, no copy, no
+    // refcount change. Argument position only (see the header note); refcount safety relies
+    // on the callee treating the parameter as a pure borrow.
+    if (from.kind == TypeKind::Object && to.kind == TypeKind::Reference
+        && from.className == to.className)
+        return CastResult::Silent;
+    return canImplicitlyCast(from, to);
+}
+
+// ============================================================
 // commonArithmeticType
 // ============================================================
 

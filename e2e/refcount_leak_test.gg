@@ -1,0 +1,136 @@
+// End-to-end reference-count / leak test.
+//
+// Strategy: a shared live-object counter (`Ctr`) is incremented in every heap element's
+// constructor and decremented in its destructor. Because `new` always runs the constructor and
+// release-to-zero always runs the destructor, a balanced counter (== 0) after a scenario proves
+// every heap allocation it made was released exactly once — no leak and no double-free. Each
+// scenario runs in its own function so its locals are released before the check; a non-zero
+// counter (leak) OR a crash (double-free / use-after-free) fails the test with a distinct code.
+//
+// NOTE: the counter only tracks *heap* objects (references). Plain value objects are stack
+// resident and cannot leak; where a value object is exercised it OWNS a heap reference, so the
+// counter still tracks the real resource. Expected exit code: 0.
+
+class Ctr {
+    static i32 live;
+    fn static inc() { Ctr::live = Ctr::live + 1; }
+    fn static dec() { Ctr::live = Ctr::live - 1; }
+    fn static get() -> i32 { return Ctr::live; }
+}
+
+// The heap-tracked resource.
+class Node {
+    mut i32 v;
+    Node(i32 x) { v = x; Ctr::inc(); }
+    ~Node() { Ctr::dec(); }
+    fn get() -> i32 { return v; }
+}
+
+// A heap object owning a reference field (generated dtor releases the field).
+class Box {
+    mut Node& item;
+    Box(Node& n) { item = n; }
+    fn kid() -> Node& { return item; }                // returns a borrowed field ref (+1)
+    fn swap(Node& n) mut { item = n as mut Node&; }    // reassign ref field: release old, retain new
+}
+
+// A value object owning a reference field (clone must retain; dtor releases).
+class Vec {
+    mut Node& a;
+    Vec(Node& x) { a = x; }
+    fn total() -> i32 { return a.get(); }
+}
+impl Add for Vec { fn add(Vec& r) -> Vec out { out.a = new Node(a.get() + r.a.get()); return out; } }  // object-value return + ref field
+impl Sub for Vec { fn sub(Vec& r) -> Vec& { return new Vec(new Node(a.get() - r.a.get())); } }          // heap-reference return, nested new
+
+// ---- helpers ----
+fn reads(Node& n) -> i32 { return n.get(); }
+fn make(i32 x) -> Node& { return new Node(x); }
+fn makeAlias(i32 x) -> Node& r { r = new Node(x); return r; }              // reference return alias
+fn pick(Node& a, Node& b, bool first) -> Node& { if (first) { return a; } return b; }  // return a borrow (+1)
+fn makeBox(Node& n) -> Box& { return new Box(n); }
+fn takesVec(Vec& v) -> i32 { return v.total(); }
+
+// ---- basics ----
+fn s_new()   { Node& n = new Node(1); i32 x = n.get(); }
+fn s_multi() { Node& a = new Node(1); Node& b = new Node(2); Node& c = new Node(3); }
+fn s_block() { Node& outer = new Node(1); { Node& inner = new Node(2); } i32 x = outer.get(); }
+
+// ---- borrows (must not retain/release) ----
+fn s_borrow_heap()  { Node& n = new Node(5); i32 x = reads(n); i32 y = reads(n); }
+fn s_borrow_value() { Vec v(new Node(5)); i32 x = takesVec(v); i32 y = takesVec(v); }
+
+// ---- rebind ----
+fn s_rebind_new()   { mut Node& r = new Node(1); r = new Node(2); r = new Node(3); }
+fn s_rebind_other() { Node& a = new Node(1); mut Node& r = new Node(2); r = a as mut Node&; }
+fn s_self_assign()  { mut Node& r = new Node(1); r = r; i32 x = r.get(); }
+
+// ---- +1 return ----
+fn s_make_bind()    { Node& n = make(9); i32 x = n.get(); }
+fn s_make_discard() { make(9); }
+fn s_alias()        { Node& n = makeAlias(3); i32 x = n.get(); }
+fn s_pick()         { Node& a = new Node(1); Node& b = new Node(2); Node& c = pick(a, b, true); i32 x = c.get(); }
+
+// ---- reference fields ----
+fn s_field()          { Node& c = new Node(1); Box& h = new Box(c); i32 x = h.kid().get(); }
+fn s_field_reassign() { Node& c1 = new Node(1); mut Box& h = new Box(c1); Node& c2 = new Node(2); h.swap(c2); }
+fn s_shared()         { Node& c = new Node(1); Box& h1 = new Box(c); Box& h2 = new Box(c); }
+fn s_kid_bind()       { Node& n = new Node(1); Box& b = new Box(n); Node& k = b.kid(); i32 x = k.get(); }
+
+// ---- nested new (outer object must be claimed, inner temp released) ----
+fn s_nested_init()    { Box& b = new Box(new Node(1)); i32 x = b.kid().get(); }
+fn s_nested_assign()  { mut Box& b = new Box(new Node(1)); b = new Box(new Node(2)); }
+fn s_nested_arg()     { Box& b = makeBox(new Node(3)); i32 x = b.kid().get(); }
+fn s_nested_discard() { new Box(new Node(4)); }
+
+// ---- control flow ----
+fn s_early(bool cond) { Node& n = new Node(1); if (cond) { return; } i32 x = n.get(); }
+fn s_cond(bool cond)  { if (cond) { Node& n = new Node(1); i32 x = n.get(); } }
+fn s_loop()           { mut i32 i = 0; while (i < 6) { Node& n = new Node(i); i = i + 1; } }
+fn s_loop_rebind()    { mut Node& r = new Node(0); mut i32 i = 0; while (i < 6) { r = new Node(i); i = i + 1; } }
+
+// ---- operators ----
+fn s_op_val_val()     { Vec a(new Node(1)); Vec b(new Node(2)); Vec c = a + b; i32 t = c.total(); }
+fn s_op_heap_val()    { Vec& a = new Vec(new Node(1)); Vec& b = new Vec(new Node(2)); Vec c = a + b; i32 t = c.total(); }
+fn s_op_heapret()     { Vec a(new Node(5)); Vec b(new Node(2)); Vec& c = a - b; i32 t = c.total(); }
+fn s_op_chain()       { Vec a(new Node(1)); Vec b(new Node(2)); Vec cc(new Node(3)); Vec d = a + b + cc; i32 t = d.total(); }
+
+// ---- temporaries ----
+fn s_temp_arg()       { i32 x = reads(make(9)); }
+fn s_temp_chain()     { Node& a = new Node(1); Node& b = new Node(2); Node& c = new Node(3); i32 x = pick(pick(a, b, true), c, false).get(); }
+
+fn main() -> i32 {
+    s_new();            if (Ctr::get() != 0) { return 1; }
+    s_multi();          if (Ctr::get() != 0) { return 2; }
+    s_block();          if (Ctr::get() != 0) { return 3; }
+    s_borrow_heap();    if (Ctr::get() != 0) { return 4; }
+    s_borrow_value();   if (Ctr::get() != 0) { return 5; }
+    s_rebind_new();     if (Ctr::get() != 0) { return 6; }
+    s_rebind_other();   if (Ctr::get() != 0) { return 7; }
+    s_self_assign();    if (Ctr::get() != 0) { return 8; }
+    s_make_bind();      if (Ctr::get() != 0) { return 9; }
+    s_make_discard();   if (Ctr::get() != 0) { return 10; }
+    s_alias();          if (Ctr::get() != 0) { return 11; }
+    s_pick();           if (Ctr::get() != 0) { return 12; }
+    s_field();          if (Ctr::get() != 0) { return 13; }
+    s_field_reassign(); if (Ctr::get() != 0) { return 14; }
+    s_shared();         if (Ctr::get() != 0) { return 15; }
+    s_kid_bind();       if (Ctr::get() != 0) { return 16; }
+    s_nested_init();    if (Ctr::get() != 0) { return 17; }
+    s_nested_assign();  if (Ctr::get() != 0) { return 18; }
+    s_nested_arg();     if (Ctr::get() != 0) { return 19; }
+    s_nested_discard(); if (Ctr::get() != 0) { return 20; }
+    s_early(true);      if (Ctr::get() != 0) { return 21; }
+    s_early(false);     if (Ctr::get() != 0) { return 22; }
+    s_cond(true);       if (Ctr::get() != 0) { return 23; }
+    s_cond(false);      if (Ctr::get() != 0) { return 24; }
+    s_loop();           if (Ctr::get() != 0) { return 25; }
+    s_loop_rebind();    if (Ctr::get() != 0) { return 26; }
+    s_op_val_val();     if (Ctr::get() != 0) { return 27; }
+    s_op_heap_val();    if (Ctr::get() != 0) { return 28; }
+    s_op_heapret();     if (Ctr::get() != 0) { return 29; }
+    s_op_chain();       if (Ctr::get() != 0) { return 30; }
+    s_temp_arg();       if (Ctr::get() != 0) { return 31; }
+    s_temp_chain();     if (Ctr::get() != 0) { return 32; }
+    return 0;
+}

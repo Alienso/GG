@@ -472,6 +472,21 @@ void SemanticAnalyzer::checkCast(const Type& from, const Type& to,
     }
 }
 
+void SemanticAnalyzer::checkArgCast(const Type& from, const Type& to,
+                                     const Token& site, const std::string& context) {
+    if (isError(from) || isError(to)) return;
+    CastResult castResult = canPassArgument(from, to);
+    std::string contextString = context.empty() ? "" : " in " + context;
+    if (castResult == CastResult::None) {
+        error(site, "cannot implicitly convert " + typeName(from)
+              + " to " + typeName(to) + contextString);
+    } else if (castResult == CastResult::Warn) {
+        warn(site, "implicit conversion from " + typeName(from)
+             + " to " + typeName(to) + " may lose data" + contextString);
+    }
+    // Silent (incl. a value-object → reference borrow) → no diagnostic.
+}
+
 const ClassInfo* SemanticAnalyzer::lookupObjectClass(Type objectType, const Token& site) {
     // Value objects (Point), heap references (Point&) and enum values all carry a
     // className and support member/method access.
@@ -497,8 +512,8 @@ void SemanticAnalyzer::analyzeCallArgs(
 {
     for (size_t i = 0; i < args.size(); ++i) {
         Type argType = analyzeExpr(*args[i]);
-        checkCast(argType, paramTypes[i], callee,
-                  "argument " + std::to_string(i + 1) + " of " + context);
+        checkArgCast(argType, paramTypes[i], callee,
+                     "argument " + std::to_string(i + 1) + " of " + context);
         // Passing a read-only reference into a `mut` reference parameter is a const→mut
         // coercion — warn unless the argument is an explicit cast.
         if (i < paramMut.size() && paramMut[i])

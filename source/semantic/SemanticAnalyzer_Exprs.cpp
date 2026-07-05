@@ -113,7 +113,7 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
         for (size_t k = 0; k < args.size(); ++k) {
             const Type& pt = (*c.params)[k];
             if (argTypes[k] == pt) continue;                       // exact: cost 0
-            CastResult cr = canImplicitlyCast(argTypes[k], pt);
+            CastResult cr = canPassArgument(argTypes[k], pt);      // incl. value-object borrow
             if (cr == CastResult::None) { ok = false; break; }
             cost += (cr == CastResult::Warn) ? 2 : 1;              // narrowing worse than widening
         }
@@ -164,7 +164,7 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
     // Emit the normal per-argument cast / mut diagnostics on the chosen overload only.
     const OverloadCand& w = cands[chosen];
     for (size_t k = 0; k < args.size(); ++k) {
-        checkCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
+        checkArgCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
         if (w.paramMut && k < w.paramMut->size() && (*w.paramMut)[k])
             warnConstToMut(at, *args[k], (*w.params)[k]);
     }
@@ -300,7 +300,7 @@ static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
         int  cost = 0;
         for (size_t k = 0; k < argTypes.size(); ++k) {
             if (argTypes[k] == m.paramTypes[k]) continue;
-            CastResult cr = canImplicitlyCast(argTypes[k], m.paramTypes[k]);
+            CastResult cr = canPassArgument(argTypes[k], m.paramTypes[k]);  // incl. value-object borrow
             if (cr == CastResult::None) { ok = false; break; }
             cost += (cr == CastResult::Warn) ? 2 : 1;
         }

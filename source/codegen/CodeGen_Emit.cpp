@@ -209,9 +209,19 @@ bool CodeGen::producesPlusOne(const Expr& e) const {
 }
 
 void CodeGen::claimTemp(const std::string& ptr) {
-    // The just-produced +1 temporary is the most recently registered one.
-    if (!pendingTemps_.empty() && pendingTemps_.back().ptr == ptr)
-        pendingTemps_.pop_back();
+    // Remove the claimed +1 temporary from the pending-release list so it is NOT released at the
+    // full-expression boundary — ownership passes to the consumer (a binding / return / field).
+    // It is usually the most recently registered temp, but a nested `new` or ref-returning call
+    // in the constructor arguments pushes further temps *after* it (e.g. `new Vec(new Node())`
+    // leaves pending = [Vec, Node] with Node at back), so search rather than only checking back().
+    // Any such inner temps stay pending and are correctly released (their +1 was consumed by the
+    // outer object's field retain).
+    for (size_t i = pendingTemps_.size(); i-- > 0; ) {
+        if (pendingTemps_[i].ptr == ptr) {
+            pendingTemps_.erase(pendingTemps_.begin() + static_cast<std::ptrdiff_t>(i));
+            return;
+        }
+    }
 }
 
 void CodeGen::flushTempReleases() {
@@ -227,6 +237,12 @@ void CodeGen::flushTempReleases() {
 std::string CodeGen::emitCast(const std::string& value, const Type& from, const Type& to) {
     if (from == to) return value;
     if (isError(from) || isError(to)) return value;
+
+    // A value object borrowed as a reference of the same class (argument position): objects
+    // are manipulated by address, so `value` is already a `ptr` to the body — no instruction.
+    if (from.kind == TypeKind::Object && to.kind == TypeKind::Reference
+        && from.className == to.className)
+        return value;
 
     // If both types map to the same LLVM IR type (e.g. string ↔ ptr, i32 ↔ u32,
     // char ↔ u32) no cast instruction is needed — bits are already identical.

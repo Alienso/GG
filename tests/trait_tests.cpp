@@ -318,6 +318,42 @@ TEST_CASE("Trait - a + b lowers to a call of the add method", "[trait][operator]
     REQUIRE(ir.find("call ptr @V_add") != std::string::npos);
 }
 
+TEST_CASE("Trait - an operator returning an object value uses the sret slot convention", "[trait][operator][codegen]") {
+    // Regression: an operator whose impl method returns an object *by value* must be called
+    // through the sret convention (hidden slot ptr first, `void` return) — not as a by-value
+    // struct return, which produced malformed IR (`%t = call %V @V_add` fed where a ptr is
+    // expected). No heap allocation is involved.
+    std::string ir = codegenString(R"(
+        class V { mut i32 x; V(i32 a) { x = a; } }
+        impl Add for V { fn add(V& rhs) -> V out { out.x = x + rhs.x; return out; } }
+        fn main() -> i32 {
+            V a(1);
+            V b(2);
+            V c = a + b;
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("call void @V_add(ptr ") != std::string::npos);   // sret call
+    REQUIRE(ir.find("= call %V @V_add") == std::string::npos);        // NOT a by-value return
+    REQUIRE(ir.find("@gg_alloc") == std::string::npos);               // no heap allocation
+}
+
+TEST_CASE("Trait - operator operands may be value objects (borrowed as references)", "[trait][operator][semantic][byref]") {
+    // `a + b` with stack-value operands: the receiver and the `Self&` argument are borrowed
+    // (address-of). Previously rejected with "no matching 'add' method".
+    auto result = analyzeString(R"(
+        class V { mut i32 x; V(i32 a) { x = a; } }
+        impl Add for V { fn add(V& rhs) -> V out { out.x = x + rhs.x; return out; } }
+        fn main() -> i32 {
+            V a(1);
+            V b(2);
+            V c = a + b;
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
 TEST_CASE("Trait - a < b lowers to cmp call plus icmp against zero", "[trait][operator][codegen]") {
     std::string ir = codegenString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }

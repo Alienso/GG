@@ -236,6 +236,16 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
 - **Codegen** adds `funcReturnTypes` (needed so operator calls emit the right return IR, esp.
   `cmp`→`i32`), `genTraitMethodCall` (`CodeGen_Classes.cpp`), and counts impl methods into
   `overloadedBases_`/`funcParamTypes`.
+- **Operators may return an object by value** (`fn add(Self& rhs) -> Vec2 out`): this rides
+  the return-alias sret machinery. `genTraitMethodCall` checks `slotReturningFns_` for an
+  object return and calls via the **sret convention** (hidden slot `ptr` first, then receiver,
+  then args; `void` LLVM return), materializing a temp slot and returning its address — **no
+  heap allocation**, no by-value struct return. (Prior to this, an object-value operator
+  emitted `%t = call %V @V_add(...)` and fed the struct where a `ptr` was expected → malformed
+  IR.) Combined with the value-object borrow, `Vec2 c = a + b;` on stack operands is fully
+  stack-resident (operand borrows + sret slot; a trailing `Vec2_clone` copies the slot into
+  `c`, still no heap). Operator **operands** may be value objects (borrowed as `Self&` — see
+  the memory-model borrow note).
 
 ## Architecture summary
 
@@ -304,6 +314,18 @@ semantics; bodies may still call any method the concrete type has).
   `new` produces a `+1` reference. Assignment rebinds (retains new target, releases old).
 - **Object parameters must be references** — the semantic analyser rejects bare value-type
   class parameters. Primitive parameters always pass by value.
+- **Value-object → reference borrow (argument position only)** — passing a *value* object
+  where a `Class&` is expected is allowed and lowers to a **borrow**: the callee receives the
+  object's address (no copy, no refcount change). A value object's SSA value is already a
+  `ptr` to its body (`genIdentifier` returns the alloca), so codegen is a no-op — `emitCast`
+  Object→Reference returns the value unchanged. Enabled by `canPassArgument`
+  (`Type.cpp`) — used in the arg-matching paths (`resolveOverload` viability, its final
+  `checkArgCast`, and `pickOverloadByArgs` for operators). **Binding contexts keep using
+  `canImplicitlyCast` (still `None` for Object→Reference)** so `Class& r = valueObj`, ref
+  reassignment, and ref-`return` stay rejected — a stack object has no refcount header at
+  body-8, so retaining/releasing/+1-returning one would corrupt memory. The borrow is thus
+  safe for pure-borrow callees (operators, readers); it is an unchecked footgun only if the
+  callee retains/stores/+1-returns the parameter (no lifetime tracking prevents that).
 - **Refcount runtime** (emitted verbatim into IR when `new` is used):
   - `gg_alloc(size)` — malloc with 8-byte header, initialises count to 1.
   - `gg_retain(ptr)` — null-safe refcount increment.
@@ -311,6 +333,22 @@ semantics; bodies may still call any method the concrete type has).
 - **+1 return convention**: functions/methods returning `Class&` return a retained (`+1`)
   reference. Callee retains borrowed references before returning. Unbound temporaries
   (e.g. `make(99);`) are released at the full-expression boundary.
+- **Ownership transfer via `claimTemp` (`CodeGen_Emit.cpp`)**: every `new`/ref-returning-call
+  result is pushed to `pendingTemps_` (released at the full-expression boundary unless claimed).
+  A consumer that takes ownership (a binding, a `return`, a field/`this` store) calls
+  `claimTemp(ptr)` to remove it from the pending list. `claimTemp` **searches** the list — it is
+  NOT necessarily the most recent temp, because a nested `new`/ref-call in the constructor args
+  pushes further temps after it (`new Box(new Node())` ⇒ pending `[Box, Node]`, Node at back).
+  The inner temp stays pending and is released (its `+1` was consumed by the outer object's field
+  retain). *(Historical bug: `claimTemp` only checked `back()`, so the outer object was released
+  as a temp and the caller received freed memory — double-free. Fixed; guarded by
+  `tests/refcount_tests.cpp` + `e2e/refcount_leak_test.gg`.)*
+- **Reference return alias transfers, never retains** (`emitReturnAlias`): a `-> Class& r`
+  alias always owns exactly one `+1` (every `r = <expr>` either claims a `+1` producer or
+  retains a borrow, in `genAssign`). On return that `+1` is handed to the caller directly — no
+  extra `gg_retain`, and the alias is NOT in a dtor scope (not released in-function). *(Historical
+  bug: it retained on return but was never released → returned a `+2` object → one-object leak
+  per call. Fixed.)*
 
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
@@ -418,8 +456,14 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**597 test cases / 1198 assertions** (as of the unified signature order — `fn name(params) ->
-RetType [alias]`, with generalized return aliases).
+**605 test cases / 1215 assertions** (as of the refcount ownership fixes — reference
+return-alias transfer + nested-`new` claim; value-object → reference borrow; object-value
+operator returns; unified signature order `fn name(params) -> RetType [alias]`).
+
+Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
+(ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released
+exactly once (balanced counter ⇒ no leak; a double-free crashes). Complemented by the IR-level
+`tests/refcount_tests.cpp`.
 
 ## Keeping CLAUDE.md current
 

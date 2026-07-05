@@ -244,6 +244,10 @@ private:
     void          recordType(const Expr& expr, const Type& type);
     void          checkCast(const Type& from, const Type& to, const Token& site,
                             const std::string& context);
+    // Like checkCast, but for argument position: also silently accepts a value-object →
+    // reference borrow (see canPassArgument). Used by overload resolution / operator desugaring.
+    void          checkArgCast(const Type& from, const Type& to, const Token& site,
+                               const std::string& context);
     // Resolve a type token — handles IDENTIFIER tokens that name a known class.
     [[nodiscard]] Type resolveTypeToken(const Token& typeToken) const;
 

@@ -115,6 +115,13 @@ bool isError(const Type& t);
 // ---- Type operations ----
 
 CastResult  canImplicitlyCast(const Type& from, const Type& to);
+// Argument-position conversions. Same as canImplicitlyCast, but additionally permits a value
+// object to be *borrowed* as a reference of the same class (`Vec2` → `Vec2&`): the callee
+// receives the object's address (no copy, no refcount change). This is valid ONLY when passing
+// an argument — the callee must treat the parameter as a pure borrow (never retain, store, or
+// +1-return it, since a stack object has no refcount header at body-8). Binding contexts (var
+// init, assignment, `return`) deliberately keep using canImplicitlyCast so they still reject it.
+CastResult  canPassArgument(const Type& from, const Type& to);
 // Overload mangling: a symbol-safe encoding of a type / of a full signature. Used by both
 // the semantic analyzer (to name the chosen overload) and codegen (to name definitions).
 std::string mangleType(const Type& t);

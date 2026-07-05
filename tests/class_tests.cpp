@@ -539,13 +539,36 @@ TEST_CASE("ObjectParam - a method with a raw object parameter is rejected", "[cl
     REQUIRE(result.hadError);
 }
 
-TEST_CASE("ObjectParam - passing a raw value object as an argument is rejected", "[class][semantic][byref]") {
+TEST_CASE("ObjectParam - a value object is borrowed as a reference argument", "[class][semantic][byref]") {
+    // A value object passed where a `T&` is expected is borrowed (address-of, no copy, no
+    // refcount change). Valid in argument position only.
     auto result = analyzeString(R"(
         class Point { f32 x; Point(f32 v) { this.x = v; } }
         fn use(Point& p) { }
         fn main() { Point p(1.0); use(p); }
     )");
-    REQUIRE(result.hadError);   // p is a value object; pass a reference instead
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ObjectParam - the value-object borrow passes an address, no copy", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { f32 x; Point(f32 v) { this.x = v; } }
+        fn use(Point& p) { }
+        fn main() { Point p(1.0); use(p); }
+    )");
+    // The borrow hands the callee the object's alloca directly — no clone into a temp.
+    REQUIRE(ir.find("call void @use(ptr %p.addr)") != std::string::npos);
+    REQUIRE(ir.find("@Point_clone") == std::string::npos);
+}
+
+TEST_CASE("ObjectParam - a value object binding to a reference is still rejected", "[class][semantic][byref]") {
+    // The borrow is argument-only; binding contexts (var init) would make a headerless stack
+    // object look refcounted, so they stay rejected.
+    auto result = analyzeString(R"(
+        class Point { f32 x; Point(f32 v) { this.x = v; } }
+        fn main() { Point p(1.0); Point& r = p; }
+    )");
+    REQUIRE(result.hadError);
 }
 
 TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class][codegen][byref]") {

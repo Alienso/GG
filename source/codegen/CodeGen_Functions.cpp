@@ -231,8 +231,11 @@ void CodeGen::setupReturnAliasLocal(const std::string& aliasName, const Type& al
     currentReturnAliasLocal_ = aliasName;
     if (aliasType.kind == TypeKind::Reference) {
         emitStore("ptr", "null", ptrName);                       // null until assigned
-        if (!dtorScopes_.empty())
-            dtorScopes_.back().push_back({ ptrName, aliasType.className, /*isReference=*/true });
+        // A reference alias is NOT registered for scope-exit destruction: it always owns
+        // exactly one +1 (every `r = <expr>` either claims a +1 producer or retains a borrow,
+        // see genAssign), and that +1 is transferred to the caller on return (emitReturnAlias),
+        // never released in-function. Any intermediate value from a re-assignment is released
+        // by genAssign's rebind (release-old) — not here.
     } else {
         emitStore(irt, isFloat(aliasType.kind) ? "0.0" : "0", ptrName);   // zero-init
     }
@@ -244,8 +247,10 @@ void CodeGen::emitReturnAlias() {
     std::string ptr = allocaMap[currentReturnAliasLocal_];
     Type        t   = currentReturnType;                 // = the alias's type
     std::string val = emitLoad(irTypeName(t), ptr);
-    if (t.kind == TypeKind::Reference)
-        emit("call void @gg_retain(ptr " + val + ")");   // hand the caller a +1
+    // A reference alias already owns the +1 it will hand to the caller (see setupReturnAliasLocal
+    // / genAssign) — transfer that ownership directly, with NO extra retain and NO release of the
+    // alias. Releasing the body's other locals below cannot touch it (it is not in any dtor
+    // scope). An extra retain here would return a +2 object → a one-object leak per call.
     flushTempReleases();
     for (auto it = dtorScopes_.rbegin(); it != dtorScopes_.rend(); ++it)
         emitDtorsForScope(*it);

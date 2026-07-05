@@ -136,14 +136,32 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
                                         const std::vector<std::string>& argVals, Type& retOut) {
     std::string sym = calleeName(node, className + "_" + method);
     auto pit = funcParamTypes.find(sym);
+    Type ret = funcReturnTypes.count(sym) ? funcReturnTypes.at(sym) : Type{TypeKind::Void};
+    retOut = ret;
+
+    // Object-value return: the operator method uses the sret convention (hidden slot `ptr`
+    // first, then the receiver, then declared args; `void` LLVM return). Materialize a temp
+    // slot, fill it in place, and hand back its address — no heap allocation, no by-value
+    // struct return. Without this the call would be emitted as `call %T @op(...)` and the
+    // struct value would flow where a `ptr` is expected.
+    if (ret.kind == TypeKind::Object && slotReturningFns_.count(sym)) {
+        std::string slot   = materializeSlotTemp(ret.className);
+        std::string argStr = "ptr " + slot + ", ptr " + recvPtr;
+        for (size_t i = 0; i < argVals.size(); ++i) {
+            Type pt = (pit != funcParamTypes.end() && i < pit->second.size()) ? pit->second[i] : argTypes[i];
+            std::string v = emitCast(argVals[i], argTypes[i], pt);
+            argStr += ", " + irTypeName(pt) + " " + v;
+        }
+        emit("call void @" + sym + "(" + argStr + ")");
+        return slot;
+    }
+
     std::string argStr = "ptr " + recvPtr;
     for (size_t i = 0; i < argVals.size(); ++i) {
         Type pt = (pit != funcParamTypes.end() && i < pit->second.size()) ? pit->second[i] : argTypes[i];
         std::string v = emitCast(argVals[i], argTypes[i], pt);
         argStr += ", " + irTypeName(pt) + " " + v;
     }
-    Type ret = funcReturnTypes.count(sym) ? funcReturnTypes.at(sym) : Type{TypeKind::Void};
-    retOut = ret;
     std::string retIr = irTypeName(ret);
     if (retIr == "void") { emit("call void @" + sym + "(" + argStr + ")"); return ""; }
     std::string t = freshTemp();

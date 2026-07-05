@@ -383,6 +383,34 @@ fn bump(Point& p) {
 }
 ```
 
+### Passing objects
+A `ClassName&` parameter accepts **either** a heap reference **or** a plain value object. A
+value object passed where a reference is expected is **borrowed**: the callee receives the
+object's address — no copy, no refcount change.
+
+```gg
+fn bump(Point& p) { p.x = p.x + 1; }
+
+Point  v = Point(1.0, 2.0);
+Point& h = new Point(3.0, 4.0);
+bump(v);    // value object borrowed as Point& (address passed; no copy)
+bump(h);    // heap reference passed as usual
+```
+
+This borrow is only valid **in argument position**. Binding a value object to a reference in
+other contexts is rejected, because a stack object has no refcount header and the reference
+machinery would corrupt memory:
+
+```gg
+Point  v = Point(1.0, 2.0);
+Point& r = v;                // ERROR — cannot bind a value object to a reference
+```
+
+Consequently a borrowed value object must be treated as a **pure borrow** by the callee: do
+not store it in a reference field, return it as a `ClassName&`, or otherwise retain it beyond
+the call. (There is no lifetime checker to enforce this — it is your responsibility, as with
+raw pointers.)
+
 ### Parameter mutability
 Parameters are **const by default**, like locals. A primitive parameter that the body
 reassigns must be declared `mut`:
@@ -1043,30 +1071,41 @@ they are recognised by name.
   `>= 0` for `<`, `<=`, `>`, `>=`).
 - Unary `-a` calls `a.neg()`; `a[i]` calls `a.get(i)`; `a[i] = v` calls `a.set(i, v)`.
 
+**Operators return objects by value, and take operands by value — with no heap allocation.**
+An operator method may return an object *by value* using a return alias (see §6): the result is
+written directly into the caller's storage (a hidden result slot), so `Vec2 c = a + b;` involves
+no `new` and no heap. And because a value object is **borrowed as a reference** when passed as an
+argument (see [Passing objects](#passing-objects)), the operands may themselves be plain stack
+values — the receiver and the `Self&` parameter both receive the object's address. The whole
+expression stays on the stack:
+
 ```gg
 class Vec2 {
     mut i32 x; mut i32 y;
     Vec2(i32 a, i32 b) { x = a; y = b; }
     fn sum() -> i32 { return x + y; }
 }
-impl Add   for Vec2 { fn add(Vec2& r) -> Vec2& { return new Vec2(x + r.x, y + r.y); } }
+impl Add   for Vec2 { fn add(Vec2& r) -> Vec2 out { out.x = x + r.x; out.y = y + r.y; return out; } }
 impl Eq    for Vec2 { fn eq(Vec2& r) -> bool  { return x == r.x && y == r.y; } }
 impl Ord   for Vec2 { fn cmp(Vec2& r) -> i32 { return sum() - r.sum(); } }
-impl Neg   for Vec2 { fn neg() -> Vec2&        { return new Vec2(0 - x, 0 - y); } }
+impl Neg   for Vec2 { fn neg() -> Vec2 out     { out.x = 0 - x; out.y = 0 - y; return out; } }
 impl Index for Vec2 {
     fn get(i32 i) -> i32          { if (i == 0) { return x; } return y; }
     fn set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
 }
 
 fn main() -> i32 {
-    Vec2& a = new Vec2(1, 2);
-    Vec2& b = new Vec2(3, 4);
-    Vec2& c = a + b;          // (4, 6)
-    bool  lt = a < b;         // true  (3 < 7)
-    Vec2& n = -a;             // (-1, -2)
+    Vec2 a(1, 2);
+    Vec2 b(3, 4);
+    Vec2 c = a + b;           // (4, 6) — stack operands, stack result, no heap
+    bool lt = a < b;          // true  (3 < 7)
+    Vec2 n = -a;              // (-1, -2)
     return c[0] + c[1];       // Index get → 10
 }
 ```
+
+An operator may still return a heap reference (`-> Vec2&` with `return new Vec2(...)`) if you
+want a heap-allocated result; the value-return form above is simply the allocation-free default.
 
 ---
 

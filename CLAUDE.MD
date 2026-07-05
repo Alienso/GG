@@ -233,6 +233,19 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
   `analyzeIndexAssign`/`genIndexAssign` (`set`). Overload active **only if** the operand's
   class is in `implementedTraits` for that trait; else the built-in numeric rules stand.
   `Eq`/`Ord` operators type as `bool`; others as the method's return type.
+- **Default `==`/`!=` for classes without an `Eq` impl** (an `Eq` impl **overrides** either;
+  semantic records the node + codegen has no `Eq` gate of its own, so both must agree via the
+  handoff sets on `SemanticResult`, threaded to codegen):
+  - **Two references** of the same class → **address identity** (`icmp eq/ne ptr`, like enums).
+    Recorded in `addressIdentityCmp`; `genBinary` skips the desugar + reuses the enum-identity path.
+  - **A value object** (or a value/reference mix of the same class) → **memberwise structural
+    equality** (a value has no meaningful address). Recorded in `structuralValueCmp`; codegen
+    emits a generated `@Class_structeq(ptr, ptr) -> i1` (drained worklist like clones): primitives
+    by value (`icmp eq`/`fcmp oeq`), reference/enum/ptr fields by address (`icmp eq ptr`), and an
+    embedded value-object field via its own `@Field_eq` if the field's class implements `Eq`
+    (from `eqImplementors`, guarded by the emitted name existing) else recursively via
+    `@Field_structeq`; all AND-accumulated. Terminates because value-embedding cycles are rejected.
+  - Other operators (Add/Ord/…) on a class without the impl still **error**.
 - **Codegen** adds `funcReturnTypes` (needed so operator calls emit the right return IR, esp.
   `cmp`→`i32`), `genTraitMethodCall` (`CodeGen_Classes.cpp`), and counts impl methods into
   `overloadedBases_`/`funcParamTypes`.
@@ -310,6 +323,18 @@ semantics; bodies may still call any method the concrete type has).
 
 ### Memory model
 - **Value objects** (`Point p`): stack-allocated struct; copied on assignment.
+- **Value-object fields (embedding)** — a class field may be another class *value*
+  (`class Line { Point start; Point end; }`), lowered to a nested struct member
+  (`%Line = type { %Point, %Point }`); its "value" is its address (a GEP), like a local value
+  object. Copy semantics: clone **deep-copies** value fields (recursive `@Field_clone`) and
+  **retains** reference fields; a dtor **recursively destroys** embedded value fields (calling
+  `@Field_dtor` on the field address) + releases reference fields, reverse declaration order.
+  `needsDtor` is **transitive** (a class embedding a dtor-needing value field needs one too;
+  fixpoint in `generate()`); the clone worklist drains (recursive clone may enqueue more).
+  **Value-embedding cycles are rejected** (`class A{B b} class B{A a}` = infinite size —
+  `checkValueFieldCycles`, semantic pass 0a); use a reference to break the cycle. Enum fields
+  may not be value objects (enums are pre-main singletons). Field types may forward-reference a
+  class declared later (name pre-pass in `collectClasses` / codegen `generate()`).
 - **Heap references** (`Point& r = new Point(...)`): intrusive-refcounted heap pointer.
   `new` produces a `+1` reference. Assignment rebinds (retains new target, releases old).
 - **Object parameters must be references** — the semantic analyser rejects bare value-type
@@ -456,9 +481,11 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**605 test cases / 1215 assertions** (as of the refcount ownership fixes — reference
-return-alias transfer + nested-`new` claim; value-object → reference borrow; object-value
-operator returns; unified signature order `fn name(params) -> RetType [alias]`).
+**626 test cases / 1249 assertions** (as of default class `==`/`!=` — reference address identity +
+value-object memberwise structural equality; value-object fields / embedding — recursive
+deep-copy clone + recursive dtor + transitive `needsDtor` + cycle rejection; the refcount
+ownership fixes; value-object → reference borrow; object-value operator returns; unified
+signature order `fn name(params) -> RetType [alias]`).
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released

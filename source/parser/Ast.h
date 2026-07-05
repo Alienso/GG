@@ -202,6 +202,10 @@ struct ParamDecl {
     Token typeName;
     Token name;
     bool  isMut = false;   // `mut` — reassignable inside the body; otherwise const
+    // Default value (`i32 a = 0`) — used to fill omitted trailing arguments at call sites.
+    // nullptr = no default. Defaults must form a contiguous trailing run (enforced in the parser)
+    // and may not reference the function's own parameters (analyzed in the enclosing scope).
+    std::unique_ptr<Expr> defaultValue;
 };
 
 struct FunctionDeclStmt {

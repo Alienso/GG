@@ -1,0 +1,43 @@
+// End-to-end test for default parameter values (C++-style; defaults form a contiguous trailing
+// run). Omitted trailing arguments are filled from the callee's defaults, evaluated at the call
+// site. Covers free functions, constructors, methods, an object-value (sret) return, and an
+// object default. Expected exit code: 0.
+
+class Point {
+    mut i32 x; mut i32 y;
+    Point(i32 a = 1, i32 b = 2) { x = a; y = b; }              // constructor defaults
+    fn sum() -> i32 { return x + y; }
+    fn shift(i32 dx = 10, i32 dy = 20) mut -> i32 { x = x + dx; y = y + dy; return x + y; }
+}
+
+fn add(i32 a, i32 b = 100, i32 c = 1000) -> i32 { return a + b + c; }   // trailing defaults
+
+// Object-value (sret) return with defaults — the user's motivating example.
+fn make(i32 a = 3, i32 b = 4) -> Point p { p.x = a; p.y = b; }
+
+fn main() -> i32 {
+    // free function: omit 0, 1, 2 trailing args
+    if (add(1)       != 1101) { return 1; }   // b=100, c=1000
+    if (add(1, 2)    != 1003) { return 2; }   // c=1000
+    if (add(1, 2, 3) != 6)    { return 3; }
+
+    // constructor: none / partial / full
+    Point& p0 = new Point();      if (p0.sum() != 3)  { return 4; }   // 1+2
+    Point& p1 = new Point(5);     if (p1.sum() != 7)  { return 5; }   // 5+2
+    Point& p2 = new Point(5, 6);  if (p2.sum() != 11) { return 6; }
+
+    // stack construction with a default
+    Point s(9);                   if (s.sum() != 11)  { return 7; }   // 9+2
+
+    // mut method defaults
+    mut Point& m = new Point(0, 0);
+    if (m.shift()  != 30) { return 8; }   // (10,20)
+    if (m.shift(1) != 51) { return 9; }   // (11,40)
+
+    // object-value return with defaults (sret slot)
+    Point d0 = make();            if (d0.sum() != 7)  { return 10; }  // 3+4
+    Point d1 = make(10);          if (d1.sum() != 14) { return 11; }  // 10+4
+    Point d2 = make(10, 20);      if (d2.sum() != 30) { return 12; }
+
+    return 0;
+}

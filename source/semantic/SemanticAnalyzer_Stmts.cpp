@@ -262,8 +262,24 @@ void SemanticAnalyzer::checkReturnAliasAssignedAtExit(const BlockStmt& body, con
               + "' may be unassigned when the function returns");
 }
 
+void SemanticAnalyzer::analyzeParamDefaults(const std::vector<ParamDecl>& params) {
+    // Analyze defaults with no params / this / instance fields visible: clear currentClassName so a
+    // bare name can't resolve to an instance field, and do it before params are declared in scope.
+    std::string savedClassName = currentClassName;
+    currentClassName = "";
+    for (const ParamDecl& p : params) {
+        if (!p.defaultValue) continue;
+        Type valueType = analyzeExpr(*p.defaultValue);
+        Type paramType = resolveTypeToken(p.typeName);
+        checkCast(valueType, paramType, p.name,
+                  "default value of parameter '" + p.name.lexeme + "'");
+    }
+    currentClassName = savedClassName;
+}
+
 void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl) {
     // Signature is already registered in the global scope by collectFunctions.
+    analyzeParamDefaults(functionDecl.params);   // before the function scope opens (no params visible)
     std::optional<Type> savedReturnType = currentReturnType;
     int                 savedLoopDepth  = loopDepth;
     std::string         savedSlot       = currentReturnSlotName_;
@@ -356,6 +372,7 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     }
 
     for (const MethodDecl& md : classDecl.methods) {
+        analyzeParamDefaults(md.params);   // defaults can't see params / this / fields
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
         bool                savedStatic     = currentMethodIsStatic;

@@ -245,7 +245,7 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
     const std::vector<Type>* declaredParams =
         funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
 
-    std::string argStr   = buildArgString(mc.args, declaredParams);
+    std::string argStr   = buildArgString(mc.args, declaredParams, defaultsFor(mangledName));
     std::string fullArgs = "ptr " + objPtr + (argStr.empty() ? "" : ", " + argStr);
 
     if (returnIrType == "void") {
@@ -270,7 +270,7 @@ std::string CodeGen::genStaticCall(const std::string& className,
     const std::vector<Type>* declaredParams =
         funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
 
-    std::string fullArgs = buildArgString(mc.args, declaredParams);
+    std::string fullArgs = buildArgString(mc.args, declaredParams, defaultsFor(mangledName));
 
     if (returnIrType == "void") {
         emit("call void @" + mangledName + "(" + fullArgs + ")");

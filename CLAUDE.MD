@@ -178,6 +178,26 @@ primitives/references; when present, only `return;`/`return <alias>;` are allowe
   snapshot machinery). Codegen returns it with the +1 retain convention.
 - Void + alias → error; object return with no alias → "requires a return alias".
 
+### Default parameter values (C++-style)
+A parameter may declare `= expr` (`ParamDecl::defaultValue`, a `unique_ptr<Expr>` — `ParamDecl` is
+thus move-only). Omitted **trailing** arguments are filled from the callee's stored default exprs,
+evaluated per-call **at the call site**.
+- **Contiguous-trailing rule** (parser, `parseParamList(bool allowDefaults)`): once a param has a
+  default, every later param must too — else "must have a default value because an earlier
+  parameter has one". `extern` rejects defaults (`allowDefaults=false`). Applies to free functions,
+  methods, **and** constructors (all route through `parseParamList`).
+- **Semantic** (`analyzeParamDefaults`, called from `analyzeFunctionDecl` + the `analyzeClassDecl`
+  method loop): each default is analyzed in the **enclosing scope** with `currentClassName` cleared
+  and **before params are declared**, so a default may not reference the function's own params /
+  `this` / fields; `checkCast` against the param type ("default value of parameter 'x'").
+- **Overload resolution with arity ranges** (`resolveOverload`): `numDefaults` (trailing-default
+  count) on `ClassInfo::Method` / `FunctionOverload` / `OverloadCand`; a candidate is viable when
+  `args.size()` ∈ `[total - numDefaults, total]`. Arity error reads "expects R to N argument(s)".
+- **Codegen** (`funcDefaults_`: emitted-callee-name → `vector<const Expr*>`, keyed like
+  `funcParamTypes`): `buildArgString(..., defaultsFor(name))` genExprs the stored defaults for
+  positions the caller omitted. Threaded through every call site (free/method/static/ctor/new/sret/
+  enum-ctor). Works for object-value (sret) returns and object defaults.
+
 ### Overloading (functions, constructors, methods)
 Functions, constructors, and methods (instance & static) may be **overloaded** by parameter
 signature **and/or return type**. Enums are excluded (single ctor, no member overloading).
@@ -307,19 +327,36 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
 
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
-trait(s) — user traits **and** built-in operator traits (`Add`/`Ord`/…). Enforced at each
-**instantiation site**, not by pre-checking the generic body (the type param never reaches
-semantics; bodies may still call any method the concrete type has).
+trait(s) — user traits **and** built-in operator traits (`Add`/`Ord`/…). Enforced **both** at each
+instantiation site (the concrete arg must implement the trait) **and** by checking the generic
+**body** against the bounds at the definition (bounded params only).
 - **Parser**: `GenericTemplate::bounds` (parallel to `typeParams`, `bounds[i]` = trait names).
   Both capture functions call `scanTypeParamList(from, typeParams, bounds)` which parses
   `T [: Trait (+ Trait)*] [, …]` (COLON/PLUS are separators). At monomorphization,
   `runMonomorphization` pushes a `GenericBoundCheck{typeName, traitName, context, line}` (in
   `Ast.h`, on `Program::genericBoundChecks`) per bounded param — `typeName` = the arg's head
   token lexeme (base type, `&` stripped), `context` = the instantiation's mangled name.
-- **Semantic**: `checkGenericBounds(program)` runs after `collectImpls` (pass 0d). For each
-  obligation: unknown trait (not built-in, not in `traitRegistry`) → error; else the type must
-  be in `implementedTraits[typeName]` for that trait (both user + built-in impls populate it).
-  Primitives / non-implementing classes → "type 'X' does not satisfy bound 'Trait' …".
+- **Semantic (instantiation site)**: `checkGenericBounds(program)` runs after `collectImpls` (pass
+  0d). For each obligation: unknown trait (not built-in, not in `traitRegistry`) → error; else the
+  type must be in `implementedTraits[typeName]` for that trait (both user + built-in impls populate
+  it). Primitives / non-implementing classes → "type 'X' does not satisfy bound 'Trait' …".
+- **Body checking (definition site)** — `checkGenericBodies` (pass 3, Rust-`where`-like, bounded-
+  only). After monomorphization the parser re-parses each **bounded** template's original body
+  (type-param names registered as types, own scratch registry so it can't perturb expansion) into
+  `Program::genericTemplates` (a `GenericTemplateDecl{decl, typeParams, bounds}`). The pass binds
+  each param name → bounds in `currentTypeParamBounds_`, then reuses `analyzeFunctionDecl` /
+  `analyzeClassDecl` (the class is temporarily registered) so the body is analyzed with a new
+  `TypeKind::TypeParam`. On a type-param value: **method calls** resolve against the bound traits
+  (`resolveBoundMethod`: user-trait methods + built-in conventional `add`/`cmp`/`eq`/… with `Self`
+  → the param); **operators** require the matching operator-trait bound; **field access** is an
+  error (traits declare no fields). A type parameter and a reference to it (`T` ↔ `T&`) are
+  **interchangeable** in `canImplicitlyCast` (gated on a `TypeParam` operand) — the value-vs-
+  reference split isn't knowable abstractly (a bound method may return `Self` or `Self&`). A bounded param used beyond its bounds → error *at the
+  definition* — even when the concrete instantiation type happens to provide it. **Unbounded
+  params stay permissive** (empty bounds ⇒ suppressed, duck-typed at instantiation as before), so
+  `addT<T>(T a,T b){return a+b;}` still compiles. Errors are single-shot (`error()` throws), so a
+  failing monomorphized instantiation (pass 2) can pre-empt the pass-3 message for the same misuse;
+  the body-check's unique value is catching use-beyond-bounds that instantiation would accept.
 
 ### Memory model
 - **Value objects** (`Point p`): stack-allocated struct; copied on assignment.
@@ -481,7 +518,11 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**626 test cases / 1249 assertions** (as of default class `==`/`!=` — reference address identity +
+**652 test cases / 1294 assertions** (as of C++-style default parameter values —
+contiguous-trailing rule, call-site fill, arity-range overload resolution; generic-body checking
+against trait bounds
+(definition-time, bounded-only, new `TypeKind::TypeParam`); default class `==`/`!=` — reference
+address identity +
 value-object memberwise structural equality; value-object fields / embedding — recursive
 deep-copy clone + recursive dtor + transitive `needsDtor` + cycle rejection; the refcount
 ownership fixes; value-object → reference borrow; object-value operator returns; unified

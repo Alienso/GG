@@ -138,8 +138,9 @@ private:
     [[nodiscard]] Stmt      parseFnDeclaration();
     // Parse the tail of a trait/impl method (`;` bodyless, or `{ body }`).
     void                    parseTraitMethodBody(bool bodyOptional, bool& hasBody, BlockStmt& body);
-    // Parses `(param, ...)` — the parenthesised parameter list.
-    [[nodiscard]] std::vector<ParamDecl> parseParamList();
+    // Parses `(param, ...)` — the parenthesised parameter list. `allowDefaults` gates `= expr`
+    // default values (false for `extern`). Defaults must form a contiguous trailing run.
+    [[nodiscard]] std::vector<ParamDecl> parseParamList(bool allowDefaults = true);
     // Parses an optional `-> RetType [alias]` return suffix. Returns the return type token
     // (a synthesized `void` token when the arrow is absent); sets hasAlias/aliasName.
     [[nodiscard]] Token     parseReturnSuffix(bool& hasAlias, std::string& aliasName);

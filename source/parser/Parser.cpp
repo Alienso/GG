@@ -596,7 +596,7 @@ Stmt Parser::parseFnDeclaration() {
 
 Stmt Parser::parseExternFuncDecl(const Token& keyword) {
     Token name = consume(TokenType::IDENTIFIER, "expected function name after 'extern'");
-    std::vector<ParamDecl> params = parseParamList();
+    std::vector<ParamDecl> params = parseParamList(/*allowDefaults=*/false);
     bool        hasAlias = false;
     std::string alias;
     Token returnType = parseReturnSuffix(hasAlias, alias);
@@ -606,13 +606,26 @@ Stmt Parser::parseExternFuncDecl(const Token& keyword) {
 }
 
 // `(param, ...)` — the parenthesised parameter list.
-std::vector<ParamDecl> Parser::parseParamList() {
+std::vector<ParamDecl> Parser::parseParamList(bool allowDefaults) {
     consume(TokenType::LEFT_PAREN, "expected '(' after function name");
     std::vector<ParamDecl> params;
     if (!check(TokenType::RIGHT_PAREN)) {
         do { params.push_back(parseParam()); } while (match({ TokenType::COMMA }));
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
+
+    // A default value must be a contiguous *trailing* run: once a parameter has a default, every
+    // parameter after it must have one too (like C++). And `extern` takes no defaults.
+    bool sawDefault = false;
+    for (const ParamDecl& p : params) {
+        bool has = (p.defaultValue != nullptr);
+        if (has && !allowDefaults)
+            throw error(p.name, "default parameter values are not allowed on 'extern' declarations");
+        if (has) sawDefault = true;
+        else if (sawDefault)
+            throw error(p.name, "parameter '" + p.name.lexeme
+                        + "' must have a default value because an earlier parameter has one");
+    }
     return params;
 }
 
@@ -643,7 +656,10 @@ ParamDecl Parser::parseParam() {
     if (!isTypeName()) throw error(peek(), "expected parameter type");
     Token paramType = consumeType();
     Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
-    return ParamDecl{ paramType, paramName, isMut };
+    std::unique_ptr<Expr> defaultValue;
+    if (match({ TokenType::EQUAL }))                       // `= <expr>` default value
+        defaultValue = std::make_unique<Expr>(parseExpression());
+    return ParamDecl{ paramType, paramName, isMut, std::move(defaultValue) };
 }
 
 
@@ -836,15 +852,7 @@ void Parser::parseMemberList(const Token& name,
         if (check(TokenType::IDENTIFIER) && peek().lexeme == name.lexeme
             && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LEFT_PAREN) {
             Token ctorName = advance();  // consume class name
-            consume(TokenType::LEFT_PAREN, "expected '(' after constructor name");
-
-            std::vector<ParamDecl> params;
-            if (!check(TokenType::RIGHT_PAREN)) {
-                do {
-                    params.push_back(parseParam());
-                } while (match({ TokenType::COMMA }));
-            }
-            consume(TokenType::RIGHT_PAREN, "expected ')' after constructor parameters");
+            std::vector<ParamDecl> params = parseParamList();   // '(' … ')' + default values
             consume(TokenType::LEFT_BRACE,  "expected '{' before constructor body");
             bool savedIF1 = insideFunction;
             insideFunction = true;

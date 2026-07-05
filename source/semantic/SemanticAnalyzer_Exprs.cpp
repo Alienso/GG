@@ -108,10 +108,14 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
     std::vector<Viable> viable;
     for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
         const OverloadCand& c = cands[i];
-        if (c.params->size() != args.size()) continue;
+        // Arity is a range: omitted trailing args are filled from defaults, so the call is viable
+        // when it supplies between (total - numDefaults) and total arguments.
+        size_t total    = c.params->size();
+        size_t required = total - std::min(c.numDefaults, total);
+        if (args.size() < required || args.size() > total) continue;
         bool ok = true;
         int  cost = 0;
-        for (size_t k = 0; k < args.size(); ++k) {
+        for (size_t k = 0; k < args.size(); ++k) {   // only the supplied (leftmost) args
             const Type& pt = (*c.params)[k];
             if (argTypes[k] == pt) continue;                       // exact: cost 0
             CastResult cr = canPassArgument(argTypes[k], pt);      // incl. value-object borrow
@@ -123,11 +127,16 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
 
     if (viable.empty()) {
         // Non-overloaded case: keep the precise arity diagnostic.
-        if (cands.size() == 1 && cands[0].params->size() != args.size())
-            error(at, what + " expects " + std::to_string(cands[0].params->size())
-                  + " argument(s), got " + std::to_string(args.size()));
-        else
+        size_t total    = cands.empty() ? 0 : cands[0].params->size();
+        size_t required = cands.empty() ? 0 : total - std::min(cands[0].numDefaults, total);
+        if (cands.size() == 1 && (args.size() < required || args.size() > total)) {
+            std::string want = (required == total)
+                ? std::to_string(total)
+                : std::to_string(required) + " to " + std::to_string(total);
+            error(at, what + " expects " + want + " argument(s), got " + std::to_string(args.size()));
+        } else {
             error(at, "no matching overload for " + what + " with the given argument types");
+        }
         return -1;
     }
 
@@ -675,7 +684,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
         }
         const std::vector<ClassInfo::Method>& set = ctorIt->second;
         std::vector<OverloadCand> cands;
-        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
         int idx = resolveOverload(call.callee, "constructor '" + name + "'", cands, call.args);
         if (idx >= 0 && set.size() > 1)
             resolvedCallee[&call] = mangleOverload(name + "_" + name, set[idx].paramTypes, set[idx].returnType);
@@ -695,7 +704,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     if (fit != functionRegistry.end()) {
         const std::vector<FunctionOverload>& set = fit->second;
         std::vector<OverloadCand> cands;
-        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType});
+        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType, f.numDefaults});
         int idx = resolveOverload(call.callee, "function '" + name + "'", cands, call.args);
         if (idx < 0) return Type{TypeKind::Error};
         if (set.size() > 1 && !set[idx].isExtern)
@@ -706,7 +715,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     // Implicit `this`: a bare call may target a method of the enclosing class.
     if (const std::vector<ClassInfo::Method>* ms = currentClassMethods(name)) {
         std::vector<OverloadCand> cands;
-        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
         int idx = resolveOverload(call.callee, "method '" + name + "'", cands, call.args);
         if (idx < 0) return Type{TypeKind::Error};
         const ClassInfo::Method& m = (*ms)[idx];
@@ -1209,7 +1218,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
                 }
                 const std::vector<ClassInfo::Method>& set = mIt->second;
                 std::vector<OverloadCand> cands;
-                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
                 int idx = resolveOverload(methodCall.method,
                             "static method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
                 if (idx < 0) return Type{TypeKind::Error};
@@ -1269,7 +1278,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
 
     const std::vector<ClassInfo::Method>& set = methodIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
     int idx = resolveOverload(methodCall.method,
                 "method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
     if (idx < 0) return Type{TypeKind::Error};
@@ -1396,7 +1405,7 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
 
     const std::vector<ClassInfo::Method>& set = ctorIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType});
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
     int idx = resolveOverload(newExpr.className, "constructor '" + className + "'", cands, newExpr.args);
     if (idx >= 0 && set.size() > 1)
         resolvedCallee[&newExpr] = mangleOverload(className + "_" + className,

@@ -81,6 +81,9 @@ private:
     std::unordered_map<std::string, std::vector<Type>> funcParamTypes;
     // funcName (same key) → return type. Used to emit operator-desugared method calls.
     std::unordered_map<std::string, Type> funcReturnTypes;
+    // funcName (same key) → per-parameter default-value expression (nullptr = no default). A call
+    // that omits trailing arguments fills them by emitting these defaults at the call site.
+    std::unordered_map<std::string, std::vector<const Expr*>> funcDefaults_;
     // Base symbol names (free-fn name, or `Class_method`) declared more than once ⇒ overloaded
     // ⇒ their definitions/calls use the overload-mangled name.
     std::unordered_set<std::string> overloadedBases_;
@@ -261,9 +264,13 @@ private:
     void emitFunctionBody(const BlockStmt& body, const std::string& returnIrType);
 
     // Build a comma-separated LLVM argument string for a call, casting each arg to
-    // the declared param type when provided.
+    // the declared param type when provided. Any omitted trailing parameters are filled by
+    // emitting their default-value expressions (`defaults`, keyed positionally; may be null).
     std::string buildArgString(const std::vector<std::unique_ptr<Expr>>& args,
-                               const std::vector<Type>* declaredParamTypes);
+                               const std::vector<Type>* declaredParamTypes,
+                               const std::vector<const Expr*>* defaults = nullptr);
+    // Per-parameter default expressions for an emitted callee name, or nullptr if it has none.
+    const std::vector<const Expr*>* defaultsFor(const std::string& emittedName) const;
 
     // Emit a GEP for field `fieldName` on `objPtr` of class `className`.
     // Returns {gepRegister, fieldType}; returns {"0", Error} on lookup failure.

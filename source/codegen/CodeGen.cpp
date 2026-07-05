@@ -164,6 +164,15 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         for (const auto& [b, c] : baseCount) if (c > 1) overloadedBases_.insert(b);
     }
 
+    // Collect per-parameter default-value expressions (nullptr = none) from a params list, so a
+    // call that omits trailing arguments can fill them at the call site.
+    auto collectDefaults = [](const std::vector<ParamDecl>& params) {
+        std::vector<const Expr*> ds;
+        ds.reserve(params.size());
+        for (const auto& p : params) ds.push_back(p.defaultValue ? p.defaultValue.get() : nullptr);
+        return ds;
+    };
+
     // Build function parameter type table (used in genCall to cast arguments), keyed by the
     // emitted symbol name (overload-mangled when the base is overloaded).
     for (const auto& decl : program.declarations) {
@@ -181,6 +190,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             if (objSlot) slotReturningFns_.insert(name);
             funcReturnTypes[name] = ret;
             funcParamTypes[name] = std::move(paramTypes);
+            funcDefaults_[name] = collectDefaults(function.params);
         } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
             const auto& externDecl = std::get<ExternFuncDeclStmt>(*decl.node);
             freeFnBases_.insert(externDecl.name.lexeme);
@@ -206,6 +216,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 if (objSlot) slotReturningFns_.insert(en2);
                 funcReturnTypes[en2] = ret;
                 funcParamTypes[en2] = std::move(paramTypes);
+                funcDefaults_[en2] = collectDefaults(md.params);
             }
         } else if (std::holds_alternative<EnumDeclStmt>(*decl.node)) {
             const auto& en = std::get<EnumDeclStmt>(*decl.node);
@@ -220,6 +231,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                                                        : resolveReturnType(md.returnType);
                 if (objSlot) slotReturningFns_.insert(mangledName);
                 funcParamTypes[mangledName] = std::move(paramTypes);
+                funcDefaults_[mangledName] = collectDefaults(md.params);
             }
         } else if (std::holds_alternative<ImplDeclStmt>(*decl.node)) {
             const auto& impl = std::get<ImplDeclStmt>(*decl.node);
@@ -236,6 +248,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 if (objSlot) slotReturningFns_.insert(en3);
                 funcReturnTypes[en3] = ret;
                 funcParamTypes[en3] = std::move(paramTypes);
+                funcDefaults_[en3] = collectDefaults(md.params);
             }
             currentClassName_ = "";
         }

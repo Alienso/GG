@@ -122,7 +122,7 @@ void CodeGen::genEnumInit(const Program& program) {
         auto funcIt = funcParamTypes.find(mangledCtor);
         const std::vector<Type>* ctorParams =
             funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
-        std::string argStr = buildArgString(c.variant->args, ctorParams);
+        std::string argStr = buildArgString(c.variant->args, ctorParams, defaultsFor(mangledCtor));
         std::string self   = "@" + enumName + "$" + c.variant->name.lexeme;
         emit("call void @" + mangledCtor + "(ptr " + self
              + (argStr.empty() ? "" : ", " + argStr) + ")");

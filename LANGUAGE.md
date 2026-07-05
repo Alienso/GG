@@ -439,10 +439,28 @@ fn mutate(mut Point& p) { p.x = 5; }       // mutable borrow — may write the o
 - Passing a read-only (const) reference into a `mut` reference parameter is a **const→mut
   coercion** and produces a warning (see §4).
 
+### Default parameter values
+A parameter may declare a **default value** with `= expr`, used to fill the argument when the
+caller omits it:
+```gg
+fn make(i32 a = 0, i32 b = 0) -> Point p { p.x = a; p.y = b; }
+
+make();        // a = 0, b = 0
+make(5);       // a = 5, b = 0
+make(5, 6);    // both explicit
+```
+- Defaults must form a **contiguous trailing run** (as in C++): once a parameter has a default,
+  every parameter after it must too. `fn f(i32 a = 0, i32 b, i32 c = 0)` is an error — for `a` to
+  default, `b` must default as well.
+- Available on **functions, methods, and constructors** (not `extern`).
+- A default is **any expression valid in the enclosing scope**, evaluated per-call at the call
+  site; it may **not** reference the function's own parameters (or `this`).
+- Omitting more arguments than there are defaults is an arity error
+  (`expects 1 to 2 argument(s), got 0`).
+
 ### Calling conventions
 - Primitive types pass by value.
 - `ClassName&` passes the heap pointer by value (a borrow — no extra retain/release at the call site).
-- There are **no default parameter values**.
 - There are **no variadic functions** (use `extern` + C variadics if needed).
 
 ### Overloading

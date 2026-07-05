@@ -41,6 +41,7 @@ struct ClassInfo {
         Type             returnType;
         std::vector<Type> paramTypes;
         std::vector<bool> paramMut;           // per-parameter `mut` flag
+        size_t           numDefaults = 0;     // count of trailing params with default values
         Token            decl;     // method name token
     };
     // A static (class-level) field: shared storage, not part of the struct layout.
@@ -63,15 +64,18 @@ struct FunctionOverload {
     Type              returnType;
     std::vector<Type> paramTypes;
     std::vector<bool> paramMut;
+    size_t            numDefaults = 0;   // count of trailing params with default values
     bool              isExtern = false;
     Token             decl;
 };
 
 // One overload candidate for resolution: pointers into a registry entry + its return type.
+// `numDefaults` trailing params may be omitted at the call site (filled from their defaults).
 struct OverloadCand {
     const std::vector<Type>* params;
     const std::vector<bool>* paramMut;
     Type                     returnType;
+    size_t                   numDefaults = 0;
 };
 
 // ---- EnumInfo: semantic information about a Java-style enum ----
@@ -159,6 +163,10 @@ private:
     // Definition-time checking of bounded generic template bodies against their bounds: a value of
     // a bounded param `T: A + B` may be used only via methods/operators that A or B provide.
     void checkGenericBodies(const Program& program);
+    // Type-check each parameter's default value against its declared type. Analyzed in the
+    // enclosing scope with no parameters / `this` / instance fields visible, so a default cannot
+    // reference them (evaluated per-call at the call site).
+    void analyzeParamDefaults(const std::vector<ParamDecl>& params);
     // If `t` is (a value/reference/param of) a current generic type parameter, return its bound
     // trait names (may be empty = unbounded); nullptr if `t` is not a type parameter.
     [[nodiscard]] const std::vector<std::string>* typeParamBoundsOf(const Type& t) const;

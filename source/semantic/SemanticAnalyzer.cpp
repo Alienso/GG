@@ -6,6 +6,17 @@
 #include <iostream>
 #include <functional>
 
+namespace {
+    // Count trailing parameters that carry a default value. The parser guarantees defaults form a
+    // contiguous trailing run, so this equals the number of arguments that may be omitted at a call.
+    template <typename Params>
+    size_t countTrailingDefaults(const Params& params) {
+        size_t n = 0;
+        for (const ParamDecl& p : params) if (p.defaultValue) ++n;
+        return n;
+    }
+}
+
 // ============================================================
 // Public entry point
 // ============================================================
@@ -141,7 +152,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             }
             info.destructor.emplace(ClassInfo::Method{
                 md.isPublic, /*isStatic=*/false, /*isMut=*/false, Type{TypeKind::Void},
-                std::vector<Type>{}, std::vector<bool>{}, md.name
+                std::vector<Type>{}, std::vector<bool>{}, /*numDefaults=*/0, md.name
             });
             continue;
         }
@@ -171,7 +182,8 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             continue;
         }
         set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
-                                        std::move(paramTypes), std::move(paramMut), md.name});
+                                        std::move(paramTypes), std::move(paramMut),
+                                        countTrailingDefaults(md.params), md.name});
     }
     return info;
 }
@@ -355,7 +367,8 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
                 continue;
             }
             set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, ret,
-                                            std::move(paramTypes), std::move(paramMut), md.name});
+                                            std::move(paramTypes), std::move(paramMut),
+                                            countTrailingDefaults(md.params), md.name});
         }
 
         implementedTraits[type].insert(trait);
@@ -520,7 +533,9 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                 if (redef)
                     error(function.name, "function '" + name + "' is already defined with the same signature");
                 else
-                    set.push_back(FunctionOverload{returnType, paramTypes, paramMut, /*isExtern=*/false, function.name});
+                    set.push_back(FunctionOverload{returnType, paramTypes, paramMut,
+                                                   countTrailingDefaults(function.params),
+                                                   /*isExtern=*/false, function.name});
             }
 
             // Symbol-table marker (first declaration wins) so a local can shadow the name
@@ -541,7 +556,7 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                 error(externDecl.name, "extern '" + name + "' cannot be overloaded or redefined");
             } else {
                 set.push_back(FunctionOverload{returnType, paramTypes, std::vector<bool>{},
-                                               /*isExtern=*/true, externDecl.name});
+                                               /*numDefaults=*/0, /*isExtern=*/true, externDecl.name});
                 symbolTable.declare(name, Symbol{Symbol::Kind::Function, returnType, externDecl.name, {}});
             }
         }

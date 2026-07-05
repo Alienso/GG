@@ -4,6 +4,7 @@
 
 #include "SemanticAnalyzer.h"
 #include <iostream>
+#include <functional>
 
 // ============================================================
 // Public entry point
@@ -35,6 +36,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     symbolTable.enterScope();   // global scope
 
     collectClasses(program);    // pass 0: build class registry
+    checkValueFieldCycles(program); // pass 0a: reject infinite-size value-object embedding cycles
     collectTraits(program);     // pass 0b: register trait contracts
     collectImpls(program);      // pass 0c: attach impl methods to their class + check conformance
     checkGenericBounds(program);// pass 0d: verify generic trait-bound obligations
@@ -45,8 +47,13 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
 
     symbolTable.exitScope();
 
+    std::unordered_set<std::string> eqImpls;
+    for (const auto& [type, traits] : implementedTraits)
+        if (traits.count("Eq")) eqImpls.insert(type);
+
     return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
-                          std::move(resolvedCallee) };
+                          std::move(resolvedCallee), std::move(addressIdentityCmp_),
+                          std::move(structuralValueCmp_), std::move(eqImpls) };
 }
 
 // ============================================================
@@ -69,10 +76,24 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
             // Reference field (Class&) or typed-pointer field (ptr<T>).
             fieldType = synth;
         } else if (fd.typeName.type == TokenType::IDENTIFIER) {
-            // Bare class name → value-object field (embedding) — not supported yet.
-            error(fd.name, "object value fields are not supported; declare it as a reference '"
-                  + lex + "& " + fd.name.lexeme + "'");
-            fieldType = Type{TypeKind::Error};
+            // Bare type name: an enum-value field, or a value-object field (embedding).
+            if (declaredEnumNames_.count(lex)) {
+                fieldType = makeEnumType(lex);
+            } else if (declaredClassNames_.count(lex)) {
+                // Value-object field: the sub-object is embedded contiguously in this struct
+                // (deep-copied on clone, destroyed recursively). Not allowed inside an enum
+                // (singletons are pre-main-initialised globals — out of scope for now).
+                if (!allowDestructor) {
+                    error(fd.name, "enums cannot have value-object fields; declare it as a reference '"
+                          + lex + "& " + fd.name.lexeme + "'");
+                    fieldType = Type{TypeKind::Error};
+                } else {
+                    fieldType = makeObjectType(lex);
+                }
+            } else {
+                error(fd.name, "unknown type '" + lex + "' for field '" + fd.name.lexeme + "'");
+                fieldType = Type{TypeKind::Error};
+            }
         } else {
             fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
         }
@@ -154,6 +175,15 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
 }
 
 void SemanticAnalyzer::collectClasses(const Program& program) {
+    // Pre-pass: record every class / enum name so a value-object field type may forward-reference
+    // a type declared later in the file (buildClassInfo resolves field types against these sets).
+    for (const Stmt& stmt : program.declarations) {
+        if (std::holds_alternative<EnumDeclStmt>(*stmt.node))
+            declaredEnumNames_.insert(std::get<EnumDeclStmt>(*stmt.node).name.lexeme);
+        else if (std::holds_alternative<ClassDeclStmt>(*stmt.node))
+            declaredClassNames_.insert(std::get<ClassDeclStmt>(*stmt.node).name.lexeme);
+    }
+
     // Enums are registered first so that a class field/param of an enum type
     // resolves correctly, and vice-versa (both share classRegistry).
     for (const Stmt& stmt : program.declarations) {
@@ -182,6 +212,46 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
         ClassInfo info = buildClassInfo(cls.name.lexeme, cls.fields, cls.methods,
                                         /*allowDestructor=*/true);
         classRegistry.emplace(cls.name.lexeme, std::move(info));
+    }
+}
+
+void SemanticAnalyzer::checkValueFieldCycles(const Program& program) {
+    // A value-object field embeds its type contiguously; a cycle of such embeddings
+    // (`A{B b} B{A a}`, or direct `A{A a}`) is an infinite-size struct. Reference / ptr
+    // fields do NOT create an edge — they are pointers and break the cycle. 3-colour DFS
+    // over value-embedding edges; report the first back-edge and stop.
+    enum Colour { White, Grey, Black };
+    std::unordered_map<std::string, int> colour;
+
+    std::function<bool(const std::string&)> dfs = [&](const std::string& name) -> bool {
+        colour[name] = Grey;
+        auto it = classRegistry.find(name);
+        if (it != classRegistry.end()) {
+            for (const std::string& fieldName : it->second.fieldOrder) {
+                auto fit = it->second.fields.find(fieldName);
+                if (fit == it->second.fields.end()) continue;
+                const ClassInfo::Field& f = fit->second;
+                if (f.type.kind != TypeKind::Object) continue;    // only value embedding
+                const std::string& target = f.type.className;
+                if (target == name || colour[target] == Grey) {
+                    error(f.decl, "value field cycle: '" + name + "' embeds '" + target
+                          + "' by value (directly or transitively); use a reference '"
+                          + target + "& " + fieldName + "'");
+                    colour[name] = Black;
+                    return true;                                   // stop at the first cycle
+                }
+                if (colour[target] == White && dfs(target)) { colour[name] = Black; return true; }
+            }
+        }
+        colour[name] = Black;
+        return false;
+    };
+
+    // Iterate in declaration order for deterministic diagnostics.
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<ClassDeclStmt>(*stmt.node)) continue;
+        const std::string& name = std::get<ClassDeclStmt>(*stmt.node).name.lexeme;
+        if (colour[name] == White && dfs(name)) break;
     }
 }
 

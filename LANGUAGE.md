@@ -93,7 +93,7 @@ object (`ptr<Point>`), or reference (`ptr<Point&>`).
 
 | Form        | Semantics |
 |-------------|-----------|
-| `ClassName` | Value — stack-allocated. On copy: primitive fields are deep-copied, reference fields are shared (retained). |
+| `ClassName` | Value — stack-allocated (or embedded in a parent). On copy: primitive **and value-object** fields are deep-copied (recursively), reference fields are shared (retained). |
 | `ClassName&`| Reference — heap-allocated, intrusive refcount, `new` produces one. Assignment rebinds (release old, retain new). |
 
 ---
@@ -536,6 +536,30 @@ class Point {
     }
 }
 ```
+
+### Fields
+A field may be a **primitive**, a **heap reference** (`Point&`), another class **value**
+(embedding), a **`ptr`/`ptr<T>`** (unsafe), or an **enum**.
+
+```gg
+class Line {
+    mut Point start;    // value-object field — Point is embedded contiguously in Line
+    mut Point end;
+    mut Node& owner;    // reference field — a refcounted heap pointer
+    Line(Point& a, Point& b, Node& o) { start = a; end = b; owner = o; }
+}
+```
+
+- **Value-object fields (embedding)** live *inside* the parent object — no separate heap
+  allocation, no refcount for the sub-object; they share the parent's lifetime. When the parent
+  is copied, value fields are **deep-copied** (recursively); when it is destroyed, they are
+  **destroyed** (recursively). A field type may name a class declared later in the file.
+- **Reference fields** are shared and refcounted (copied by pointer + retained on copy, released
+  on destruction) — use one when you want shared ownership or a nullable/rebindable link.
+- **Value-embedding cycles are rejected** — `class A { B b; }` with `class B { A a; }` is an
+  infinite-size object. Break the cycle by making one side a reference (`A& a`).
+- Assign a value-object field in the constructor with `this.f = other` (a deep copy); left
+  unassigned it is zero-initialised, like a primitive.
 
 ### Implicit `this` — members without `this.`
 Inside a method you may refer to a field or method of the enclosing class by its **bare
@@ -1067,6 +1091,12 @@ they are recognised by name.
 | `a[i] = v`             | `Index`| `void set(I i, E v)`         | —                      |
 
 - `a == b` calls `a.eq(b)`; `a != b` calls `a.eq(b)` then negates it.
+- **Classes have a default `==`/`!=` (no `Eq` impl required); implementing `Eq` overrides it:**
+  - **Two references** (`Class&`) compare by **address identity** — same object ⇒ equal, like enums.
+  - A **value object** (or a value/reference mix) compares by **memberwise structural equality**:
+    fields are compared pairwise — primitives by value, **reference fields by address**, and an
+    embedded value-object field by its own `Eq` if it implements one, else structurally. (A value
+    has no address identity, so memberwise is the natural default.)
 - `a < b` calls `a.cmp(b)` and compares the `i32` result against `0` (`< 0`, `<= 0`, `> 0`,
   `>= 0` for `<`, `<=`, `>`, `>=`).
 - Unary `-a` calls `a.neg()`; `a[i]` calls `a.get(i)`; `a[i] = v` calls `a.set(i, v)`.

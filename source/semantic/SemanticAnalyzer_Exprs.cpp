@@ -322,6 +322,19 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
             const std::string method = ot->second;
             auto implIt = implementedTraits.find(leftType.className);
             if (implIt == implementedTraits.end() || !implIt->second.count(trait)) {
+                // Default `==`/`!=` for classes with no `Eq` impl (an `Eq` impl overrides both):
+                //   • two REFERENCES of the same class → address identity (`icmp eq/ne ptr`);
+                //   • at least one VALUE object of the same class → memberwise structural equality
+                //     (a value has no meaningful address identity). Other operators still error.
+                if (trait == "Eq"
+                    && (rightType.kind == TypeKind::Object || rightType.kind == TypeKind::Reference)
+                    && rightType.className == leftType.className) {
+                    if (leftType.kind == TypeKind::Reference && rightType.kind == TypeKind::Reference)
+                        addressIdentityCmp_.insert(&binary);
+                    else
+                        structuralValueCmp_.insert(&binary);
+                    return Type{TypeKind::Bool};
+                }
                 error(binary.operatorToken, "type '" + leftType.className + "' does not implement '"
                       + trait + "' for operator '" + binary.operatorToken.lexeme + "'");
                 return Type{TypeKind::Error};
@@ -1089,10 +1102,31 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
     // place — a `mut` local/borrow, or `this` inside a `mut` method / ctor / dtor.
     if ((objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference)
         && !exprIsMutablePlace(*memberAssign.object)) {
-        if (std::holds_alternative<ThisExpr>(*memberAssign.object->node))
+        // Pinpoint the immutable link: a `mut`-reachable receiver whose *intermediate field*
+        // is const (e.g. `b.p.x = …` where `p` is a const value/reference field) blames that
+        // field, rather than the generic "immutable binding" (which fits a const root binding).
+        const void* blamed = nullptr;   // sentinel: set once we emit a specific diagnostic
+        if (std::holds_alternative<ThisExpr>(*memberAssign.object->node)) {
             error(memberAssign.field, "cannot write to field '" + memberAssign.field.lexeme
                   + "' in a read-only method; declare the method 'mut'");
-        else
+            blamed = &memberAssign;
+        } else if (std::holds_alternative<MemberAccessExpr>(*memberAssign.object->node)) {
+            const auto& inner = std::get<MemberAccessExpr>(*memberAssign.object->node);
+            if (exprIsMutablePlace(*inner.object)) {   // receiver is fine → the field is the const link
+                Type ownerT = analyzeExpr(*inner.object);
+                auto cit = classRegistry.find(ownerT.className);
+                if (cit != classRegistry.end()) {
+                    auto fit = cit->second.fields.find(inner.field.lexeme);
+                    if (fit != cit->second.fields.end() && !fit->second.isMut) {
+                        error(memberAssign.field, "cannot assign to field '" + memberAssign.field.lexeme
+                              + "': the enclosing field '" + inner.field.lexeme
+                              + "' is not mutable; declare it 'mut'");
+                        blamed = &inner;
+                    }
+                }
+            }
+        }
+        if (!blamed)
             error(memberAssign.field, "cannot assign to field '" + memberAssign.field.lexeme
                   + "' through an immutable binding; declare the "
                   + (objectType.kind == TypeKind::Reference ? std::string("reference") : std::string("variable"))

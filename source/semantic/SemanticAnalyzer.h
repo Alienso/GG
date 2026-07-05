@@ -92,6 +92,15 @@ struct SemanticResult {
     // Chosen overload's mangled symbol name per call/new expression node (keyed by the
     // node's address). Absent/empty ⇒ the callee is not overloaded ⇒ use its plain name.
     std::unordered_map<const void*, std::string> resolvedCallee;
+    // `==` / `!=` BinaryExpr nodes that compare two class *references* by address (identity)
+    // because the class does not implement `Eq` (codegen emits `icmp eq/ne ptr`).
+    std::unordered_set<const void*> addressIdentityCmp;
+    // `==` / `!=` BinaryExpr nodes where at least one operand is a value object and the class
+    // does not implement `Eq` — compared by generated memberwise structural equality.
+    std::unordered_set<const void*> structuralValueCmp;
+    // Classes that implement the `Eq` trait. Used by codegen so a generated structeq dispatches
+    // an embedded value-object field with its own `Eq` impl to that `eq` (not memberwise).
+    std::unordered_set<std::string> eqImplementors;
 };
 
 class SemanticAnalyzer {
@@ -118,6 +127,10 @@ private:
     bool                currentReturnAliasIsRef_ = false; // the return alias is a reference (must be assigned before return)
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
+    // All declared class / enum names, populated before field types are resolved so a field
+    // may name a value-object type declared later in the file (forward reference).
+    std::unordered_set<std::string> declaredClassNames_;
+    std::unordered_set<std::string> declaredEnumNames_;
     // Trait declarations (name → AST node) and, per type, the set of traits it implements.
     std::unordered_map<std::string, const TraitDeclStmt*>          traitRegistry;
     std::unordered_map<std::string, std::unordered_set<std::string>> implementedTraits;
@@ -125,6 +138,10 @@ private:
     std::unordered_map<std::string, std::vector<FunctionOverload>> functionRegistry;
     // Chosen overload mangled name per call/new node address (copied to SemanticResult).
     std::unordered_map<const void*, std::string> resolvedCallee;
+    // `==`/`!=` reference-identity comparison nodes (copied to SemanticResult).
+    std::unordered_set<const void*> addressIdentityCmp_;
+    // `==`/`!=` value-object memberwise structural comparison nodes (copied to SemanticResult).
+    std::unordered_set<const void*> structuralValueCmp_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
@@ -132,6 +149,9 @@ private:
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);
+    // Pass 0a: reject value-object field cycles (`class A{B b} class B{A a}`) — an infinite-size
+    // struct. Only value-object embedding counts; reference/ptr fields break cycles.
+    void checkValueFieldCycles(const Program& program);
     // Trait/impl passes: register trait contracts, then attach impl methods to their target
     // class and check conformance.
     void collectTraits(const Program& program);

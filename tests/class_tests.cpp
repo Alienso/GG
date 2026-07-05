@@ -828,13 +828,102 @@ TEST_CASE("RefField - a class with a reference field type-checks", "[reffield][s
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("RefField - a value-object field is rejected", "[reffield][semantic]") {
+TEST_CASE("ValueField - a value-object field is accepted (embedding)", "[valuefield][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; }
-        class Bad   { Point p; }
+        class Line  { Point p; }
     )");
-    REQUIRE(r.hadError);
+    REQUIRE_FALSE(r.hadError);
 }
+
+TEST_CASE("ValueField - a value-object field may forward-reference a later class",
+          "[valuefield][semantic]") {
+    // The embedded type is declared AFTER the class that embeds it.
+    auto r = analyzeString(R"(
+        class Line  { Point p; }
+        class Point { i32 x; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("ValueField - embeds contiguously as a nested struct member", "[valuefield][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+        class Line  { mut Point start; mut Point end; Line() { } }
+    )");
+    REQUIRE(ir.find("%Line = type { %Point, %Point }") != std::string::npos);
+}
+
+TEST_CASE("ValueField - clone deep-copies an embedded value field", "[valuefield][codegen]") {
+    // Copying a Line must recursively clone its Point fields, not shallow-copy a pointer.
+    auto ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Line  { mut Point start; Line() { } }
+        fn main() -> i32 { mut Line a; Line b = a; return 0; }
+    )");
+    REQUIRE(ir.find("define void @Line_clone(") != std::string::npos);
+    REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);   // recursive
+}
+
+TEST_CASE("ValueField - a value cycle is rejected", "[valuefield][semantic]") {
+    auto r = analyzeString(R"(
+        class A { B b; }
+        class B { A a; }
+    )");
+    REQUIRE(r.hadError);   // infinite-size struct
+}
+
+TEST_CASE("ValueField - a reference field breaks a would-be cycle (accepted)",
+          "[valuefield][semantic]") {
+    auto r = analyzeString(R"(
+        class A { mut B& b; A() { } }
+        class B { mut A& a; B() { } }
+    )");
+    REQUIRE_FALSE(r.hadError);   // references are pointers — no infinite size
+}
+
+TEST_CASE("ValueField - writing through a const value field is rejected (transitive const)",
+          "[valuefield][semantic][const]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box   { Point p; Box(Point& q) { p = q; } }
+        fn main() -> i32 { mut Box b(new Point(1)); b.p.x = 5; return 0; }
+    )");
+    REQUIRE(r.hadError);   // p is a const value field
+    // The diagnostic blames the const intermediate field 'p', not the (mutable) binding 'b'.
+    REQUIRE(cap.contains("the enclosing field 'p' is not mutable"));
+}
+
+TEST_CASE("ValueField - writing through a const binding is rejected",
+          "[valuefield][semantic][const]") {
+    auto r = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box   { mut Point p; Box(Point& q) { p = q; } }
+        fn main() -> i32 { Box b(new Point(1)); b.p.x = 5; return 0; }
+    )");
+    REQUIRE(r.hadError);   // b is an immutable binding
+}
+
+TEST_CASE("ValueField - a fully-mutable nested write is accepted", "[valuefield][semantic]") {
+    auto r = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box   { mut Point p; Box(Point& q) { p = q; } }
+        fn main() -> i32 { mut Box b(new Point(1)); b.p.x = 5; return b.p.x; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("ValueField - a value-object field works in a generic class", "[valuefield][generic]") {
+    // Box<Point> monomorphizes to a concrete class embedding a Point value.
+    auto ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T item; Box(T& v) { item = v; } fn get() -> i32 { return item.x; } }
+        fn main() -> i32 { Box<Point>& b = new Box<Point>(new Point(7)); return b.get(); }
+    )");
+    REQUIRE(ir.find("%Box$Point = type { %Point }") != std::string::npos);
+}
+
 
 TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[reffield][codegen]") {
     auto ir = codegenString(R"(

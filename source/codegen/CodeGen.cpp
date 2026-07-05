@@ -25,6 +25,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     module           = {};
     this->typeMap    = &semanticResult.typeMap;
     this->resolvedCallee_ = &semanticResult.resolvedCallee;
+    this->addressIdentityCmp_ = &semanticResult.addressIdentityCmp;
+    this->structuralValueCmp_ = &semanticResult.structuralValueCmp;
+    this->eqImplementors_ = &semanticResult.eqImplementors;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;
@@ -43,6 +46,18 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     staticLocalInits_.clear();
     usedStaticGlobals_.clear();
 
+    // Pre-scan all class / enum names so a field type can name a value-object / enum type
+    // declared later (forward reference), matching the semantic analyzer.
+    std::unordered_set<std::string> classNames;
+    std::unordered_set<std::string> enumNames;
+    for (const auto& decl : program.declarations) {
+        if (!decl.node) continue;
+        if (std::holds_alternative<ClassDeclStmt>(*decl.node))
+            classNames.insert(std::get<ClassDeclStmt>(*decl.node).name.lexeme);
+        else if (std::holds_alternative<EnumDeclStmt>(*decl.node))
+            enumNames.insert(std::get<EnumDeclStmt>(*decl.node).name.lexeme);
+    }
+
     // Build CGClassInfo for each class (field order + types for GEP).
     for (const auto& decl : program.declarations) {
         if (!decl.node) continue;
@@ -56,7 +71,11 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             if (fieldType.kind == TypeKind::Reference) {
                 if (!fd.isStatic) hasRefField = true;
             } else if (isError(fieldType)) {
-                fieldType = typeFromToken(fd.typeName.type);
+                // Bare type name: value-object field (embedding) or enum-value field.
+                const std::string& lex = fd.typeName.lexeme;
+                if (classNames.count(lex))      fieldType = makeObjectType(lex);
+                else if (enumNames.count(lex))  fieldType = makeEnumType(lex);
+                else                            fieldType = typeFromToken(fd.typeName.type);
             }
             // Static fields are class-level globals, not part of the struct layout.
             if (fd.isStatic) {
@@ -87,10 +106,34 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         cgi.irTypeName = "%" + en.name.lexeme;
         for (const FieldDecl& fd : en.fields) {
             Type fieldType = decodeSynthesizedType(fd.typeName);
-            if (isError(fieldType)) fieldType = typeFromToken(fd.typeName.type);
+            if (isError(fieldType)) {
+                const std::string& lex = fd.typeName.lexeme;
+                if (classNames.count(lex))      fieldType = makeObjectType(lex);
+                else if (enumNames.count(lex))  fieldType = makeEnumType(lex);
+                else                            fieldType = typeFromToken(fd.typeName.type);
+            }
             cgi.fields.emplace_back(fd.name.lexeme, fieldType);
         }
         cgClasses_[en.name.lexeme] = std::move(cgi);
+    }
+
+    // Transitive `needsDtor`: a class that embeds a value-object field whose class needs a
+    // destructor must itself run one (to destroy the embedded sub-object). Fixpoint — the
+    // value-embedding graph is acyclic (checkValueFieldCycles), so this converges.
+    for (bool changed = true; changed; ) {
+        changed = false;
+        for (auto& [name, cgi] : cgClasses_) {
+            if (cgi.needsDtor) continue;
+            for (const auto& [fieldName, fieldType] : cgi.fields) {
+                if (fieldType.kind != TypeKind::Object) continue;
+                auto fit = cgClasses_.find(fieldType.className);
+                if (fit != cgClasses_.end() && fit->second.needsDtor) {
+                    cgi.needsDtor = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
     }
 
     // Determine which base symbol names are overloaded (declared more than once) — only
@@ -226,8 +269,39 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     genEnumInit(program);
     genStaticInit(program);
 
-    // Emit any clone helpers requested during codegen (may set usesRefcount_).
-    for (const auto& cn : clonesNeeded_) genCloneFunction(cn);
+    // Emit any clone helpers requested during codegen (may set usesRefcount_). Generating a
+    // clone can request more clones (an embedded value-object field's clone is recursive), so
+    // drain a worklist rather than iterate a fixed range.
+    {
+        std::unordered_set<std::string> emitted;
+        bool progressed = true;
+        while (progressed) {
+            progressed = false;
+            // Snapshot: genCloneFunction may insert into clonesNeeded_ mid-iteration.
+            std::vector<std::string> pending(clonesNeeded_.begin(), clonesNeeded_.end());
+            for (const std::string& cn : pending) {
+                if (!emitted.insert(cn).second) continue;
+                genCloneFunction(cn);
+                progressed = true;
+            }
+        }
+    }
+
+    // Emit any structural-equality helpers requested during codegen. Generating one can request
+    // more (an embedded value-object field's structeq is recursive), so drain a worklist.
+    {
+        std::unordered_set<std::string> emitted;
+        bool progressed = true;
+        while (progressed) {
+            progressed = false;
+            std::vector<std::string> pending(structEqNeeded_.begin(), structEqNeeded_.end());
+            for (const std::string& cn : pending) {
+                if (!emitted.insert(cn).second) continue;
+                genStructEqFunction(cn);
+                progressed = true;
+            }
+        }
+    }
 
     // Emit the refcount runtime if any `new`/retain/release was lowered.
     if (usesRefcount_) emitRefcountRuntime();

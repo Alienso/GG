@@ -437,13 +437,24 @@ void CodeGen::genDestructor(const ClassDeclStmt& classDecl) {
     if (cgIt != cgClasses_.end() && currentBasicBlock && !currentBasicBlock->terminated) {
         const auto& fields = cgIt->second.fields;
         for (int i = static_cast<int>(fields.size()) - 1; i >= 0; --i) {
-            if (fields[i].second.kind != TypeKind::Reference) continue;
+            const Type& ft = fields[i].second;
+            if (ft.kind == TypeKind::Object) {
+                // Embedded value object: destroy it in place (only if its class needs a dtor).
+                auto fcgIt = cgClasses_.find(ft.className);
+                if (fcgIt == cgClasses_.end() || !fcgIt->second.needsDtor) continue;
+                std::string gep = freshTemp();
+                emit("%" + gep + " = getelementptr %" + className + ", ptr %self, i32 0, i32 "
+                     + std::to_string(i));
+                emit("call void @" + ft.className + "_dtor(ptr %" + gep + ")");
+                continue;
+            }
+            if (ft.kind != TypeKind::Reference) continue;
             usesRefcount_ = true;
             std::string gep = freshTemp();
             emit("%" + gep + " = getelementptr %" + className + ", ptr %self, i32 0, i32 "
                  + std::to_string(i));
             std::string val = emitLoad("ptr", "%" + gep);
-            const std::string& fieldClass = fields[i].second.className;
+            const std::string& fieldClass = ft.className;
             auto fcgIt = cgClasses_.find(fieldClass);
             std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
                                 ? ("@" + fieldClass + "_dtor") : "null";
@@ -486,7 +497,15 @@ void CodeGen::genCloneFunction(const std::string& className) {
         const Type& ft  = fields[i].second;
         std::string idx = std::to_string(i);
 
-        if (ft.kind == TypeKind::Reference) {
+        if (ft.kind == TypeKind::Object) {
+            // Embedded value object: deep-copy recursively via the field class's clone.
+            clonesNeeded_.insert(ft.className);
+            std::string dgep = freshTemp();
+            emit("%" + dgep + " = getelementptr %" + className + ", ptr %dest, i32 0, i32 " + idx);
+            std::string sgep = freshTemp();
+            emit("%" + sgep + " = getelementptr %" + className + ", ptr %src, i32 0, i32 " + idx);
+            emit("call void @" + ft.className + "_clone(ptr %" + dgep + ", ptr %" + sgep + ")");
+        } else if (ft.kind == TypeKind::Reference) {
             usesRefcount_ = true;
             // new = load src.field; retain(new)
             std::string sgep = freshTemp();
@@ -515,6 +534,84 @@ void CodeGen::genCloneFunction(const std::string& className) {
     }
 
     emit("ret void");
+    currentBasicBlock->terminated = true;
+    currentFunction   = nullptr;
+    currentBasicBlock = nullptr;
+}
+
+void CodeGen::genStructEqFunction(const std::string& className) {
+    auto cgIt = cgClasses_.find(className);
+    if (cgIt == cgClasses_.end()) return;
+
+    // Reset per-function state.
+    tempCounter = 0; labelCounter = 0;
+    allocaMap.clear(); varTypeMap.clear();
+    usedAllocaNames.clear();
+    breakLabelStack.clear(); continueLabelStack.clear();
+    dtorScopes_.clear();
+    currentClassName_  = "";
+    currentReturnType  = Type{TypeKind::Void};
+
+    IRFunction irFunc;
+    irFunc.signature = "define i1 @" + className + "_structeq(ptr %a, ptr %b)";
+    module.functions.push_back(std::move(irFunc));
+    currentFunction = &module.functions.back();
+    currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
+    currentBasicBlock = &currentFunction->blocks.back();
+
+    // Compare each field into an i1, then AND them all (no side effects → no short-circuit needed).
+    // Field rules: primitive → value compare; embedded value object → recurse into its structeq;
+    // reference / enum / ptr → address identity.
+    const auto& fields = cgIt->second.fields;
+    std::vector<std::string> conds;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const Type& ft  = fields[i].second;
+        std::string idx = std::to_string(i);
+        std::string agep = freshTemp();
+        emit("%" + agep + " = getelementptr %" + className + ", ptr %a, i32 0, i32 " + idx);
+        std::string bgep = freshTemp();
+        emit("%" + bgep + " = getelementptr %" + className + ", ptr %b, i32 0, i32 " + idx);
+        std::string ci = freshTemp();
+        if (ft.kind == TypeKind::Object) {
+            // An embedded value field whose class implements `Eq` is compared with that `eq`
+            // (consistent with a direct `field == field`); otherwise recurse memberwise. The
+            // funcReturnTypes guard degrades gracefully to memberwise if `eq` is overloaded
+            // (mangled name), rather than emitting a call to a non-existent `@Class_eq`.
+            bool fieldHasEq = eqImplementors_ && eqImplementors_->count(ft.className)
+                              && funcReturnTypes.count(ft.className + "_eq");
+            if (fieldHasEq) {
+                emit("%" + ci + " = call i1 @" + ft.className + "_eq(ptr %" + agep + ", ptr %" + bgep + ")");
+            } else {
+                structEqNeeded_.insert(ft.className);
+                emit("%" + ci + " = call i1 @" + ft.className + "_structeq(ptr %" + agep + ", ptr %" + bgep + ")");
+            }
+        } else if (ft.kind == TypeKind::Reference || ft.kind == TypeKind::Enum
+                   || ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) {
+            std::string av = emitLoad("ptr", "%" + agep);
+            std::string bv = emitLoad("ptr", "%" + bgep);
+            emit("%" + ci + " = icmp eq ptr " + av + ", " + bv);
+        } else {
+            std::string ir = irTypeName(ft);
+            std::string av = emitLoad(ir, "%" + agep);
+            std::string bv = emitLoad(ir, "%" + bgep);
+            std::string cmp = isFloat(ft.kind) ? "fcmp oeq " : "icmp eq ";
+            emit("%" + ci + " = " + cmp + ir + " " + av + ", " + bv);
+        }
+        conds.push_back("%" + ci);
+    }
+
+    std::string result;
+    if (conds.empty()) {
+        result = "1";   // no fields → always equal
+    } else {
+        result = conds[0];
+        for (size_t k = 1; k < conds.size(); ++k) {
+            std::string t = freshTemp();
+            emit("%" + t + " = and i1 " + result + ", " + conds[k]);
+            result = "%" + t;
+        }
+    }
+    emit("ret i1 " + result);
     currentBasicBlock->terminated = true;
     currentFunction   = nullptr;
     currentBasicBlock = nullptr;

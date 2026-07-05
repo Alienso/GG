@@ -70,6 +70,10 @@ std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
         return emitLoad(irTypeName(*sft), "@" + objType.className + "$" + ma.field.lexeme);
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
+    // An embedded value-object field's value IS its address (a GEP into the parent) — return it
+    // directly so `.sub` chains, copies (clone), and value→reference borrows all work, exactly
+    // like a local value object returns its alloca.
+    if (fieldType.kind == TypeKind::Object) return gepReg;
     return emitLoad(irTypeName(fieldType), gepReg);
 }
 
@@ -119,6 +123,15 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
         emit("call void @gg_release(ptr " + oldVal + ", ptr " + dtorArg + ")");
         emitStore("ptr", newVal, gepReg);
         return newVal;
+    }
+
+    // Embedded value-object field: deep-copy the RHS into the field in place (the clone
+    // releases the field's old reference targets and copies/retains the new ones).
+    if (fieldType.kind == TypeKind::Object) {
+        clonesNeeded_.insert(fieldType.className);
+        std::string src = genExpr(*ma.value);   // Object→alloca; Reference→loaded heap ptr
+        emit("call void @" + fieldType.className + "_clone(ptr " + gepReg + ", ptr " + src + ")");
+        return gepReg;
     }
 
     Type        valueType = exprType(*ma.value);

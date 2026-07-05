@@ -1,6 +1,24 @@
 #include <catch2/catch_test_macros.hpp>
 #include "helpers.h"
 
+namespace {
+    // The body of `@main` only — excludes the emitted refcount runtime (whose gg_retain/release
+    // null checks contain their own `icmp eq ptr`), so identity-comparison assertions are precise.
+    std::string mainBody(const std::string& ir) {
+        size_t start = ir.find("define i32 @main(");
+        if (start == std::string::npos) return "";
+        size_t end = ir.find("\n}", start);
+        return end == std::string::npos ? ir.substr(start) : ir.substr(start, end - start);
+    }
+    // The body of the first function whose definition line contains `signature`.
+    std::string functionBody(const std::string& ir, const std::string& signature) {
+        size_t start = ir.find(signature);
+        if (start == std::string::npos) return "";
+        size_t end = ir.find("\n}", start);
+        return end == std::string::npos ? ir.substr(start) : ir.substr(start, end - start);
+    }
+}
+
 // ============================================================
 // Traits / interfaces + operator overloading.
 //
@@ -127,6 +145,136 @@ TEST_CASE("Trait - == / != via Eq yields bool", "[trait][operator][semantic]") {
         }
     )");
     REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Trait - reference == / != without Eq compares by address (identity)",
+          "[trait][operator][semantic][identity]") {
+    // References default to address identity for ==/!= when the class does not implement Eq.
+    auto result = analyzeString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn main() -> i32 {
+            N& a = new N(1);
+            N& b = new N(2);
+            if (a == b) { return 1; }
+            if (a != b) { return 0; }
+            return 2;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Trait - reference == without Eq lowers to icmp eq ptr", "[trait][operator][codegen][identity]") {
+    std::string ir = codegenString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn main() -> i32 { N& a = new N(1); N& b = new N(2); if (a == b) { return 1; } return 0; }
+    )");
+    REQUIRE(mainBody(ir).find("icmp eq ptr") != std::string::npos);
+    REQUIRE(ir.find("@N_eq") == std::string::npos);   // no structural dispatch
+}
+
+TEST_CASE("Trait - reference != without Eq lowers to icmp ne ptr", "[trait][operator][codegen][identity]") {
+    std::string ir = codegenString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn main() -> i32 { N& a = new N(1); N& b = new N(2); if (a != b) { return 1; } return 0; }
+    )");
+    REQUIRE(mainBody(ir).find("icmp ne ptr") != std::string::npos);
+}
+
+TEST_CASE("Trait - an Eq impl overrides reference identity (structural)", "[trait][operator][codegen][identity]") {
+    // With Eq implemented, `==` on references dispatches to `eq` — NOT a pointer compare.
+    std::string ir = codegenString(R"(
+        class V { mut i32 x; V(i32 a) { x = a; } }
+        impl Eq for V { fn eq(V& rhs) -> bool { return x == rhs.x; } }
+        fn main() -> i32 { V& a = new V(1); V& b = new V(1); if (a == b) { return 0; } return 1; }
+    )");
+    // Structural dispatch to eq (the comparison is a call, not a pointer compare). Note: the
+    // emitted refcount runtime contains its own `icmp eq ptr` null checks, so a blanket negative
+    // on that string is unreliable — the positive `@V_eq` call is the definitive signal.
+    REQUIRE(ir.find("call i1 @V_eq") != std::string::npos);
+}
+
+TEST_CASE("Trait - a value-object == without Eq compares memberwise (structural)",
+          "[trait][operator][semantic][identity]") {
+    // Value objects have no address identity, so `==`/`!=` default to memberwise structural
+    // equality (generated) rather than erroring.
+    auto result = analyzeString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn dot(i32 a) -> i32 { N x(a); N y(a); if (x == y) { return 1; } return 0; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Trait - value-object == without Eq lowers to a generated structeq call",
+          "[trait][operator][codegen][identity]") {
+    std::string ir = codegenString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn main() -> i32 { N x(1); N y(1); if (x == y) { return 0; } return 1; }
+    )");
+    REQUIRE(ir.find("define i1 @N_structeq(ptr %a, ptr %b)") != std::string::npos);
+    REQUIRE(mainBody(ir).find("call i1 @N_structeq") != std::string::npos);
+}
+
+TEST_CASE("Trait - structeq uses ordered float equality for float fields", "[trait][operator][codegen][identity]") {
+    std::string ir = codegenString(R"(
+        class FP { mut f64 a; mut f32 b; FP(f64 x, f32 y) { a = x; b = y; } }
+        fn main() -> i32 { FP p(1.0, 2.0); FP q(1.0, 2.0); if (p == q) { return 0; } return 1; }
+    )");
+    std::string body = functionBody(ir, "define i1 @FP_structeq(");
+    REQUIRE_FALSE(body.empty());
+    REQUIRE(body.find("fcmp oeq double") != std::string::npos);
+    REQUIRE(body.find("fcmp oeq float")  != std::string::npos);
+}
+
+TEST_CASE("Trait - structeq of a fieldless class is always equal", "[trait][operator][codegen][identity]") {
+    std::string ir = codegenString(R"(
+        class Empty { }
+        fn main() -> i32 { Empty a; Empty b; if (a == b) { return 0; } return 1; }
+    )");
+    std::string body = functionBody(ir, "define i1 @Empty_structeq(");
+    REQUIRE_FALSE(body.empty());
+    REQUIRE(body.find("ret i1 1") != std::string::npos);
+}
+
+TEST_CASE("Trait - a value/reference mix without Eq compares structurally", "[trait][operator][semantic][identity]") {
+    auto result = analyzeString(R"(
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        fn main() -> i32 { N a(1); N& b = new N(1); if (a == b) { return 0; } return 1; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Trait - structeq dispatches an embedded value field with an Eq impl to that eq",
+          "[trait][operator][codegen][identity][valuefield]") {
+    // Wallet has no Eq (memberwise), but its embedded Money field does — the parent's structeq
+    // must call @Money_eq for that field, not compare it memberwise.
+    std::string ir = codegenString(R"(
+        class Money  { mut i32 d; mut i32 note; Money(i32 a, i32 b) { d = a; note = b; } }
+        impl Eq for Money { fn eq(Money& o) -> bool { return d == o.d; } }
+        class Wallet { mut Money m; mut i32 id; Wallet(Money& mm, i32 i) { m = mm; id = i; } }
+        fn main() -> i32 { Money a(1,1); Wallet x(a, 0); Wallet y(a, 0); if (x == y) { return 0; } return 1; }
+    )");
+    std::string body = functionBody(ir, "define i1 @Wallet_structeq(");
+    REQUIRE_FALSE(body.empty());
+    REQUIRE(body.find("call i1 @Money_eq") != std::string::npos);         // field dispatched to its Eq
+    REQUIRE(body.find("call i1 @Money_structeq") == std::string::npos);   // not memberwise
+}
+
+TEST_CASE("Trait - structeq compares an embedded value field recursively and a reference field by address",
+          "[trait][operator][codegen][identity][valuefield]") {
+    std::string ir = codegenString(R"(
+        class P { mut i32 x; P(i32 a) { x = a; } }
+        class N { mut i32 v; N(i32 x) { v = x; } }
+        class L { mut P p; mut N& r; L(P& a, N& b) { p = a; r = b; } }
+        fn main() -> i32 {
+            P a(1); N& n = new N(2); L l1(a, n); L l2(a, n);
+            if (l1 == l2) { return 0; } return 1;
+        }
+    )");
+    std::string body = functionBody(ir, "define i1 @L_structeq(");
+    REQUIRE_FALSE(body.empty());
+    REQUIRE(body.find("call i1 @P_structeq") != std::string::npos);   // embedded value → recurse
+    REQUIRE(body.find("icmp eq ptr") != std::string::npos);           // reference field → identity
 }
 
 TEST_CASE("Trait - ordering via Ord yields bool for < <= > >=", "[trait][operator][semantic]") {

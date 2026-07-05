@@ -53,6 +53,10 @@ private:
     // Classes that need a generated @Class_clone helper (deep copy: memberwise
     // copy with retain at reference-field boundaries). Populated on demand.
     std::unordered_set<std::string> clonesNeeded_;
+    // Classes that need a generated @Class_structeq helper (memberwise structural `==`:
+    // primitives by value, embedded value objects recursively, references/enums/ptrs by
+    // address). Populated on demand for value-object comparisons without an `Eq` impl.
+    std::unordered_set<std::string> structEqNeeded_;
 
     // Reference values produced with a +1 count (from `new` or a reference-returning
     // call) that are not yet owned by anyone. Released at the end of the enclosing
@@ -94,6 +98,13 @@ private:
     std::string                     currentReturnAliasLocal_;
     // Chosen overload's mangled name per call/new node (from SemanticResult; may be null).
     const std::unordered_map<const void*, std::string>* resolvedCallee_ = nullptr;
+    // `==`/`!=` nodes that compare two references by address (no `Eq`); emit `icmp eq/ne ptr`.
+    const std::unordered_set<const void*>* addressIdentityCmp_ = nullptr;
+    // `==`/`!=` value-object nodes (no `Eq`) → call the generated @Class_structeq helper.
+    const std::unordered_set<const void*>* structuralValueCmp_ = nullptr;
+    // Classes implementing `Eq` — a generated structeq dispatches such an embedded value field
+    // to its own `@Class_eq` instead of comparing it memberwise.
+    const std::unordered_set<std::string>* eqImplementors_ = nullptr;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
     // overloaded, otherwise `plainBase`.
     std::string calleeName(const void* node, const std::string& plainBase) const;
@@ -156,6 +167,8 @@ private:
     // Generate @Class_clone(ptr %dest, ptr %src): memberwise deep copy — copy
     // primitive fields, copy+retain reference fields, releasing dest's old targets.
     void genCloneFunction(const std::string& className);
+    // Generate @Class_structeq(ptr %a, ptr %b) -> i1: memberwise structural equality.
+    void genStructEqFunction(const std::string& className);
 
     // ---- Statement codegen ----
     void genStmt(const Stmt& stmt);

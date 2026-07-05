@@ -191,6 +191,8 @@ std::string CodeGen::genImplicitFieldLoad(const std::string& name) {
     Type fieldType;
     std::string gep = genImplicitFieldPtr(name, fieldType);
     if (gep.empty()) return "";
+    // An embedded value-object field's value is its address (like an explicit `this.field`).
+    if (fieldType.kind == TypeKind::Object) return gep;
     return emitLoad(irTypeName(fieldType), gep);
 }
 
@@ -314,7 +316,25 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
     {
         Type leftType = exprType(*binary.left);
         const char* method = binaryOperatorMethod(operatorType);
-        if (method && (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference)) {
+        // A reference `==`/`!=` with no `Eq` impl is address identity (recorded by semantics) —
+        // skip the trait desugar and fall through to the pointer-compare path below.
+        bool isAddrIdentity = addressIdentityCmp_ && addressIdentityCmp_->count(&binary);
+        // A value-object `==`/`!=` with no `Eq` impl → generated memberwise structural equality.
+        if (structuralValueCmp_ && structuralValueCmp_->count(&binary)) {
+            std::string a = genExpr(*binary.left);   // both operands are addresses of the struct
+            std::string b = genExpr(*binary.right);  // (value → alloca/GEP; reference → heap body)
+            structEqNeeded_.insert(leftType.className);
+            std::string eq = freshTemp();
+            emit("%" + eq + " = call i1 @" + leftType.className + "_structeq(ptr " + a + ", ptr " + b + ")");
+            if (operatorType == TokenType::BANG_EQUAL) {
+                std::string t = freshTemp();
+                emit("%" + t + " = xor i1 %" + eq + ", true");
+                return "%" + t;
+            }
+            return "%" + eq;
+        }
+        if (method && !isAddrIdentity
+            && (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference)) {
             std::string recv   = genExpr(*binary.left);
             Type        rt     = exprType(*binary.right);
             std::string rv     = genExpr(*binary.right);
@@ -363,9 +383,11 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
     Type leftType  = exprType(*binary.left);
     Type rightType = exprType(*binary.right);
 
-    // Enum identity comparison (==/!=): both operands are `ptr` to a singleton.
+    // Identity comparison (==/!=) lowering to `icmp eq/ne ptr`: enum singletons, or two class
+    // references with no `Eq` impl (address identity — recorded by semantics).
     if (isComparison
-        && (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum)) {
+        && (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum
+            || (addressIdentityCmp_ && addressIdentityCmp_->count(&binary)))) {
         std::string l = genExpr(*binary.left);
         std::string r = genExpr(*binary.right);
         std::string t = freshTemp();

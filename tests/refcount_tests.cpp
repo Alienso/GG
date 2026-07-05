@@ -103,3 +103,23 @@ TEST_CASE("Refcount - nested new in a variable initializer claims the outer obje
     // still-referenced object. (The bug freed the Box mid-initializer.)
     REQUIRE(countOccurrences(body, "call void @gg_release") == 2);
 }
+
+TEST_CASE("Refcount - an embedded value field that owns a reference is cloned + destroyed recursively",
+          "[refcount][codegen][valuefield]") {
+    // Wrap embeds a Holder by value; Holder owns a Node&. Cloning a Wrap must recursively clone
+    // the Holder (which retains the Node); destroying a Wrap must recursively destroy the Holder
+    // (which releases the Node). Without recursion the inner reference would leak.
+    std::string ir = codegenString(R"(
+        class Node   { mut i32 v; Node(i32 x) { v = x; } ~Node() { } }
+        class Holder { mut Node& n; Holder(Node& x) { n = x; } }
+        class Wrap   { mut Holder h; Wrap() { } }
+        fn main() -> i32 { mut Wrap a; Wrap b = a; return 0; }
+    )");
+    // Recursion in both directions.
+    REQUIRE(functionBody(ir, "define void @Wrap_clone(").find("call void @Holder_clone(")
+            != std::string::npos);
+    REQUIRE(functionBody(ir, "define void @Wrap_dtor(").find("call void @Holder_dtor(")
+            != std::string::npos);
+    // Wrap needs a dtor transitively even though it declares none and has no reference field.
+    REQUIRE(ir.find("define void @Wrap_dtor(") != std::string::npos);
+}

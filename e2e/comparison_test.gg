@@ -1,0 +1,72 @@
+// End-to-end test for the default `==` / `!=` behavior on classes (no `Eq` impl required):
+//   • two references  → address identity (same object ⇒ equal)
+//   • a value object  → memberwise structural equality (recursing into embedded value fields,
+//                       comparing reference/enum fields by address, floats via ordered-equal)
+//   • an `Eq` impl overrides both.
+// Enums keep variant identity. Expected exit code: 0.
+
+enum Color { RED, GREEN, BLUE }
+
+class Node { mut i32 v; Node(i32 x) { v = x; } }
+
+// value objects with assorted field kinds
+class FP    { mut f64 a; mut f32 b; FP(f64 x, f32 y) { a = x; b = y; } }        // floats
+class Empty { }                                                                // no fields
+class Tag   { mut Color c; mut i32 n; Tag(Color k, i32 m) { c = k; n = m; } }   // enum field
+class Ch    { mut char c; mut bool f; Ch(char a, bool b) { c = a; f = b; } }    // char/bool
+
+// embedded value field owning a reference (deep structural recursion)
+class Mid   { mut Node& n; mut i32 t; Mid(Node& x, i32 tt) { n = x; t = tt; } }
+class Outer { mut Mid mid; Outer(Mid& m) { mid = m; } }
+
+// Eq override on a value object
+class Approx { mut i32 x; Approx(i32 v) { x = v; } }
+impl Eq for Approx { fn eq(Approx& o) -> bool { return true; } }   // everything "equal"
+
+fn main() -> i32 {
+    // --- reference identity (no Eq) ---
+    Node& r1 = new Node(1);
+    Node& r2 = r1;             // same object
+    Node& r3 = new Node(1);    // distinct object, same value
+    if (r1 != r2) { return 1; }
+    if (r1 == r3) { return 2; }
+
+    // --- value structural: floats ---
+    FP p1(1.5, 2.5); FP p2(1.5, 2.5); FP p3(1.5, 9.0);
+    if (p1 != p2) { return 3; }
+    if (p1 == p3) { return 4; }
+
+    // --- value/reference mix is structural ---
+    FP& pr = new FP(1.5, 2.5);
+    if (p1 != pr) { return 5; }
+
+    // --- empty class → always equal ---
+    Empty e1; Empty e2;
+    if (e1 != e2) { return 6; }
+
+    // --- enum field compared by identity ---
+    Tag t1(Color.GREEN, 5); Tag t2(Color.GREEN, 5); Tag t3(Color.RED, 5);
+    if (t1 != t2) { return 7; }
+    if (t1 == t3) { return 8; }
+
+    // --- char / bool fields ---
+    Ch c1('a', true); Ch c2('a', true); Ch c3('a', false);
+    if (c1 != c2) { return 9; }
+    if (c1 == c3) { return 10; }
+
+    // --- deep: embedded value field owning a reference ---
+    Node& n = new Node(1);
+    Mid m1(n, 5);
+    Outer o1(m1); Outer o2(m1);         // same embedded Mid (same ref, same t)
+    if (o1 != o2) { return 11; }
+    Node& n2 = new Node(1);             // same value, different object
+    Mid m2(n2, 5);
+    Outer o3(m2);
+    if (o1 == o3) { return 12; }        // referenced object differs → not equal
+
+    // --- Eq impl overrides structural ---
+    Approx a1(1); Approx a2(999);
+    if (a1 != a2) { return 13; }        // eq() always true
+
+    return 0;
+}

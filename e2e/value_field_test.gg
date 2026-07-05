@@ -1,0 +1,112 @@
+// End-to-end test for value-object fields (embedding).
+// A class field may be another class *value*, embedded contiguously in the parent. On copy
+// (clone), value fields are deep-copied recursively and reference fields are retained; on
+// destruction, embedded value fields are destroyed recursively. Exercises nested read/write,
+// method calls on a value field, borrowing a value field as a `T&` argument, deep-copy
+// independence, and a heap reference owned inside an embedded value field (leak-checked via a
+// live-object counter). Expected exit code: 0.
+
+class Ctr {
+    static i32 live;
+    fn static inc() { Ctr::live = Ctr::live + 1; }
+    fn static dec() { Ctr::live = Ctr::live - 1; }
+    fn static get() -> i32 { return Ctr::live; }
+}
+
+class Point {
+    mut i32 x;
+    mut i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }
+    fn getx() -> i32 { return x; }
+}
+
+class Line {
+    mut Point start;                                  // embedded value objects
+    mut Point end;
+    Line(Point& a, Point& b) { start = a; end = b; }  // deep-copy into the embedded fields
+    fn sx() -> i32 { return start.getx(); }           // method call on a value field via implicit this
+}
+
+fn dist(Point& p) -> i32 { return p.getx(); }         // takes a reference
+
+// A heap-tracked resource, and a value object that owns one — to leak-check recursive clone/dtor.
+class Node   { mut i32 v; Node(i32 x) { v = x; Ctr::inc(); } ~Node() { Ctr::dec(); } fn get() -> i32 { return v; } }
+class Holder { mut Node& n; Holder(Node& x) { n = x; } fn val() -> i32 { return n.get(); } }
+class Wrap   { mut Holder h; Wrap(Holder& hh) { h = hh; } fn val() -> i32 { return h.val(); } }  // embeds Holder by value
+
+fn refcount_scenario() {
+    Node& node = new Node(42);
+    Holder& hh = new Holder(node);
+    Wrap a(hh);          // a.h deep-copied from hh (retains node)
+    Wrap b = a;          // clone again (retains node again)
+    i32 x = b.val();
+}                        // a, b destroyed → each recursively destroys its Holder → releases node twice
+
+// Reassign a reference field THROUGH an embedded value field: the old node is released, the
+// new one retained; both freed at scope end (no leak).
+fn reassign_scenario() {
+    Node& n1 = new Node(1);
+    Holder& hh = new Holder(n1);
+    mut Wrap w(hh);
+    Node& n2 = new Node(2);
+    w.h.n = n2 as mut Node&;
+    if (w.val() != 2) { }        // read after reassign
+}
+
+// Self-assignment of an object whose embedded value field owns a reference must not corrupt
+// (clone retains before it releases).
+fn self_assign_scenario() {
+    Node& n = new Node(3);
+    Holder& hh = new Holder(n);
+    mut Wrap w(hh);
+    w = w;
+    i32 x = w.val();
+}
+
+fn main() -> i32 {
+    Point& a = new Point(3, 4);
+    Point& b = new Point(10, 20);
+
+    mut Line l(a, b);
+    if (l.sx() != 3)        { return 1; }   // method on value field
+    if (l.start.x != 3)     { return 2; }   // nested read
+    if (l.end.x != 10)      { return 3; }
+
+    l.start.x = 7;                          // nested write
+    if (l.start.x != 7)     { return 4; }
+
+    if (dist(l.start) != 7) { return 5; }   // value field borrowed as Point&
+
+    // Deep-copy independence: mutating the copy must not touch the original.
+    mut Line m = l;
+    m.start.x = 99;
+    if (l.start.x != 7)     { return 6; }
+    if (m.start.x != 99)    { return 7; }
+
+    // Refcount: an embedded value field owning a heap reference must not leak.
+    refcount_scenario();
+    if (Ctr::get() != 0)    { return 8; }
+
+    // Reassign a reference field through a value field — balanced.
+    reassign_scenario();
+    if (Ctr::get() != 0)    { return 9; }
+
+    // Self-assignment of a value object with an embedded ref-owning field — balanced, no corruption.
+    self_assign_scenario();
+    if (Ctr::get() != 0)    { return 10; }
+
+    // Default memberwise structural equality for value objects (no Eq impl): recurses into the
+    // embedded Point fields; two Lines built from equal Points compare equal.
+    Point s1(1, 2);
+    Point s2(1, 2);
+    Point s3(1, 9);
+    if (s1 != s2)           { return 11; }   // same fields → equal
+    if (s1 == s3)           { return 12; }   // differ in y
+    mut Line g1(s1, s2);
+    mut Line g2(s1, s2);
+    if (g1 != g2)           { return 13; }   // structural over embedded Points
+    g2.end.y = 100;
+    if (g1 == g2)           { return 14; }   // now an embedded field differs
+
+    return 0;
+}

@@ -3,27 +3,27 @@
 // calls and is initialised exactly once before main.
 
 // Persistent call counter — increments and returns on every call.
-i32 next() {
+fn next() -> i32 {
     static mut i32 counter = 0;
     counter = counter + 1;
     return counter;
 }
 
 // Accumulator with a non-trivial constant initializer (runs once, pre-main).
-i32 accumulate(i32 amount) {
+fn accumulate(i32 amount) -> i32 {
     static mut i32 total = 2 + 3;   // starts at 5
     total = total + amount;
     return total;
 }
 
 // A second function with an identically named static local must be independent.
-i32 other() {
+fn other() -> i32 {
     static mut i32 counter = 100;
     counter = counter + 1;
     return counter;
 }
 
-i32 main() {
+fn main() -> i32 {
     // Each call advances the same shared counter.
     if (next() != 1) { return 1; }
     if (next() != 2) { return 2; }

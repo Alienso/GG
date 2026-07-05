@@ -92,7 +92,7 @@ class Named {
 // ============================================================
 
 // Test 1: destructor runs when the owning function returns normally.
-i32 test_scope_exit() {
+fn test_scope_exit() -> i32 {
     Buffer b(32);
     puts("    Buffer is live inside test_scope_exit");
     return 0;
@@ -100,7 +100,7 @@ i32 test_scope_exit() {
 }
 
 // Test 2 / 3: destructor runs regardless of which return path is taken.
-i32 test_early_return(bool flag) {
+fn test_early_return(bool flag) -> i32 {
     Buffer b(16);
     if (flag) {
         puts("    flag is true - taking early-return path");
@@ -112,7 +112,7 @@ i32 test_early_return(bool flag) {
 
 // Test 4: two Named objects – Beta declared after Alpha, so Beta is
 //         destroyed first (LIFO / reverse-declaration order).
-void test_reverse_order() {
+fn test_reverse_order() {
     Named alpha("[-] Named Alpha destroyed");
     Named beta("[-] Named Beta  destroyed");
     puts("    Alpha and Beta are live");
@@ -123,7 +123,7 @@ void test_reverse_order() {
 // main
 // ============================================================
 
-i32 main() {
+fn main() -> i32 {
 
     // ---- Test 1: scope-exit destructor --------------------------------
     puts("=== Test 1: destructor called at function scope exit ===");

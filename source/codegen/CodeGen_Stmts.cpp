@@ -150,6 +150,25 @@ void CodeGen::genFor(const ForStmt& forStmt) {
 }
 
 void CodeGen::genReturn(const ReturnStmt& returnStmt) {
+    // Return-slot (sret) function: the result is already written in place into the caller's
+    // slot, so `return slot;`/`return;` is `ret void`. The slot is NOT a local (it's the sret
+    // param), so it is not registered for scope-exit destruction — ownership passes to the
+    // caller. Other locals are still destroyed here.
+    if (currentFnHasReturnSlot_) {
+        flushTempReleases();
+        for (auto& dtorScope : std::ranges::reverse_view(dtorScopes_))
+            emitDtorsForScope(dtorScope);
+        emit("ret void");
+        if (currentBasicBlock) currentBasicBlock->terminated = true;
+        return;
+    }
+
+    // Primitive/reference return alias: `return;` / `return alias;` both return the alias local.
+    if (!currentReturnAliasLocal_.empty()) {
+        emitReturnAlias();
+        return;
+    }
+
     // Evaluate return value first (before cleanup that could clobber temps).
     std::string retVal;
     if (returnStmt.value.has_value()) {

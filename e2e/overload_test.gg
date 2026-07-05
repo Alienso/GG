@@ -5,13 +5,13 @@
 // Expected result: exit code 0
 
 // ---- free-function overloading (by arity and by type) ----
-i32 add(i32 a, i32 b)         { return a + b; }
-i32 add(i32 a, i32 b, i32 c)  { return a + b + c; }
-f64 add(f64 a, f64 b)         { return a + b; }
+fn add(i32 a, i32 b) -> i32         { return a + b; }
+fn add(i32 a, i32 b, i32 c) -> i32  { return a + b + c; }
+fn add(f64 a, f64 b) -> f64         { return a + b; }
 
 // ---- return-type overloading (same params, differ only by return type) ----
-i32 make() { return 7; }
-f64 make() { return 2.5; }
+fn make() -> i32 { return 7; }
+fn make() -> f64 { return 2.5; }
 
 // ---- constructor + method overloading ----
 class Vec {
@@ -20,14 +20,14 @@ class Vec {
     Vec()             { x = 0; y = 0; }
     Vec(i32 v)        { x = v; y = v; }
     Vec(i32 a, i32 b) { x = a; y = b; }
-    i32 sum()                  { return x + y; }
-    i32 combine(i32 k)         { return x + y + k; }
-    i32 combine(i32 k, i32 m)  { return x + y + k + m; }
-    static i32 origin()        { return 0; }
-    static i32 origin(i32 bias) { return bias; }
+    fn sum() -> i32                  { return x + y; }
+    fn combine(i32 k) -> i32         { return x + y + k; }
+    fn combine(i32 k, i32 m) -> i32  { return x + y + k + m; }
+    fn static origin() -> i32        { return 0; }
+    fn static origin(i32 bias) -> i32 { return bias; }
 }
 
-i32 main() {
+fn main() -> i32 {
     // free functions
     if (add(2, 3) != 5)          { return 1; }   // add(i32,i32)
     if (add(2, 3, 4) != 9)       { return 2; }   // add(i32,i32,i32)

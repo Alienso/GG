@@ -1,10 +1,10 @@
 // Generic free functions (monomorphized).
 
-T   addT<T>(T a, T b)        { return a + b; }
-T   maxT<T>(T a, T b)        { if (a > b) { return a; } return b; }
-K   firstOf<K, V>(K a, V b)  { return a; }
+fn addT<T>(T a, T b) -> T        { return a + b; }
+fn maxT<T>(T a, T b) -> T        { if (a > b) { return a; } return b; }
+fn firstOf<K, V>(K a, V b) -> K  { return a; }
 
-i32 main() {
+fn main() -> i32 {
     i32 r = addT<i32>(3, 4);            // 7  (instantiates addT$i32)
     if (r != 7) { return 1; }
 

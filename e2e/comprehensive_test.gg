@@ -8,23 +8,23 @@
 // Helper functions
 // ============================================================
 
-i32 add(i32 a, i32 b) { return a + b; }
-i32 mul(i32 a, i32 b) { return a * b; }
+fn add(i32 a, i32 b) -> i32 { return a + b; }
+fn mul(i32 a, i32 b) -> i32 { return a * b; }
 
 // Recursive factorial
-i32 factorial(i32 n) {
+fn factorial(i32 n) -> i32 {
     if (n <= 1) { return 1; }
     return n * factorial(n - 1);
 }
 
 // Recursive Fibonacci
-i32 fib(i32 n) {
+fn fib(i32 n) -> i32 {
     if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
 
 // For-loop sum of 1..n
-i32 sumTo(i32 n) {
+fn sumTo(i32 n) -> i32 {
     mut i32 total = 0;
     for (mut i32 i = 1; i <= n; i++) {
         total = total + i;
@@ -33,7 +33,7 @@ i32 sumTo(i32 n) {
 }
 
 // While-loop countdown — returns number of steps
-i32 countDown(mut i32 n) {
+fn countDown(mut i32 n) -> i32 {
     mut i32 steps = 0;
     while (n > 0) {
         steps++;
@@ -42,33 +42,33 @@ i32 countDown(mut i32 n) {
     return steps;
 }
 
-i32 absVal(i32 n) {
+fn absVal(i32 n) -> i32 {
     if (n < 0) { return -n; }
     return n;
 }
 
-i32 maxOf(i32 a, i32 b) {
+fn maxOf(i32 a, i32 b) -> i32 {
     if (a > b) { return a; }
     return b;
 }
 
-i32 clamp(i32 val, i32 lo, i32 hi) {
+fn clamp(i32 val, i32 lo, i32 hi) -> i32 {
     if (val < lo) { return lo; }
     if (val > hi) { return hi; }
     return val;
 }
 
 // Mutual recursion — both functions visible via forward hoisting
-bool isEven(i32 n) { return n % 2 == 0; }
-bool isOdd(i32 n)  { return !isEven(n); }
+fn isEven(i32 n) -> bool { return n % 2 == 0; }
+fn isOdd(i32 n) -> bool  { return !isEven(n); }
 
-void voidHelper() { }   // void function — must compile, nothing to verify
+fn voidHelper() { }   // void function — must compile, nothing to verify
 
 // ============================================================
 // Main
 // ============================================================
 
-i32 main() {
+fn main() -> i32 {
 
     // ---- 1-7: Basic arithmetic ----------------------------------------
 

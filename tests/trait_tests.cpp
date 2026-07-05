@@ -22,8 +22,8 @@
 TEST_CASE("Trait - declaration parses with required (signature-only) methods", "[trait][parser]") {
     auto prog = parseString(R"(
         trait Shape {
-            f64 area();
-            f64 scale(f64 factor);
+            fn area() -> f64;
+            fn scale(f64 factor) -> f64;
         }
     )");
     REQUIRE(prog.declarations.size() == 1);
@@ -37,10 +37,10 @@ TEST_CASE("Trait - declaration parses with required (signature-only) methods", "
 
 TEST_CASE("Trait - impl block parses trait + target + methods", "[trait][parser]") {
     auto prog = parseString(R"(
-        trait Named { i32 tag(); }
+        trait Named { fn tag() -> i32; }
         class Box { i32 v; Box(i32 x) { v = x; } }
         impl Named for Box {
-            i32 tag() { return 7; }
+            fn tag() -> i32 { return 7; }
         }
     )");
     REQUIRE(prog.declarations.size() == 3);
@@ -54,7 +54,7 @@ TEST_CASE("Trait - impl block parses trait + target + methods", "[trait][parser]
 
 TEST_CASE("Trait - Self type parses in a trait signature", "[trait][parser]") {
     auto prog = parseString(R"(
-        trait Combine { Self& merge(Self& other); }
+        trait Combine { fn merge(Self& other) -> Self&; }
     )");
     REQUIRE(prog.declarations.size() == 1);
     const auto& t = asStmt<TraitDeclStmt>(prog.declarations[0]);
@@ -68,10 +68,10 @@ TEST_CASE("Trait - Self type parses in a trait signature", "[trait][parser]") {
 
 TEST_CASE("Trait - impl satisfying a user trait is accepted", "[trait][semantic]") {
     auto result = analyzeString(R"(
-        trait Named { i32 tag(); }
+        trait Named { fn tag() -> i32; }
         class Box { i32 v; Box(i32 x) { v = x; } }
-        impl Named for Box { i32 tag() { return 7; } }
-        i32 main() {
+        impl Named for Box { fn tag() -> i32 { return 7; } }
+        fn main() -> i32 {
             Box& b = new Box(3);
             return b.tag();
         }
@@ -81,16 +81,16 @@ TEST_CASE("Trait - impl satisfying a user trait is accepted", "[trait][semantic]
 
 TEST_CASE("Trait - Self in impl signature resolves to the target type", "[trait][semantic]") {
     auto result = analyzeString(R"(
-        trait Combine { Self& merge(Self& other); }
+        trait Combine { fn merge(Self& other) -> Self&; }
         class Acc {
             mut i32 n;
             Acc(i32 x) { n = x; }
-            i32 get() { return n; }
+            fn get() -> i32 { return n; }
         }
         impl Combine for Acc {
-            Acc& merge(Acc& other) { return new Acc(n + other.n); }
+            fn merge(Acc& other) -> Acc& { return new Acc(n + other.n); }
         }
-        i32 main() {
+        fn main() -> i32 {
             Acc& a = new Acc(2);
             Acc& b = new Acc(5);
             Acc& c = a.merge(b);
@@ -102,9 +102,9 @@ TEST_CASE("Trait - Self in impl signature resolves to the target type", "[trait]
 
 TEST_CASE("Trait - operator + via Add is accepted and typed", "[trait][operator][semantic]") {
     auto result = analyzeString(R"(
-        class V { mut i32 x; V(i32 a) { x = a; } i32 get() { return x; } }
-        impl Add for V { V& add(V& rhs) { return new V(x + rhs.x); } }
-        i32 main() {
+        class V { mut i32 x; V(i32 a) { x = a; } fn get() -> i32 { return x; } }
+        impl Add for V { fn add(V& rhs) -> V& { return new V(x + rhs.x); } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             V& c = a + b;
@@ -117,8 +117,8 @@ TEST_CASE("Trait - operator + via Add is accepted and typed", "[trait][operator]
 TEST_CASE("Trait - == / != via Eq yields bool", "[trait][operator][semantic]") {
     auto result = analyzeString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        impl Eq for V { bool eq(V& rhs) { return x == rhs.x; } }
-        i32 main() {
+        impl Eq for V { fn eq(V& rhs) -> bool { return x == rhs.x; } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(1);
             if (a == b) { return 0; }
@@ -132,8 +132,8 @@ TEST_CASE("Trait - == / != via Eq yields bool", "[trait][operator][semantic]") {
 TEST_CASE("Trait - ordering via Ord yields bool for < <= > >=", "[trait][operator][semantic]") {
     auto result = analyzeString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        impl Ord for V { i32 cmp(V& rhs) { return x - rhs.x; } }
-        i32 main() {
+        impl Ord for V { fn cmp(V& rhs) -> i32 { return x - rhs.x; } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             bool r = (a < b) && (a <= b) && (b > a) && (b >= a);
@@ -146,9 +146,9 @@ TEST_CASE("Trait - ordering via Ord yields bool for < <= > >=", "[trait][operato
 
 TEST_CASE("Trait - unary minus via Neg", "[trait][operator][semantic]") {
     auto result = analyzeString(R"(
-        class V { mut i32 x; V(i32 a) { x = a; } i32 get() { return x; } }
-        impl Neg for V { V& neg() { return new V(0 - x); } }
-        i32 main() {
+        class V { mut i32 x; V(i32 a) { x = a; } fn get() -> i32 { return x; } }
+        impl Neg for V { fn neg() -> V& { return new V(0 - x); } }
+        fn main() -> i32 {
             V& a = new V(5);
             V& b = -a;
             return b.get();
@@ -164,10 +164,10 @@ TEST_CASE("Trait - index get/set via Index", "[trait][operator][semantic]") {
             Pair(i32 x, i32 y) { a = x; b = y; }
         }
         impl Index for Pair {
-            i32 get(i32 i) { if (i == 0) { return a; } return b; }
-            void set(i32 i, i32 v) mut { if (i == 0) { a = v; } else { b = v; } }
+            fn get(i32 i) -> i32 { if (i == 0) { return a; } return b; }
+            fn set(i32 i, i32 v) mut { if (i == 0) { a = v; } else { b = v; } }
         }
-        i32 main() {
+        fn main() -> i32 {
             mut Pair& p = new Pair(1, 2);
             p[0] = 9;
             return p[0];
@@ -183,7 +183,7 @@ TEST_CASE("Trait - index get/set via Index", "[trait][operator][semantic]") {
 TEST_CASE("Trait - missing required method is an error", "[trait][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        trait Named { i32 tag(); }
+        trait Named { fn tag() -> i32; }
         class Box { i32 v; Box(i32 x) { v = x; } }
         impl Named for Box { }
     )");
@@ -194,7 +194,7 @@ TEST_CASE("Trait - impl for an unknown trait is an error", "[trait][semantic]") 
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Box { i32 v; Box(i32 x) { v = x; } }
-        impl Nonexistent for Box { i32 tag() { return 1; } }
+        impl Nonexistent for Box { fn tag() -> i32 { return 1; } }
     )");
     REQUIRE(result.hadError);
 }
@@ -202,8 +202,8 @@ TEST_CASE("Trait - impl for an unknown trait is an error", "[trait][semantic]") 
 TEST_CASE("Trait - impl targeting a non-class type is an error", "[trait][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        trait Named { i32 tag(); }
-        impl Named for i32 { i32 tag() { return 1; } }
+        trait Named { fn tag() -> i32; }
+        impl Named for i32 { fn tag() -> i32 { return 1; } }
     )");
     REQUIRE(result.hadError);
 }
@@ -212,7 +212,7 @@ TEST_CASE("Trait - operator on a type with no matching impl is an error", "[trai
     StderrCapture cap;
     auto result = analyzeString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        i32 main() {
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             V& c = a + b;
@@ -225,7 +225,7 @@ TEST_CASE("Trait - operator on a type with no matching impl is an error", "[trai
 TEST_CASE("Trait - default (bodied) trait methods are rejected in v1", "[trait][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        trait Greet { i32 hello() { return 1; } }
+        trait Greet { fn hello() -> i32 { return 1; } }
     )");
     REQUIRE(result.hadError);
 }
@@ -235,8 +235,8 @@ TEST_CASE("Trait - operator whose trait is not implemented errors even if anothe
     // V implements Add but NOT Ord, so '<' must be rejected.
     auto result = analyzeString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        impl Add for V { V& add(V& r) { return new V(x + r.x); } }
-        i32 main() {
+        impl Add for V { fn add(V& r) -> V& { return new V(x + r.x); } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             bool r = a < b;
@@ -258,10 +258,10 @@ TEST_CASE("Trait - operator method coexists with a same-named non-operator overl
         class V {
             mut i32 x;
             V(i32 a) { x = a; }
-            i32 add(i32 d) { return x + d; }
+            fn add(i32 d) -> i32 { return x + d; }
         }
-        impl Add for V { V& add(V& r) { return new V(x + r.x); } }
-        i32 main() {
+        impl Add for V { fn add(V& r) -> V& { return new V(x + r.x); } }
+        fn main() -> i32 {
             V& a = new V(10);
             V& b = new V(5);
             V& c = a + b;
@@ -277,10 +277,10 @@ TEST_CASE("Trait - overloaded operator method emits mangled add for a + b", "[tr
         class V {
             mut i32 x;
             V(i32 a) { x = a; }
-            i32 add(i32 d) { return x + d; }
+            fn add(i32 d) -> i32 { return x + d; }
         }
-        impl Add for V { V& add(V& r) { return new V(x + r.x); } }
-        i32 main() {
+        impl Add for V { fn add(V& r) -> V& { return new V(x + r.x); } }
+        fn main() -> i32 {
             V& a = new V(10);
             V& b = new V(5);
             V& c = a + b;
@@ -297,9 +297,9 @@ TEST_CASE("Trait - overloaded operator method emits mangled add for a + b", "[tr
 
 TEST_CASE("Trait - impl method emits as @Type_method", "[trait][codegen]") {
     std::string ir = codegenString(R"(
-        trait Named { i32 tag(); }
+        trait Named { fn tag() -> i32; }
         class Box { i32 v; Box(i32 x) { v = x; } }
-        impl Named for Box { i32 tag() { return 7; } }
+        impl Named for Box { fn tag() -> i32 { return 7; } }
     )");
     REQUIRE(ir.find("@Box_tag") != std::string::npos);
 }
@@ -307,8 +307,8 @@ TEST_CASE("Trait - impl method emits as @Type_method", "[trait][codegen]") {
 TEST_CASE("Trait - a + b lowers to a call of the add method", "[trait][operator][codegen]") {
     std::string ir = codegenString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        impl Add for V { V& add(V& rhs) { return new V(x + rhs.x); } }
-        i32 main() {
+        impl Add for V { fn add(V& rhs) -> V& { return new V(x + rhs.x); } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             V& c = a + b;
@@ -321,8 +321,8 @@ TEST_CASE("Trait - a + b lowers to a call of the add method", "[trait][operator]
 TEST_CASE("Trait - a < b lowers to cmp call plus icmp against zero", "[trait][operator][codegen]") {
     std::string ir = codegenString(R"(
         class V { mut i32 x; V(i32 a) { x = a; } }
-        impl Ord for V { i32 cmp(V& rhs) { return x - rhs.x; } }
-        i32 main() {
+        impl Ord for V { fn cmp(V& rhs) -> i32 { return x - rhs.x; } }
+        fn main() -> i32 {
             V& a = new V(1);
             V& b = new V(2);
             bool r = a < b;

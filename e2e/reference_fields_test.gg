@@ -16,7 +16,7 @@ class Node {
     Node(i32 v) { this.val = v; }
 }
 
-i32 main() {
+fn main() -> i32 {
 
     // ---- build a 3-element chain -------------------------------------
     mut Node& a = new Node(1);

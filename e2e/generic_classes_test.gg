@@ -3,7 +3,7 @@
 class Box<T> {
     T value;
     Box(T v) { this.value = v; }
-    T get()  { return this.value; }
+    fn get() -> T  { return this.value; }
 }
 
 class Pair<K, V> {
@@ -27,7 +27,7 @@ class Node<T> {
     Node(T v) { this.value = v; }
 }
 
-i32 main() {
+fn main() -> i32 {
     // primitive element + method returning T
     Box<i32>& b = new Box<i32>(42);
     if (b.get() != 42) { return 1; }

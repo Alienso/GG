@@ -27,6 +27,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     traitRegistry.clear();
     implementedTraits.clear();
     currentSelfType_ = "";
+    currentReturnSlotName_ = "";
     resolvedCallee.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;

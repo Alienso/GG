@@ -209,6 +209,11 @@ struct FunctionDeclStmt {
     Token name;
     std::vector<ParamDecl> params;
     BlockStmt body;
+    // Return slot (sret / named-return-value): `name(params) -> RetType slot { }`.
+    // When set, the object result is written in place into a caller-provided slot;
+    // `returnType` holds the object type and `returnSlotName` the slot binding name.
+    bool        hasReturnSlot = false;
+    std::string returnSlotName;
 };
 
 struct ExternFuncDeclStmt {
@@ -245,6 +250,9 @@ struct MethodDecl {
     Token                  name;
     std::vector<ParamDecl> params;
     BlockStmt              body;
+    // Return slot (sret): `method(params) -> RetType slot { }`. See FunctionDeclStmt.
+    bool                   hasReturnSlot = false;
+    std::string            returnSlotName;
 };
 
 struct ClassDeclStmt {

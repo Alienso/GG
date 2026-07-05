@@ -83,6 +83,15 @@ private:
     // Base names of all free functions + externs — used to give free functions priority over
     // an implicit-`this` method of the same name at a bare call site.
     std::unordered_set<std::string> freeFnBases_;
+    // Emitted symbol names of functions/methods that return an object via a caller-provided
+    // return slot (sret): they lower to `void` with a hidden first `ptr` parameter, and call
+    // sites pass the destination slot instead of copying the result.
+    std::unordered_set<std::string> slotReturningFns_;
+    // True while emitting an object return-alias (sret) body — `return` is `ret void`.
+    bool                            currentFnHasReturnSlot_ = false;
+    // Non-empty while emitting a function/method whose return alias is an ordinary returned
+    // local (primitive/reference alias — not sret). `return;`/fall-through return this local.
+    std::string                     currentReturnAliasLocal_;
     // Chosen overload's mangled name per call/new node (from SemanticResult; may be null).
     const std::unordered_map<const void*, std::string>* resolvedCallee_ = nullptr;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
@@ -187,6 +196,24 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
+    // If `init` is a call to a return-slot (sret) function/method, emit it writing the result
+    // directly into `slotPtr` (no copy) and return true; otherwise return false (no emission).
+    bool emitSlotCall(const Expr& init, const std::string& slotPtr);
+    // Emit `call void @fn(ptr slot[, ptr recv], args...)`. `recvPtr` empty ⇒ no receiver.
+    void emitSretCall(const std::string& fn, const std::vector<std::unique_ptr<Expr>>& args,
+                      const std::string& slotPtr, const std::string& recvPtr);
+    // Allocate + zero-init a temp object slot for a slot-call result used as a value (not a
+    // variable initializer); registers it for scope-exit destruction. Returns the temp ptr.
+    std::string materializeSlotTemp(const std::string& className);
+    // True if the return-type token names a class *value* (the sret alias case), as opposed to
+    // a primitive / reference / ptr / enum (which use an ordinary returned-local alias).
+    bool isObjectReturnType(const Token& typeToken) const;
+    // Allocate + zero/null-initialize the returned-local alias for a primitive/reference alias
+    // function and record it in currentReturnAliasLocal_ (references also join the dtor list).
+    void setupReturnAliasLocal(const std::string& aliasName, const Type& aliasType);
+    // Emit the return of the current returned-local alias (bare `return;` / fall-through):
+    // load it, apply the +1 convention for references, run dtors, `ret`.
+    void emitReturnAlias();
     // Emit a desugared trait-method call `recvPtr.method(args)` for an overloaded operator.
     // Returns the result register ("" for void); writes the callee's return type to retOut.
     std::string genTraitMethodCall(const void* node, const std::string& className,

@@ -20,7 +20,7 @@ TEST_CASE("Cast - 'as' is a keyword token", "[cast][lexer]") {
 
 TEST_CASE("Cast - simple 'as' produces CastExpr with correct target type", "[cast][parser]") {
     auto ast = parseString(R"(
-        void main() {
+        fn main() {
             i64 x = 1;
             i32 y = x as i32;
         }
@@ -39,7 +39,7 @@ TEST_CASE("Cast - simple 'as' produces CastExpr with correct target type", "[cas
 
 TEST_CASE("Cast - chained 'as' is left-associative", "[cast][parser]") {
     auto ast = parseString(R"(
-        void main() {
+        fn main() {
             i64 x = 1;
             f64 z = x as i32 as f64;
         }
@@ -59,7 +59,7 @@ TEST_CASE("Cast - chained 'as' is left-associative", "[cast][parser]") {
 TEST_CASE("Cast - 'as' binds tighter than '*'", "[cast][parser]") {
     // a * b as i32  should parse as  a * (b as i32)
     auto ast = parseString(R"(
-        void main() {
+        fn main() {
             i64 a = 1;
             i64 b = 2;
             i64 r = a * b as i64;
@@ -76,7 +76,7 @@ TEST_CASE("Cast - 'as' binds tighter than '*'", "[cast][parser]") {
 
 TEST_CASE("Cast - AstPrinter emits Cast node", "[cast][parser]") {
     auto ast = parseString(R"(
-        void main() {
+        fn main() {
             i64 x = 1;
             i32 y = x as i32;
         }
@@ -93,7 +93,7 @@ TEST_CASE("Cast - AstPrinter emits Cast node", "[cast][parser]") {
 
 TEST_CASE("Cast - numeric narrowing is valid (no error)", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i64 big = 1000;
             i32 small = big as i32;
         }
@@ -103,7 +103,7 @@ TEST_CASE("Cast - numeric narrowing is valid (no error)", "[cast][semantic]") {
 
 TEST_CASE("Cast - float to int is valid (no error)", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             f64 f = 3.14;
             i32 i = f as i32;
         }
@@ -113,7 +113,7 @@ TEST_CASE("Cast - float to int is valid (no error)", "[cast][semantic]") {
 
 TEST_CASE("Cast - int to float is valid (no error)", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i32 i = 5;
             f32 f = i as f32;
         }
@@ -123,7 +123,7 @@ TEST_CASE("Cast - int to float is valid (no error)", "[cast][semantic]") {
 
 TEST_CASE("Cast - int to bool is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             bool b = x as bool;
         }
@@ -133,7 +133,7 @@ TEST_CASE("Cast - int to bool is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - bool to int is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             bool b = true;
             i32 x = b as i32;
         }
@@ -143,7 +143,7 @@ TEST_CASE("Cast - bool to int is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - int to ptr is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             u64 addr = 0;
             ptr p = addr as ptr;
         }
@@ -153,7 +153,7 @@ TEST_CASE("Cast - int to ptr is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - ptr to int is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             ptr p = "hello";
             u64 addr = p as u64;
         }
@@ -164,7 +164,7 @@ TEST_CASE("Cast - ptr to int is valid", "[cast][semantic]") {
 TEST_CASE("Cast - Object to ptr is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
         class Box { i32 val; }
-        void main() {
+        fn main() {
             Box b;
             ptr p = b as ptr;
         }
@@ -174,7 +174,7 @@ TEST_CASE("Cast - Object to ptr is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - Array to ptr is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i32[4] arr;
             ptr p = arr as ptr;
         }
@@ -184,7 +184,7 @@ TEST_CASE("Cast - Array to ptr is valid", "[cast][semantic]") {
 
 TEST_CASE("Cast - same type identity cast is valid", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             i32 y = x as i32;
         }
@@ -195,7 +195,7 @@ TEST_CASE("Cast - same type identity cast is valid", "[cast][semantic]") {
 TEST_CASE("Cast - narrowing emits no warning (explicit suppresses it)", "[cast][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i64 big = 1000;
             i32 small = big as i32;
         }
@@ -210,7 +210,7 @@ TEST_CASE("Cast - narrowing emits no warning (explicit suppresses it)", "[cast][
 
 TEST_CASE("Cast - cannot cast to void", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             x as void;
         }
@@ -221,7 +221,7 @@ TEST_CASE("Cast - cannot cast to void", "[cast][semantic]") {
 TEST_CASE("Cast - cannot cast Object to numeric", "[cast][semantic]") {
     auto result = analyzeString(R"(
         class Box { i32 val; }
-        void main() {
+        fn main() {
             Box b;
             i32 x = b as i32;
         }
@@ -231,7 +231,7 @@ TEST_CASE("Cast - cannot cast Object to numeric", "[cast][semantic]") {
 
 TEST_CASE("Cast - cannot cast float to ptr", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             f32 f = 1.0;
             ptr p = f as ptr;
         }
@@ -241,7 +241,7 @@ TEST_CASE("Cast - cannot cast float to ptr", "[cast][semantic]") {
 
 TEST_CASE("Cast - cannot cast ptr to float", "[cast][semantic]") {
     auto result = analyzeString(R"(
-        void main() {
+        fn main() {
             ptr p = "hello";
             f32 f = p as f32;
         }
@@ -255,7 +255,7 @@ TEST_CASE("Cast - cannot cast ptr to float", "[cast][semantic]") {
 
 TEST_CASE("Cast - i64 as i32 emits trunc", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i64 big = 1000;
             i32 small = big as i32;
         }
@@ -266,7 +266,7 @@ TEST_CASE("Cast - i64 as i32 emits trunc", "[cast][codegen]") {
 
 TEST_CASE("Cast - i32 as i64 emits sext", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             i64 y = x as i64;
         }
@@ -277,7 +277,7 @@ TEST_CASE("Cast - i32 as i64 emits sext", "[cast][codegen]") {
 
 TEST_CASE("Cast - u32 as u64 emits zext", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             u32 x = 5;
             u64 y = x as u64;
         }
@@ -288,7 +288,7 @@ TEST_CASE("Cast - u32 as u64 emits zext", "[cast][codegen]") {
 
 TEST_CASE("Cast - f64 as i32 emits fptosi", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             f64 f = 3.14;
             i32 i = f as i32;
         }
@@ -299,7 +299,7 @@ TEST_CASE("Cast - f64 as i32 emits fptosi", "[cast][codegen]") {
 
 TEST_CASE("Cast - i32 as f32 emits sitofp", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i32 i = 5;
             f32 f = i as f32;
         }
@@ -310,7 +310,7 @@ TEST_CASE("Cast - i32 as f32 emits sitofp", "[cast][codegen]") {
 
 TEST_CASE("Cast - f32 as f64 emits fpext", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             f32 f = 1.0;
             f64 d = f as f64;
         }
@@ -321,7 +321,7 @@ TEST_CASE("Cast - f32 as f64 emits fpext", "[cast][codegen]") {
 
 TEST_CASE("Cast - i32 as bool emits icmp ne", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             bool b = x as bool;
         }
@@ -331,7 +331,7 @@ TEST_CASE("Cast - i32 as bool emits icmp ne", "[cast][codegen]") {
 
 TEST_CASE("Cast - bool as i32 emits zext i1", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             bool b = true;
             i32 x = b as i32;
         }
@@ -342,7 +342,7 @@ TEST_CASE("Cast - bool as i32 emits zext i1", "[cast][codegen]") {
 
 TEST_CASE("Cast - u64 as ptr emits inttoptr", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             u64 addr = 0;
             ptr p = addr as ptr;
         }
@@ -353,7 +353,7 @@ TEST_CASE("Cast - u64 as ptr emits inttoptr", "[cast][codegen]") {
 
 TEST_CASE("Cast - ptr as u64 emits ptrtoint", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             ptr p = "hello";
             u64 addr = p as u64;
         }
@@ -364,7 +364,7 @@ TEST_CASE("Cast - ptr as u64 emits ptrtoint", "[cast][codegen]") {
 
 TEST_CASE("Cast - i32 as u32 emits no instruction (same IR type)", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i32 x = 5;
             u32 y = x as u32;
         }
@@ -378,7 +378,7 @@ TEST_CASE("Cast - i32 as u32 emits no instruction (same IR type)", "[cast][codeg
 TEST_CASE("Cast - Object as ptr returns alloca pointer (no extra instruction)", "[cast][codegen]") {
     auto ir = codegenString(R"(
         class Box { i32 val; }
-        void main() {
+        fn main() {
             Box b;
             ptr p = b as ptr;
         }
@@ -394,7 +394,7 @@ TEST_CASE("Cast - Object as ptr returns alloca pointer (no extra instruction)", 
 
 TEST_CASE("Cast - Array as ptr emits GEP to first element", "[cast][codegen]") {
     auto ir = codegenString(R"(
-        void main() {
+        fn main() {
             i32[4] arr;
             ptr p = arr as ptr;
         }

@@ -185,9 +185,57 @@ void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
     exitScope();
 }
 
+// Return-alias body setup. The alias is a named result binding declared in the function
+// scope. Object aliases lower to a caller-allocated sret slot; primitive aliases are
+// zero-initialized locals; reference aliases are null-initialized and MUST be assigned
+// before being returned (isInitialized=false ⇒ the definite-assignment analysis flags it).
+void SemanticAnalyzer::setupReturnSlot(bool hasReturnSlot, const std::string& slotName,
+                                       const Type& returnType, const Token& nameToken) {
+    currentReturnSlotName_.clear();
+    currentReturnAliasIsRef_ = false;
+    if (hasReturnSlot) {
+        if (returnType.kind == TypeKind::Void) {
+            error(nameToken, "a void function cannot declare a return alias");
+            return;
+        }
+        currentReturnSlotName_   = slotName;
+        currentReturnAliasIsRef_ = (returnType.kind == TypeKind::Reference);
+        bool initialized = (returnType.kind != TypeKind::Reference);   // ref must be assigned first
+        Token slotTok{TokenType::IDENTIFIER, slotName, nameToken.line};
+        symbolTable.declare(slotName, Symbol{
+            Symbol::Kind::Variable, returnType, slotTok, {},
+            /*isParameter=*/false, /*isInitialized=*/initialized, /*isMutable=*/true});
+    } else if (returnType.kind == TypeKind::Object) {
+        error(nameToken, "returning an object by value requires a return alias: '"
+              + nameToken.lexeme + "(...) -> " + returnType.className + " alias'");
+    }
+}
+
 void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
     if (!currentReturnType) {
         error(returnStmt.keyword, "return statement outside of function");
+        return;
+    }
+
+    // Return-alias function: only `return <alias>;` or bare `return;` — the result is the
+    // named alias binding.
+    if (!currentReturnSlotName_.empty()) {
+        if (returnStmt.value) {
+            const auto& v = *returnStmt.value->node;
+            if (!std::holds_alternative<IdentifierExpr>(v)
+                || std::get<IdentifierExpr>(v).name.lexeme != currentReturnSlotName_) {
+                error(returnStmt.keyword, "a function with a return alias may only 'return "
+                      + currentReturnSlotName_ + ";' or 'return;'");
+                return;
+            }
+        }
+        // A reference alias must be definitely assigned before it is returned.
+        if (currentReturnAliasIsRef_) {
+            const Symbol* aliasSym = symbolTable.lookup(currentReturnSlotName_);
+            if (aliasSym && !aliasSym->isInitialized)
+                error(returnStmt.keyword, "return alias '" + currentReturnSlotName_
+                      + "' is returned before it is assigned");
+        }
         return;
     }
 
@@ -204,10 +252,22 @@ void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
     checkCast(actualType, *currentReturnType, returnStmt.keyword, "return");
 }
 
+// A reference return alias that can be reached by fall-through must be definitely assigned.
+void SemanticAnalyzer::checkReturnAliasAssignedAtExit(const BlockStmt& body, const Token& where) {
+    if (!currentReturnAliasIsRef_ || currentReturnSlotName_.empty()) return;
+    if (alwaysReturns(body)) return;   // end is unreachable — each return already checked
+    const Symbol* aliasSym = symbolTable.lookup(currentReturnSlotName_);
+    if (aliasSym && !aliasSym->isInitialized)
+        error(where, "return alias '" + currentReturnSlotName_
+              + "' may be unassigned when the function returns");
+}
+
 void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl) {
     // Signature is already registered in the global scope by collectFunctions.
     std::optional<Type> savedReturnType = currentReturnType;
     int                 savedLoopDepth  = loopDepth;
+    std::string         savedSlot       = currentReturnSlotName_;
+    bool                savedAliasRef   = currentReturnAliasIsRef_;
     currentReturnType = resolveTypeToken(functionDecl.returnType);
     loopDepth         = 0;  // loops in the outer scope do not extend into this function
 
@@ -215,6 +275,10 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     checkRawPtrAllowed(functionDecl.returnType, functionDecl.name);
 
     enterScope();  // function scope — parameters live here
+
+    // Arrow-form return slot: inject the slot binding; else reject a bare object return.
+    setupReturnSlot(functionDecl.hasReturnSlot, functionDecl.returnSlotName,
+                    *currentReturnType, functionDecl.name);
 
     for (const ParamDecl& param : functionDecl.params) {
         checkRawPtrAllowed(param.typeName, param.name);
@@ -248,14 +312,19 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
 
     // Warn when a non-void function may fall off the end without returning.
     // This is conservative: loops are never treated as guaranteed returns.
-    if (currentReturnType->kind != TypeKind::Void && !alwaysReturns(functionDecl.body))
+    // Arrow-form (slot) functions are exempt — the slot is always a valid result.
+    if (currentReturnSlotName_.empty()
+        && currentReturnType->kind != TypeKind::Void && !alwaysReturns(functionDecl.body))
         warn(functionDecl.name, "function '" + functionDecl.name.lexeme
              + "' does not always return a value");
+    checkReturnAliasAssignedAtExit(functionDecl.body, functionDecl.name);
 
     exitScope();
 
-    currentReturnType = savedReturnType;
-    loopDepth         = savedLoopDepth;
+    currentReturnType        = savedReturnType;
+    loopDepth                = savedLoopDepth;
+    currentReturnSlotName_   = savedSlot;
+    currentReturnAliasIsRef_ = savedAliasRef;
 }
 
 void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl) {
@@ -292,6 +361,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         bool                savedStatic     = currentMethodIsStatic;
         bool                savedInCtor     = inConstructor;
         bool                savedThisMut    = currentThisMutable;
+        std::string         savedSlot       = currentReturnSlotName_;
+        bool                savedAliasRef   = currentReturnAliasIsRef_;
         currentMethodIsStatic               = md.isStatic;
         inConstructor                       = md.isConstructor;
         // `this` is mutable inside a `mut` method, a constructor, or a destructor.
@@ -342,24 +413,32 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 
+        // Arrow-form return slot: inject the slot binding; else reject a bare object return.
+        setupReturnSlot(md.hasReturnSlot, md.returnSlotName, *currentReturnType, md.name);
+
         // Analyse body
         for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
 
         // Warn on missing return for non-void non-constructor non-destructor methods
-        if (!md.isConstructor && !md.isDestructor
+        // (arrow-form slot methods are exempt — the slot is always a valid result).
+        if (!md.isConstructor && !md.isDestructor && currentReturnSlotName_.empty()
             && currentReturnType->kind != TypeKind::Void
             && !alwaysReturns(md.body)) {
             warn(md.name, "method '" + md.name.lexeme
                  + "' does not always return a value");
         }
+        if (!md.isConstructor && !md.isDestructor)
+            checkReturnAliasAssignedAtExit(md.body, md.name);
 
         exitScope();
 
-        currentReturnType     = savedReturnType;
-        loopDepth             = savedLoopDepth;
-        currentMethodIsStatic = savedStatic;
-        inConstructor         = savedInCtor;
-        currentThisMutable    = savedThisMut;
+        currentReturnType        = savedReturnType;
+        loopDepth                = savedLoopDepth;
+        currentMethodIsStatic    = savedStatic;
+        inConstructor            = savedInCtor;
+        currentThisMutable       = savedThisMut;
+        currentReturnSlotName_   = savedSlot;
+        currentReturnAliasIsRef_ = savedAliasRef;
     }
 
     currentClassName = savedClassName;
@@ -385,6 +464,8 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
         bool                savedStatic     = currentMethodIsStatic;
         bool                savedInCtor     = inConstructor;
         bool                savedThisMut    = currentThisMutable;
+        std::string         savedSlot       = currentReturnSlotName_;
+        bool                savedAliasRef   = currentReturnAliasIsRef_;
         currentMethodIsStatic = md.isStatic;
         inConstructor         = false;
         currentThisMutable    = md.isMut;
@@ -419,18 +500,24 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 
+        setupReturnSlot(md.hasReturnSlot, md.returnSlotName, *currentReturnType, md.name);
+
         for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
 
-        if (currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
+        if (currentReturnSlotName_.empty()
+            && currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
             warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+        checkReturnAliasAssignedAtExit(md.body, md.name);
 
         exitScope();
 
-        currentReturnType     = savedReturnType;
-        loopDepth             = savedLoopDepth;
-        currentMethodIsStatic = savedStatic;
-        inConstructor         = savedInCtor;
-        currentThisMutable    = savedThisMut;
+        currentReturnType        = savedReturnType;
+        loopDepth                = savedLoopDepth;
+        currentMethodIsStatic    = savedStatic;
+        inConstructor            = savedInCtor;
+        currentThisMutable       = savedThisMut;
+        currentReturnSlotName_   = savedSlot;
+        currentReturnAliasIsRef_ = savedAliasRef;
     }
 
     currentClassName = savedClassName;
@@ -532,6 +619,8 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
         std::optional<Type> savedReturnType = currentReturnType;
         int                 savedLoopDepth  = loopDepth;
         bool                savedInCtor     = inEnumConstructor;
+        std::string         savedSlot       = currentReturnSlotName_;
+        bool                savedAliasRef   = currentReturnAliasIsRef_;
 
         currentReturnType = md.isConstructor ? Type{TypeKind::Void}
                                              : resolveTypeToken(md.returnType);
@@ -568,16 +657,23 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
                 error(param.name, "duplicate parameter name '" + param.name.lexeme + "'");
         }
 
+        if (!md.isConstructor)
+            setupReturnSlot(md.hasReturnSlot, md.returnSlotName, *currentReturnType, md.name);
+
         for (const auto& stmtPtr : md.body.body) analyzeStmt(*stmtPtr);
 
-        if (!md.isConstructor && currentReturnType->kind != TypeKind::Void
-            && !alwaysReturns(md.body))
+        if (!md.isConstructor && currentReturnSlotName_.empty()
+            && currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
             warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+        if (!md.isConstructor)
+            checkReturnAliasAssignedAtExit(md.body, md.name);
 
         exitScope();
-        currentReturnType = savedReturnType;
-        loopDepth         = savedLoopDepth;
-        inEnumConstructor = savedInCtor;
+        currentReturnType        = savedReturnType;
+        loopDepth                = savedLoopDepth;
+        inEnumConstructor        = savedInCtor;
+        currentReturnSlotName_   = savedSlot;
+        currentReturnAliasIsRef_ = savedAliasRef;
     }
 
     currentClassName   = savedClassName;

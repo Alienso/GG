@@ -7,7 +7,7 @@
 
 TEST_CASE("Semantic - valid function produces no error", "[semantic]") {
     auto result = analyzeString(R"(
-        i32 add(i32 a, i32 b) {
+        fn add(i32 a, i32 b) -> i32 {
             i32 sum = a + b;
             return sum;
         }
@@ -20,7 +20,7 @@ TEST_CASE("Semantic - variable shadowing in inner scope is allowed", "[semantic]
     // The inner declaration should shadow without error.
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             {
                 i32 x = 2;
@@ -34,8 +34,8 @@ TEST_CASE("Semantic - variable shadowing in inner scope is allowed", "[semantic]
 TEST_CASE("Semantic - mutual recursion is allowed", "[semantic]") {
     // Both functions are hoisted in pass 1, so they can call each other.
     auto result = analyzeString(R"(
-        i32 isEven(i32 n) { return isOdd(n); }
-        i32 isOdd(i32 n)  { return isEven(n); }
+        fn isEven(i32 n) -> i32 { return isOdd(n); }
+        fn isOdd(i32 n) -> i32  { return isEven(n); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -45,7 +45,7 @@ TEST_CASE("Semantic - silent widening cast produces no error or warning", "[sema
     // Using i32 as the source because integer literals already default to i32.
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 small = 5;
             i64 big   = small;
             return 0;
@@ -63,7 +63,7 @@ TEST_CASE("Semantic - silent widening cast produces no error or warning", "[sema
 TEST_CASE("Semantic - use of undeclared identifier is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             return x;
         }
     )");
@@ -74,7 +74,7 @@ TEST_CASE("Semantic - use of undeclared identifier is an error", "[semantic]") {
 TEST_CASE("Semantic - redeclaration in the same scope is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             i32 x = 2;
             return 0;
@@ -91,7 +91,7 @@ TEST_CASE("Semantic - redeclaration in the same scope is an error", "[semantic]"
 TEST_CASE("Semantic - assigning string to i32 is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = "hello";
             return 0;
         }
@@ -103,7 +103,7 @@ TEST_CASE("Semantic - assigning string to i32 is an error", "[semantic]") {
 TEST_CASE("Semantic - return type mismatch is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             return "oops";
         }
     )");
@@ -114,8 +114,8 @@ TEST_CASE("Semantic - return type mismatch is an error", "[semantic]") {
 TEST_CASE("Semantic - calling function with wrong argument count is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 add(i32 a, i32 b) { return 0; }
-        i32 main() {
+        fn add(i32 a, i32 b) -> i32 { return 0; }
+        fn main() -> i32 {
             add(1);
             return 0;
         }
@@ -131,7 +131,7 @@ TEST_CASE("Semantic - calling function with wrong argument count is an error", "
 TEST_CASE("Semantic - f64 assigned to f32 produces a warning but no error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             f32 x = 1.0;
             return 0;
         }
@@ -148,7 +148,7 @@ TEST_CASE("Semantic - unsigned to signed of same size produces a warning but no 
     // i32-literal → u32 warn from muddying the u32 → i32 warn we're testing).
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i64 tmp = 5;
             u32 a   = tmp;
             i32 b   = a;
@@ -167,7 +167,7 @@ TEST_CASE("Semantic - unsigned to signed of same size produces a warning but no 
 TEST_CASE("Semantic - void variable declaration is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { void x; }
+        fn foo() { void x; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("void"));
@@ -176,7 +176,7 @@ TEST_CASE("Semantic - void variable declaration is an error", "[semantic]") {
 TEST_CASE("Semantic - void variable with initializer is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { void x = 0; }
+        fn foo() { void x = 0; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("void"));
@@ -185,7 +185,7 @@ TEST_CASE("Semantic - void variable with initializer is an error", "[semantic]")
 TEST_CASE("Semantic - void parameter type is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 foo(void x) { return 0; }
+        fn foo(void x) -> i32 { return 0; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("void"));
@@ -194,7 +194,7 @@ TEST_CASE("Semantic - void parameter type is an error", "[semantic]") {
 TEST_CASE("Semantic - void function itself is valid", "[semantic]") {
     // 'void' as a *return* type is fine — the error only applies to variables/params.
     auto result = analyzeString(R"(
-        void doNothing() { }
+        fn doNothing() { }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -206,7 +206,7 @@ TEST_CASE("Semantic - void function itself is valid", "[semantic]") {
 TEST_CASE("Semantic - non-void function with no return produces a warning", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 foo() { }
+        fn foo() -> i32 { }
     )");
     REQUIRE_FALSE(result.hadError);   // warning, not error
     REQUIRE(cap.contains("Warning"));
@@ -216,7 +216,7 @@ TEST_CASE("Semantic - non-void function with no return produces a warning", "[se
 TEST_CASE("Semantic - non-void function with unconditional return is clean", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 foo() { return 42; }
+        fn foo() -> i32 { return 42; }
     )");
     REQUIRE_FALSE(result.hadError);
     REQUIRE_FALSE(cap.contains("Warning"));
@@ -225,7 +225,7 @@ TEST_CASE("Semantic - non-void function with unconditional return is clean", "[s
 TEST_CASE("Semantic - if/else with both branches returning is clean", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 sign(i32 x) {
+        fn sign(i32 x) -> i32 {
             if (x > 0) { return 1; } else { return 0; }
         }
     )");
@@ -236,7 +236,7 @@ TEST_CASE("Semantic - if/else with both branches returning is clean", "[semantic
 TEST_CASE("Semantic - if without else branch warns about missing return", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 foo(i32 x) {
+        fn foo(i32 x) -> i32 {
             if (x > 0) { return 1; }
         }
     )");
@@ -249,7 +249,7 @@ TEST_CASE("Semantic - return after if without else is clean", "[semantic]") {
     // The unconditional return at the bottom satisfies all paths.
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 clamp(i32 x) {
+        fn clamp(i32 x) -> i32 {
             if (x > 100) { return 100; }
             return x;
         }
@@ -261,7 +261,7 @@ TEST_CASE("Semantic - return after if without else is clean", "[semantic]") {
 TEST_CASE("Semantic - void function never triggers missing-return warning", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void doNothing() { }
+        fn doNothing() { }
     )");
     REQUIRE_FALSE(result.hadError);
     REQUIRE_FALSE(cap.contains("does not always return"));
@@ -274,7 +274,7 @@ TEST_CASE("Semantic - void function never triggers missing-return warning", "[se
 TEST_CASE("Semantic - return with no value in non-void function is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 foo() { return; }
+        fn foo() -> i32 { return; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("no value"));
@@ -283,7 +283,7 @@ TEST_CASE("Semantic - return with no value in non-void function is an error", "[
 TEST_CASE("Semantic - return with value in void function is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { return 42; }
+        fn foo() { return 42; }
     )");
     REQUIRE(result.hadError);
 }
@@ -294,28 +294,28 @@ TEST_CASE("Semantic - return with value in void function is an error", "[semanti
 
 TEST_CASE("Semantic - break inside while loop is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        void foo() { while (1) { break; } }
+        fn foo() { while (1) { break; } }
     )");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - continue inside while loop is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        void foo() { while (1) { continue; } }
+        fn foo() { while (1) { continue; } }
     )");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - break inside for loop is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        void foo() { for (;;) { break; } }
+        fn foo() { for (;;) { break; } }
     )");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - continue inside for loop is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        void foo() { for (;;) { continue; } }
+        fn foo() { for (;;) { continue; } }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -323,7 +323,7 @@ TEST_CASE("Semantic - continue inside for loop is valid", "[semantic]") {
 TEST_CASE("Semantic - break inside if inside loop is valid", "[semantic]") {
     // The if is still lexically inside the loop.
     auto result = analyzeString(R"(
-        void foo() {
+        fn foo() {
             while (1) {
                 if (1) { break; }
             }
@@ -334,7 +334,7 @@ TEST_CASE("Semantic - break inside if inside loop is valid", "[semantic]") {
 
 TEST_CASE("Semantic - break inside inner loop does not affect outer loop", "[semantic]") {
     auto result = analyzeString(R"(
-        void foo() {
+        fn foo() {
             while (1) {
                 while (1) { break; }
             }
@@ -350,7 +350,7 @@ TEST_CASE("Semantic - break inside inner loop does not affect outer loop", "[sem
 TEST_CASE("Semantic - break outside any loop is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { break; }
+        fn foo() { break; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("outside of a loop"));
@@ -359,7 +359,7 @@ TEST_CASE("Semantic - break outside any loop is an error", "[semantic]") {
 TEST_CASE("Semantic - continue outside any loop is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { continue; }
+        fn foo() { continue; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("outside of a loop"));
@@ -369,9 +369,9 @@ TEST_CASE("Semantic - break inside function nested in loop is an error", "[seman
     // The inner function creates a new context; loop depth resets to 0 for it.
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void outer() {
+        fn outer() {
             while (1) {
-                void inner() { break; }
+                fn inner() { break; }
             }
         }
     )");
@@ -382,7 +382,7 @@ TEST_CASE("Semantic - break inside function nested in loop is an error", "[seman
 TEST_CASE("Semantic - break at top level is an error", "[semantic]") {
     StderrCapture cap;
     // Top-level break (no enclosing function or loop)
-    auto result = analyzeString("i32 foo() { break; return 0; }");
+    auto result = analyzeString("fn foo() -> i32 { break; return 0; }");
     REQUIRE(result.hadError);
 }
 
@@ -391,14 +391,14 @@ TEST_CASE("Semantic - break at top level is an error", "[semantic]") {
 // ============================================================
 
 TEST_CASE("Semantic - extern declaration is valid", "[semantic]") {
-    auto result = analyzeString("extern i32 printf(i8 fmt);");
+    auto result = analyzeString("extern printf(i8 fmt) -> i32;");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - extern function can be called", "[semantic]") {
     auto result = analyzeString(R"(
-        extern i32 add(i32 a, i32 b);
-        i32 main() { return add(1, 2); }
+        extern add(i32 a, i32 b) -> i32;
+        fn main() -> i32 { return add(1, 2); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -406,8 +406,8 @@ TEST_CASE("Semantic - extern function can be called", "[semantic]") {
 TEST_CASE("Semantic - duplicate extern declaration is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        extern void exit(i32 code);
-        extern void exit(i32 code);
+        extern exit(i32 code);
+        extern exit(i32 code);
     )");
     REQUIRE(result.hadError);
 }
@@ -415,8 +415,8 @@ TEST_CASE("Semantic - duplicate extern declaration is an error", "[semantic]") {
 TEST_CASE("Semantic - extern and function with same name is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        extern void foo();
-        void foo() { }
+        extern foo();
+        fn foo() { }
     )");
     REQUIRE(result.hadError);
 }
@@ -424,8 +424,8 @@ TEST_CASE("Semantic - extern and function with same name is an error", "[semanti
 TEST_CASE("Semantic - extern call with wrong arg count is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        extern void exit(i32 code);
-        void main() { exit(1, 2); }
+        extern exit(i32 code);
+        fn main() { exit(1, 2); }
     )");
     REQUIRE(result.hadError);
 }
@@ -434,8 +434,8 @@ TEST_CASE("Semantic - extern call with wrong arg type is an error", "[semantic]"
     // Passing a string where i32 is expected — no implicit conversion exists.
     StderrCapture cap;
     auto result = analyzeString(R"(
-        extern void exit(i32 code);
-        void main() { exit("hello"); }
+        extern exit(i32 code);
+        fn main() { exit("hello"); }
     )");
     REQUIRE(result.hadError);
 }
@@ -446,8 +446,8 @@ TEST_CASE("Semantic - extern call with wrong arg type is an error", "[semantic]"
 
 TEST_CASE("Semantic - ptr variable is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        extern ptr malloc(u64 size);
-        void main() { ptr p = malloc(64); }
+        extern malloc(u64 size) -> ptr;
+        fn main() { ptr p = malloc(64); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -455,8 +455,8 @@ TEST_CASE("Semantic - ptr variable is valid", "[semantic]") {
 TEST_CASE("Semantic - string literal has ptr type and passes ptr parameter", "[semantic]") {
     // String literals are typed as ptr (pointer to null-terminated char data).
     auto result = analyzeString(R"(
-        extern i32 puts(ptr s);
-        void main() { puts("hello"); }
+        extern puts(ptr s) -> i32;
+        fn main() { puts("hello"); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -464,21 +464,21 @@ TEST_CASE("Semantic - string literal has ptr type and passes ptr parameter", "[s
 TEST_CASE("Semantic - string is no longer a reserved keyword", "[semantic]") {
     // 'string' was formerly a type keyword; it is now a plain identifier.
     // It can therefore be used as a function name without error.
-    auto result = analyzeString("i32 string() { return 42; }");
+    auto result = analyzeString("fn string() -> i32 { return 42; }");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - ptr function parameter is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        void process(ptr data) { }
+        fn process(ptr data) { }
     )");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Semantic - ptr return type is valid", "[semantic]") {
     auto result = analyzeString(R"(
-        extern ptr malloc(u64 n);
-        ptr alloc(u64 size) { return malloc(size); }
+        extern malloc(u64 n) -> ptr;
+        fn alloc(u64 size) -> ptr { return malloc(size); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -490,7 +490,7 @@ TEST_CASE("Semantic - ptr return type is valid", "[semantic]") {
 TEST_CASE("Uninit - primitive used before any assignment is an error", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             return x;
         }
@@ -501,7 +501,7 @@ TEST_CASE("Uninit - primitive used before any assignment is an error", "[uninit]
 
 TEST_CASE("Uninit - primitive with initializer is valid", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 5;
             return x;
         }
@@ -511,7 +511,7 @@ TEST_CASE("Uninit - primitive with initializer is valid", "[uninit]") {
 
 TEST_CASE("Uninit - assigned before read is valid", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             x = 5;
             return x;
@@ -522,8 +522,8 @@ TEST_CASE("Uninit - assigned before read is valid", "[uninit]") {
 
 TEST_CASE("Uninit - function parameters are always initialized", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 double_it(i32 n) { return n + n; }
-        i32 main() { return 0; }
+        fn double_it(i32 n) -> i32 { return n + n; }
+        fn main() -> i32 { return 0; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -532,7 +532,7 @@ TEST_CASE("Uninit - value-object declaration is zero-initialized (no error)", "[
     // Class values are zero-initialized by the runtime; reading them is safe.
     auto result = analyzeString(R"(
         class Point { i32 x; i32 y; }
-        i32 main() {
+        fn main() -> i32 {
             Point p;
             return p.x;
         }
@@ -544,7 +544,7 @@ TEST_CASE("Uninit - reference declared without init is an error when read", "[un
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Counter { i32 n; Counter(i32 v) { this.n = v; } }
-        i32 main() {
+        fn main() -> i32 {
             Counter& c;
             return c.n;
         }
@@ -556,7 +556,7 @@ TEST_CASE("Uninit - reference declared without init is an error when read", "[un
 TEST_CASE("Uninit - compound-assign on uninitialized variable is an error", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 x;
             x += 1;
             return x;
@@ -568,7 +568,7 @@ TEST_CASE("Uninit - compound-assign on uninitialized variable is an error", "[un
 
 TEST_CASE("Uninit - if-else both branches assign: initialized after", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 pick(bool cond) {
+        fn pick(bool cond) -> i32 {
             i32 x;
             if (cond) { x = 1; } else { x = 2; }
             return x;
@@ -580,7 +580,7 @@ TEST_CASE("Uninit - if-else both branches assign: initialized after", "[uninit]"
 TEST_CASE("Uninit - if without else does not guarantee initialization", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             if (true) { x = 1; }
             return x;
@@ -593,7 +593,7 @@ TEST_CASE("Uninit - if without else does not guarantee initialization", "[uninit
 TEST_CASE("Uninit - if-else only one branch assigns: error after", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             if (true) { x = 1; } else { }
             return x;
@@ -606,7 +606,7 @@ TEST_CASE("Uninit - if-else only one branch assigns: error after", "[uninit]") {
 TEST_CASE("Uninit - while body does not guarantee initialization", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             while (false) { x = 1; }
             return x;
@@ -619,7 +619,7 @@ TEST_CASE("Uninit - while body does not guarantee initialization", "[uninit]") {
 TEST_CASE("Uninit - for body does not guarantee initialization", "[uninit]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 x;
             for (mut i32 i = 0; i < 10; i++) { x = i; }
             return x;
@@ -631,7 +631,7 @@ TEST_CASE("Uninit - for body does not guarantee initialization", "[uninit]") {
 
 TEST_CASE("Uninit - nested if-else: both paths cover all branches is valid", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 clamp(i32 v, i32 lo, i32 hi) {
+        fn clamp(i32 v, i32 lo, i32 hi) -> i32 {
             i32 result;
             if (v < lo) {
                 result = lo;
@@ -648,7 +648,7 @@ TEST_CASE("Uninit - nested if-else: both paths cover all branches is valid", "[u
 
 TEST_CASE("Uninit - variable initialized before loop body always read is valid", "[uninit]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 sum = 0;
             for (mut i32 i = 0; i < 10; i++) { sum = sum + i; }
             return sum;

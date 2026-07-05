@@ -9,8 +9,8 @@
 // Returns a unique number on failure; main returns 0 on success.
 // Expected result: exit code 0
 
-extern ptr malloc(u64 n);
-extern void free(ptr p);
+extern malloc(u64 n) -> ptr;
+extern free(ptr p);
 
 class IntVec {
     ptr<i32> data;
@@ -21,12 +21,12 @@ class IntVec {
         this.len  = 0;
     }
 
-    void push(i32 v) mut {
+    fn push(i32 v) mut {
         this.data[this.len] = v;
         this.len = this.len + 1;
     }
 
-    i32 get(i32 i) {
+    fn get(i32 i) -> i32 {
         return this.data[i];
     }
 
@@ -35,7 +35,7 @@ class IntVec {
     }
 }
 
-i32 main() {
+fn main() -> i32 {
     mut IntVec v(8);
     v.push(10);
     v.push(20);

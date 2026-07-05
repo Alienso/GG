@@ -1,0 +1,125 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "GG",
+  "scopeName": "source.gg",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#type-references" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.gg",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.gg",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.gg",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.gg",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.gg",
+      "match": "'(\\\\.|[^'\\\\])'"
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "class / enum / trait NAME",
+          "match": "\\b(class|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.gg" },
+            "2": { "name": "entity.name.type.gg" }
+          }
+        },
+        {
+          "comment": "impl Trait for Type   (the 'for' and second name are optional)",
+          "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(for)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+          "captures": {
+            "1": { "name": "keyword.declaration.gg" },
+            "2": { "name": "entity.name.type.gg" },
+            "3": { "name": "keyword.control.gg" },
+            "4": { "name": "entity.name.type.gg" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.gg",
+          "match": "\\b(if|else|while|for|return|break|continue|import)\\b"
+        },
+        {
+          "name": "keyword.declaration.gg",
+          "match": "\\b(fn|class|enum|trait|impl|extern)\\b"
+        },
+        {
+          "name": "storage.modifier.gg",
+          "match": "\\b(static|mut|private)\\b"
+        },
+        {
+          "name": "keyword.operator.word.gg",
+          "match": "\\b(new|as|sizeof)\\b"
+        }
+      ]
+    },
+    "types": {
+      "name": "storage.type.gg",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|void|ptr)\\b"
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.gg",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.gg",
+          "match": "\\b(this|super)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric.gg",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    },
+    "type-references": {
+      "comment": "Capitalized identifiers are types by convention (classes, enums, traits, Self)",
+      "name": "entity.name.type.gg",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    "functions": {
+      "comment": "lowercase identifier, optional <...> generic args, then '(' -> a call or definition",
+      "name": "entity.name.function.gg",
+      "match": "\\b([a-z_][A-Za-z0-9_]*)(?=\\s*(?:<[^<>;{}()]*>)?\\s*\\()"
+    },
+    "operators": {
+      "name": "keyword.operator.gg",
+      "match": "->|::|\\+\\+|--|<<|>>|&&|\\|\\||[-+*/%<>=!&|^~]=?|[?:.]"
+    }
+  }
+}

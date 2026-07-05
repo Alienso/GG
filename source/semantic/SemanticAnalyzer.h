@@ -114,6 +114,8 @@ private:
     bool                inConstructor      = false; // true while analysing a class's constructor body
     bool                currentThisMutable = false; // true while analysing a `mut` method / ctor / dtor
     std::string         currentSelfType_;           // the `Self` type while in a trait/impl body
+    std::string         currentReturnSlotName_;     // non-empty while inside a function/method with a return alias
+    bool                currentReturnAliasIsRef_ = false; // the return alias is a reference (must be assigned before return)
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
     // Trait declarations (name → AST node) and, per type, the set of traits it implements.
@@ -138,6 +140,16 @@ private:
     // Verify generic trait-bound obligations recorded during monomorphization:
     // each instantiation's concrete type argument must implement its declared trait(s).
     void checkGenericBounds(const Program& program);
+    // Set up an arrow-form return slot for a function/method body: validate the slot type
+    // is a class, inject the slot as a mutable initialized local, and set
+    // currentReturnSlotName_. When there is no slot but the return type is an object value,
+    // report the "requires a return slot" error. Call inside the function/method scope.
+    void setupReturnSlot(bool hasReturnSlot, const std::string& slotName,
+                         const Type& returnType, const Token& nameToken);
+    // If the current function has a reference return alias and control can fall off the end
+    // (no guaranteed return), require the alias to be definitely assigned. Call after the body,
+    // before exitScope.
+    void checkReturnAliasAssignedAtExit(const BlockStmt& body, const Token& where);
     // Operator → (built-in trait name, method name), or nullptr if the operator isn't
     // overloadable. Also recognises the built-in operator-trait names.
     [[nodiscard]] static const std::pair<const char*, const char*>* operatorTraitFor(TokenType op);

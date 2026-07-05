@@ -14,8 +14,8 @@ class Point {
     mut i32 x;
     mut i32 y;
     Point(i32 a, i32 b) { this.x = a; this.y = b; }
-    i32  sum()        { return this.x + this.y; }
-    void scale(i32 k) mut { this.x = this.x * k; this.y = this.y * k; }
+    fn sum() -> i32        { return this.x + this.y; }
+    fn scale(i32 k) mut { this.x = this.x * k; this.y = this.y * k; }
 }
 
 // A class with a destructor — exercises the dtor-on-release path
@@ -24,16 +24,16 @@ class Logged {
     i32 id;
     Logged(i32 i) { this.id = i; }
     ~Logged() { }
-    i32 get() { return this.id; }
+    fn get() -> i32 { return this.id; }
 }
 
 // Borrowed reference (read only).
-i32 readX(Point& q) { return q.x; }
+fn readX(Point& q) -> i32 { return q.x; }
 
 // Borrowed reference (mutates the shared object — needs a mutable borrow).
-void bump(mut Point& q) { q.x = q.x + 1; }
+fn bump(mut Point& q) { q.x = q.x + 1; }
 
-i32 main() {
+fn main() -> i32 {
 
     // ---- 1-2: new + member read --------------------------------------
     mut Point& p = new Point(3, 4);

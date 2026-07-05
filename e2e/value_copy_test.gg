@@ -16,7 +16,7 @@ class Point {
     Point(i32 a, i32 b) { this.x = a; this.y = b; }
 }
 
-i32 main() {
+fn main() -> i32 {
 
     // ---- value = value : deep copy, independent --------------------
     mut Point p(1, 2);

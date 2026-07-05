@@ -13,16 +13,16 @@
 class Counter {
     i32 n;
     Counter(i32 v) { this.n = v; }
-    i32 get() { return this.n; }
+    fn get() -> i32 { return this.n; }
 }
 
-Counter& make(i32 v) { return new Counter(v); }                       // fresh +1
-Counter& pick(Counter& a, Counter& b, bool first) {                   // borrowed return
+fn make(i32 v) -> Counter& { return new Counter(v); }                       // fresh +1
+fn pick(Counter& a, Counter& b, bool first) -> Counter& {                   // borrowed return
     if (first) { return a; }
     return b;
 }
 
-i32 main() {
+fn main() -> i32 {
     Counter& a = make(10);
     if (a.get() != 10) { return 1; }
 

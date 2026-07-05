@@ -6,12 +6,12 @@
 //   sum 1..5     =  15
 //   result       = 120 - 15 = 105
 
-i32 factorial(i32 n) {
+fn factorial(i32 n) -> i32 {
     if (n <= 1) { return 1; }
     return n * factorial(n - 1);
 }
 
-i32 sumTo(i32 n) {
+fn sumTo(i32 n) -> i32 {
     mut i32 total = 0;
     for (mut i32 i = 1; i <= n; i++) {
         total = total + i;
@@ -19,7 +19,7 @@ i32 sumTo(i32 n) {
     return total;
 }
 
-i32 main() {
+fn main() -> i32 {
     i32 fact = factorial(5);   // 120
     i32 sum  = sumTo(5);       // 15
     return fact - sum;         // 105

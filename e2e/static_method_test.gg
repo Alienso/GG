@@ -12,16 +12,16 @@ class Counter {
     }
 
     // Pure static helper — no receiver, just arithmetic.
-    static i32 add(i32 a, i32 b) { return a + b; }
+    fn static add(i32 a, i32 b) -> i32 { return a + b; }
 
     // Static method that mutates shared state.
-    static void bump() { Counter::total = Counter::total + 1; }
+    fn static bump() { Counter::total = Counter::total + 1; }
 
     // Static reader of the shared field.
-    static i32 getTotal() { return Counter::total; }
+    fn static getTotal() -> i32 { return Counter::total; }
 }
 
-i32 main() {
+fn main() -> i32 {
     // Pure arithmetic static call.
     if (Counter::add(2, 3) != 5) { return 1; }
 

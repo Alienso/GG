@@ -4,45 +4,45 @@
 // Expected exit code: 0.
 
 trait Comparable {
-    i32 compareTo(Self& other);
+    fn compareTo(Self& other) -> i32;
 }
 
 class Money {
     mut i32 cents;
     Money(i32 c) { cents = c; }
-    i32 get() { return cents; }
+    fn get() -> i32 { return cents; }
 }
 
 impl Comparable for Money {
-    i32 compareTo(Money& other) { return cents - other.cents; }
+    fn compareTo(Money& other) -> i32 { return cents - other.cents; }
 }
 
 class N {
     mut i32 v;
     N(i32 x) { v = x; }
-    i32 get() { return v; }
+    fn get() -> i32 { return v; }
 }
 
 // Built-in operator trait bound (Ord) — the body uses the '<' operator.
-impl Ord for N { i32 cmp(N& r) { return v - r.v; } }
+impl Ord for N { fn cmp(N& r) -> i32 { return v - r.v; } }
 
-trait Show { i32 tag(); }
-impl Show for N { i32 tag() { return v * 10; } }
+trait Show { fn tag() -> i32; }
+impl Show for N { fn tag() -> i32 { return v * 10; } }
 
 // User-trait bound, reference return.
-T& maxOf<T: Comparable>(T& a, T& b) {
+fn maxOf<T: Comparable>(T& a, T& b) -> T& {
     if (a.compareTo(b) >= 0) { return a; }
     return b;
 }
 
 // Built-in-trait bound, operator in the body.
-T& biggest<T: Ord>(T& a, T& b) {
+fn biggest<T: Ord>(T& a, T& b) -> T& {
     if (a < b) { return b; }
     return a;
 }
 
 // Multiple bounds on one parameter.
-T& choose<T: Ord + Show>(T& a, T& b) {
+fn choose<T: Ord + Show>(T& a, T& b) -> T& {
     if (a < b) { return b; }
     return a;
 }
@@ -51,10 +51,10 @@ T& choose<T: Ord + Show>(T& a, T& b) {
 class Wrapper<T: Show> {
     T& inner;
     Wrapper(T& x) { this.inner = x; }
-    i32 label() { return this.inner.tag(); }
+    fn label() -> i32 { return this.inner.tag(); }
 }
 
-i32 main() {
+fn main() -> i32 {
     Money& x = new Money(500);
     Money& y = new Money(750);
     if (maxOf<Money>(x, y).get() != 750) { return 1; }

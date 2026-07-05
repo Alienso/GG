@@ -22,19 +22,19 @@ class Point {
         this.y = y;
     }
 
-    f32 getX() { return this.x; }
-    f32 getY() { return this.y; }
+    fn getX() -> f32 { return this.x; }
+    fn getY() -> f32 { return this.y; }
 
-    void setX(f32 v) mut { this.x = v; }
-    void setY(f32 v) mut { this.y = v; }
+    fn setX(f32 v) mut { this.x = v; }
+    fn setY(f32 v) mut { this.y = v; }
 
     // x² + y²
-    f32 squaredLen() {
+    fn squaredLen() -> f32 {
         return this.x * this.x + this.y * this.y;
     }
 
     // Calls squaredLen() on this — tests method-to-method dispatch
-    f32 twiceSquaredLen() {
+    fn twiceSquaredLen() -> f32 {
         f32 len = this.squaredLen();
         return len + len;
     }
@@ -52,28 +52,28 @@ class Counter {
         this.count = n;
     }
 
-    void increment() mut {
+    fn increment() mut {
         this.count = this.count + 1;
     }
 
-    void decrement() mut {
+    fn decrement() mut {
         this.count = this.count - 1;
     }
 
-    void addN(i32 n) mut {
+    fn addN(i32 n) mut {
         this.count = this.count + n;
     }
 
-    i32 get() {
+    fn get() -> i32 {
         return this.count;
     }
 
-    bool isPositive() {
+    fn isPositive() -> bool {
         return this.count > 0;
     }
 
     // Delegates to get() — tests method-to-method dispatch on this
-    i32 doubled() {
+    fn doubled() -> i32 {
         return this.get() * 2;
     }
 }
@@ -89,15 +89,15 @@ class Box {
         this.value = v;
     }
 
-    i32 get() {
+    fn get() -> i32 {
         return this.value;
     }
 
-    void set(i32 v) mut {
+    fn set(i32 v) mut {
         this.value = v;
     }
 
-    void doubleIt() mut {
+    fn doubleIt() mut {
         this.value = this.value * 2;
     }
 }
@@ -113,11 +113,11 @@ class Flag {
         this.active = b;
     }
 
-    bool isActive() {
+    fn isActive() -> bool {
         return this.active;
     }
 
-    void toggle() mut {
+    fn toggle() mut {
         this.active = !this.active;
     }
 }
@@ -136,12 +136,12 @@ class Accumulator {
         this.total = t;
     }
 
-    void add(f64 v) mut {
+    fn add(f64 v) mut {
         this.steps = this.steps + 1;
         this.total = this.total + v;
     }
 
-    f64 average() {
+    fn average() -> f64 {
         return this.total / this.steps;
     }
 }
@@ -150,7 +150,7 @@ class Accumulator {
 // main
 // ============================================================
 
-i32 main() {
+fn main() -> i32 {
 
     // ==== Point ===============================================================
 

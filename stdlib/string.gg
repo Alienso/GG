@@ -3,14 +3,14 @@
 // Wraps the standard null-terminated string functions from <string.h>.
 // All strings are represented as `ptr` (opaque pointer to char data).
 
-extern u64 strlen(ptr s);                        // length of null-terminated string (excluding null)
-extern ptr strcpy(ptr dest, ptr src);            // copy src into dest; returns dest
-extern ptr strncpy(ptr dest, ptr src, u64 n);    // copy at most `n` bytes; returns dest
-extern ptr strcat(ptr dest, ptr src);            // append src to dest; returns dest
-extern ptr strncat(ptr dest, ptr src, u64 n);    // append at most `n` bytes; returns dest
-extern i32 strcmp(ptr a, ptr b);                 // compare strings; 0 = equal, <0 / >0 otherwise
-extern i32 strncmp(ptr a, ptr b, u64 n);         // compare at most `n` bytes
-extern ptr strchr(ptr s, i32 c);                 // find first occurrence of `c` in s; null if absent
-extern ptr strrchr(ptr s, i32 c);                // find last  occurrence of `c` in s; null if absent
-extern ptr strstr(ptr haystack, ptr needle);     // find first occurrence of needle in haystack
-extern ptr strdup(ptr s);                        // allocate a copy of s (caller must free)
+extern strlen(ptr s) -> u64;                        // length of null-terminated string (excluding null)
+extern strcpy(ptr dest, ptr src) -> ptr;            // copy src into dest; returns dest
+extern strncpy(ptr dest, ptr src, u64 n) -> ptr;    // copy at most `n` bytes; returns dest
+extern strcat(ptr dest, ptr src) -> ptr;            // append src to dest; returns dest
+extern strncat(ptr dest, ptr src, u64 n) -> ptr;    // append at most `n` bytes; returns dest
+extern strcmp(ptr a, ptr b) -> i32;                 // compare strings; 0 = equal, <0 / >0 otherwise
+extern strncmp(ptr a, ptr b, u64 n) -> i32;         // compare at most `n` bytes
+extern strchr(ptr s, i32 c) -> ptr;                 // find first occurrence of `c` in s; null if absent
+extern strrchr(ptr s, i32 c) -> ptr;                // find last  occurrence of `c` in s; null if absent
+extern strstr(ptr haystack, ptr needle) -> ptr;     // find first occurrence of needle in haystack
+extern strdup(ptr s) -> ptr;                        // allocate a copy of s (caller must free)

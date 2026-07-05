@@ -1,0 +1,94 @@
+// End-to-end test for return slots (object-by-value returns via sret).
+// A function/method names its result binding after `->`; the caller reserves the
+// storage and the callee writes it in place, so `return` copies nothing.
+// Expected exit code: 0.
+
+class Point {
+    mut i32 x;
+    mut i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }
+    fn sum() -> i32 { return x + y; }
+}
+
+// Free function with a return slot.
+fn make(i32 a, i32 b) -> Point p {
+    p.x = a;
+    p.y = b;
+    return p;
+}
+
+// Fall-through: the slot is zero-initialised, no explicit return needed.
+fn origin() -> Point p { }
+
+class Boxed {
+    mut i32 v;
+    Boxed(i32 a) { v = a; }
+    // Instance method with a return slot, building a Point from `this`.
+    fn toPoint() -> Point q {
+        q.x = v;
+        q.y = v + 1;
+        return q;
+    }
+    // Static factory with a return slot.
+    fn static twin(i32 a) -> Point r {
+        r.x = a;
+        r.y = a;
+        return r;
+    }
+}
+
+// A slot type that owns a reference field — verifies ownership transfer to the caller
+// and null-safe zero-init.
+class Inner { mut i32 v; Inner(i32 a) { v = a; } fn get() -> i32 { return v; } }
+class Holder { mut Inner& item; mut i32 tag; }
+
+fn wrap(i32 a) -> Holder h {
+    h.item = new Inner(a);
+    h.tag  = a * 2;
+    return h;
+}
+
+// Generic (template) function with an arrow return slot.
+fn dup<T>(T v) -> Point p { p.x = v; p.y = v; return p; }
+
+// Generic class with an arrow-form method.
+class Wrap<T> {
+    mut i32 seed;
+    Wrap(i32 s) { seed = s; }
+    fn build() -> Point p { p.x = seed; p.y = seed + 1; return p; }
+}
+
+fn main() -> i32 {
+    // Free function.
+    Point a = make(3, 4);
+    if (a.sum() != 7) { return 1; }
+
+    // Fall-through slot → zeroed fields.
+    Point z = origin();
+    if (z.sum() != 0) { return 2; }
+
+    // Instance method.
+    Boxed& b = new Boxed(10);
+    Point c = b.toPoint();
+    if (c.sum() != 21) { return 3; }        // 10 + 11
+
+    // Static factory.
+    Point d = Boxed::twin(6);
+    if (d.sum() != 12) { return 4; }
+
+    // Reference field inside the slot: owned by the caller, released at scope exit.
+    Holder w = wrap(21);
+    if (w.item.get() != 21) { return 5; }
+    if (w.tag != 42) { return 6; }
+
+    // Generic function with a return slot.
+    Point g = dup<i32>(8);
+    if (g.sum() != 16) { return 7; }
+
+    // Generic class method with a return slot.
+    Wrap<i32>& wr = new Wrap<i32>(100);
+    Point m = wr.build();
+    if (m.sum() != 201) { return 8; }      // 100 + 101
+
+    return 0;
+}

@@ -3,7 +3,7 @@
 // Wraps the C standard I/O functions available in libc.
 // Import this module for basic console output and input.
 
-extern i32 puts(ptr s);         // write string + newline to stdout; returns non-negative on success
-extern i32 putchar(i32 c);      // write a single character to stdout; returns the character written
-extern i32 getchar();           // read a single character from stdin; returns the character or EOF (-1)
-extern i32 fflush(ptr stream);  // flush a stdio stream; pass 0 (null) to flush all open streams
+extern puts(ptr s) -> i32;         // write string + newline to stdout; returns non-negative on success
+extern putchar(i32 c) -> i32;      // write a single character to stdout; returns the character written
+extern getchar() -> i32;           // read a single character from stdin; returns the character or EOF (-1)
+extern fflush(ptr stream) -> i32;  // flush a stdio stream; pass 0 (null) to flush all open streams

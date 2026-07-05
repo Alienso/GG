@@ -4,12 +4,12 @@
 // 'ptr' is GG's opaque pointer type — maps directly to LLVM's 'ptr'.
 // Use it at the FFI boundary when calling C functions that take/return raw pointers.
 
-extern i32  puts(ptr s);
-extern ptr  malloc(u64 size);
-extern void free(ptr p);
-extern void exit(i32 code);
+extern puts(ptr s) -> i32;
+extern malloc(u64 size) -> ptr;
+extern free(ptr p);
+extern exit(i32 code);
 
-void main() {
+fn main() {
     puts("Hello from GG with extern!");
 
     ptr buf = malloc(64);

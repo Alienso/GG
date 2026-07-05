@@ -1,0 +1,54 @@
+// End-to-end test for the unified signature order and generalized return aliases.
+// Exercises: reference return WITHOUT an alias (+1 convention), a reference alias assigned
+// from a borrowed parameter, primitive aliases with branches/early-return/fall-through, and
+// an object alias built inside a `mut` method. Expected exit code: 0.
+
+class Node {
+    mut i32 v;
+    Node(i32 a) { v = a; }
+    fn get() -> i32 { return v; }
+}
+
+// Reference return with no alias — the classic +1 reference return.
+fn firstOf(Node& a, Node& b) -> Node& { return a; }
+
+// Reference alias assigned from a borrowed parameter (the alias hands the caller a +1).
+// `as mut Node&` silences the const→mut coercion note on the assignment.
+fn choose(bool c, Node& a, Node& b) -> Node& r {
+    if (c) { r = a as mut Node&; } else { r = b as mut Node&; }
+    return r;
+}
+
+// Primitive alias: zero-initialized, early return on one path, fall-through on another.
+fn classify(i32 n) -> i32 r {
+    if (n < 0) { r = 0 - 1; return r; }
+    if (n == 0) { return; }   // r stays 0
+    r = 1;
+    return r;
+}
+
+// Object return alias built inside a `mut` method.
+class Builder {
+    mut i32 seed;
+    Builder(i32 s) { seed = s; }
+    fn grow() mut -> Node& out { seed = seed + 1; out = new Node(seed); return out; }
+}
+
+fn main() -> i32 {
+    Node& a = new Node(10);
+    Node& b = new Node(20);
+
+    if (firstOf(a, b).get() != 10) { return 1; }
+    if (choose(true,  a, b).get() != 10) { return 2; }
+    if (choose(false, a, b).get() != 20) { return 3; }
+
+    if (classify(0 - 5) != 0 - 1) { return 4; }
+    if (classify(0)     != 0)     { return 5; }
+    if (classify(9)     != 1)     { return 6; }
+
+    mut Builder& bd = new Builder(41);
+    Node& g = bd.grow();
+    if (g.get() != 42) { return 7; }
+
+    return 0;
+}

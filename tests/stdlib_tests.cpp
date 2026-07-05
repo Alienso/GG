@@ -148,7 +148,7 @@ TEST_CASE("stdlib import - io.gg is importable from a program", "[stdlib][integr
 
     std::string source =
         "import \"" + absolutePath + "\";\n"
-        "void main() { puts(\"hello\"); }";
+        "fn main() { puts(\"hello\"); }";
 
     StderrCapture capture;
     std::string ir = codegenString(source);
@@ -164,7 +164,7 @@ TEST_CASE("stdlib import - mem.gg is importable from a program", "[stdlib][integ
 
     std::string source =
         "import \"" + absolutePath + "\";\n"
-        "void main() { ptr p = malloc(64); free(p); }";
+        "fn main() { ptr p = malloc(64); free(p); }";
 
     StderrCapture capture;
     std::string ir = codegenString(source);

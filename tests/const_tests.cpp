@@ -16,7 +16,7 @@
 
 TEST_CASE("Mut - local carries isMut flag", "[mut][parser]") {
     auto prog = parseString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 a = 0;
             i32 b = 1;
             return b;
@@ -31,8 +31,8 @@ TEST_CASE("Mut - local carries isMut flag", "[mut][parser]") {
 }
 
 TEST_CASE("Mut - 'mut static' and 'static mut' both parse", "[mut][parser]") {
-    for (const char* src : { "i32 f() { mut static i32 c = 0; return c; }",
-                             "i32 f() { static mut i32 c = 0; return c; }" }) {
+    for (const char* src : { "fn f() -> i32 { mut static i32 c = 0; return c; }",
+                             "fn f() -> i32 { static mut i32 c = 0; return c; }" }) {
         auto prog = parseString(src);
         REQUIRE(prog.declarations.size() == 1);
         const auto& fn = asStmt<FunctionDeclStmt>(prog.declarations[0]);
@@ -44,7 +44,7 @@ TEST_CASE("Mut - 'mut static' and 'static mut' both parse", "[mut][parser]") {
 
 TEST_CASE("Mut - parameter carries isMut flag", "[mut][parser]") {
     auto prog = parseString(R"(
-        i32 f(mut i32 n, i32 m) { return m; }
+        fn f(mut i32 n, i32 m) -> i32 { return m; }
     )");
     REQUIRE(prog.declarations.size() == 1);
     const auto& fn = asStmt<FunctionDeclStmt>(prog.declarations[0]);
@@ -79,19 +79,19 @@ TEST_CASE("Mut - 'private mut' and 'mut private' field orders both parse", "[mut
     }
 }
 
-TEST_CASE("Mut - prefix 'mut' on a method is a parse error", "[mut][parser]") {
+TEST_CASE("Mut - a method declared without 'fn' is a parse error", "[mut][parser]") {
     StderrCapture cap;
     auto prog = parseString(R"(
-        class C { mut i32 get() { return 0; } }
+        class C { i32 get() { return 0; } }
     )");
-    REQUIRE(cap.contains("'mut' is not allowed on methods"));
+    REQUIRE(cap.contains("methods must be declared with 'fn'"));
 }
 
 TEST_CASE("Mut - trailing 'mut' sets the method's isMut flag", "[mut][parser]") {
     auto prog = parseString(R"(
         class C {
-            void set() mut { }
-            i32  get()     { return 0; }
+            fn set() mut { }
+            fn get() -> i32     { return 0; }
         }
     )");
     REQUIRE(prog.declarations.size() == 1);
@@ -105,7 +105,7 @@ TEST_CASE("Mut - trailing 'mut' sets the method's isMut flag", "[mut][parser]") 
 TEST_CASE("Mut - trailing 'mut' on a static method is a parse error", "[mut][parser]") {
     StderrCapture cap;
     auto prog = parseString(R"(
-        class C { static void f() mut { } }
+        class C { fn static f() mut { } }
     )");
     REQUIRE(cap.contains("static methods cannot be 'mut'"));
 }
@@ -113,7 +113,7 @@ TEST_CASE("Mut - trailing 'mut' on a static method is a parse error", "[mut][par
 TEST_CASE("Mut - trailing 'mut' on an enum method is a parse error", "[mut][parser]") {
     StderrCapture cap;
     auto prog = parseString(R"(
-        enum E { A; i32 v() mut { return 0; } }
+        enum E { A; fn v() mut -> i32 { return 0; } }
     )");
     REQUIRE(cap.contains("enum methods cannot be 'mut'"));
 }
@@ -133,7 +133,7 @@ TEST_CASE("Mut - 'mut' on an enum field is a parse error", "[mut][parser]") {
 TEST_CASE("Const - reassigning a const local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             x = 2;
             return x;
@@ -146,7 +146,7 @@ TEST_CASE("Const - reassigning a const local is an error", "[mut][const][semanti
 TEST_CASE("Const - compound-assigning a const local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             x += 2;
             return x;
@@ -159,7 +159,7 @@ TEST_CASE("Const - compound-assigning a const local is an error", "[mut][const][
 TEST_CASE("Const - ++ on a const local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             x++;
             return x;
@@ -172,7 +172,7 @@ TEST_CASE("Const - ++ on a const local is an error", "[mut][const][semantic]") {
 TEST_CASE("Const - prefix ++ on a const local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 1;
             ++x;
             return x;
@@ -185,7 +185,7 @@ TEST_CASE("Const - prefix ++ on a const local is an error", "[mut][const][semant
 TEST_CASE("Const - reassigning a const parameter is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 f(i32 n) {
+        fn f(i32 n) -> i32 {
             n = n + 1;
             return n;
         }
@@ -197,7 +197,7 @@ TEST_CASE("Const - reassigning a const parameter is an error", "[mut][const][sem
 TEST_CASE("Mut - a mut reference parameter is a mutable borrow (writes allowed)", "[mut][semantic]") {
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        void f(mut Point& p) { p.x = 5; }
+        fn f(mut Point& p) { p.x = 5; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -206,7 +206,7 @@ TEST_CASE("Const - writing a field through a const reference parameter is an err
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        void f(Point& p) { p.x = 5; }
+        fn f(Point& p) { p.x = 5; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("through an immutable binding"));
@@ -218,7 +218,7 @@ TEST_CASE("Const - assigning a const instance field outside the ctor is an error
         class Point {
             i32 x;
             Point(i32 x) { this.x = x; }
-            void bump() { this.x = this.x + 1; }
+            fn bump() { this.x = this.x + 1; }
         }
     )");
     REQUIRE(result.hadError);
@@ -229,7 +229,7 @@ TEST_CASE("Const - assigning a const field through an instance is an error", "[m
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point& p = new Point(1);
             p.x = 5;
             return 0;
@@ -245,7 +245,7 @@ TEST_CASE("Const - assigning a const field through an instance is an error", "[m
 
 TEST_CASE("Const - single deferred defining assignment is allowed", "[mut][const][semantic]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             x = 5;
             return x;
@@ -256,7 +256,7 @@ TEST_CASE("Const - single deferred defining assignment is allowed", "[mut][const
 
 TEST_CASE("Const - if/else split initialization of a const is allowed", "[mut][const][semantic]") {
     auto result = analyzeString(R"(
-        i32 pick(i32 c) {
+        fn pick(i32 c) -> i32 {
             i32 x;
             if (c > 0) { x = 1; } else { x = 2; }
             return x;
@@ -267,7 +267,7 @@ TEST_CASE("Const - if/else split initialization of a const is allowed", "[mut][c
 
 TEST_CASE("Mut - reassigning a mut local is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 x = 0;
             x = 1;
             x += 2;
@@ -280,7 +280,7 @@ TEST_CASE("Mut - reassigning a mut local is allowed", "[mut][semantic]") {
 
 TEST_CASE("Mut - reassigning a mut parameter is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
-        i32 f(mut i32 n) {
+        fn f(mut i32 n) -> i32 {
             n = n + 1;
             return n;
         }
@@ -293,7 +293,7 @@ TEST_CASE("Mut - a mut method may write a mut field outside the ctor", "[mut][se
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc() mut { this.n = this.n + 1; }
+            fn inc() mut { this.n = this.n + 1; }
         }
     )");
     REQUIRE_FALSE(result.hadError);
@@ -305,7 +305,7 @@ TEST_CASE("Mut - a non-mut method may not write a field", "[mut][semantic]") {
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc() { this.n = this.n + 1; }
+            fn inc() { this.n = this.n + 1; }
         }
     )");
     REQUIRE(result.hadError);
@@ -330,7 +330,7 @@ TEST_CASE("Const - assigning a const field via this in the ctor is allowed", "[m
 TEST_CASE("Const - -- on a const local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x = 5;
             x--;
             return x;
@@ -344,7 +344,7 @@ TEST_CASE("Const - reassigning a const value-object variable is an error", "[mut
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point a(1);
             Point b(2);
             a = b;
@@ -359,7 +359,7 @@ TEST_CASE("Const - rebinding a const reference local is an error", "[mut][const]
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point& a = new Point(1);
             Point& b = new Point(2);
             a = b;
@@ -373,7 +373,7 @@ TEST_CASE("Const - rebinding a const reference local is an error", "[mut][const]
 TEST_CASE("Mut - rebinding a mut reference local is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Point& a = new Point(1);
             Point& b = new Point(2);
             a = b;
@@ -386,7 +386,7 @@ TEST_CASE("Mut - rebinding a mut reference local is allowed", "[mut][semantic]")
 TEST_CASE("Mut - writing a mut field through a mut reference is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
         class Counter { mut i32 n; Counter() { this.n = 0; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Counter& c = new Counter();
             c.n = 9;
             return 0;
@@ -401,7 +401,7 @@ TEST_CASE("Const - writing a mut field through a const object binding is an erro
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point p(1);
             p.x = 5;
             return p.x;
@@ -414,7 +414,7 @@ TEST_CASE("Const - writing a mut field through a const object binding is an erro
 TEST_CASE("Mut - writing a mut field through a mut object binding is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Point p(1);
             p.x = 5;
             return p.x;
@@ -426,7 +426,7 @@ TEST_CASE("Mut - writing a mut field through a mut object binding is allowed", "
 // Array/pointer *element* writes are not gated by `mut` — only the binding is.
 TEST_CASE("Const - array element write does not require mut", "[mut][const][semantic]") {
     auto result = analyzeString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32[4] a;
             a[0] = 5;
             a[1] = 7;
@@ -439,7 +439,7 @@ TEST_CASE("Const - array element write does not require mut", "[mut][const][sema
 TEST_CASE("Const - reassigning a const static local is an error", "[mut][const][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        i32 tick() {
+        fn tick() -> i32 {
             static i32 n = 0;
             n = n + 1;
             return n;
@@ -451,7 +451,7 @@ TEST_CASE("Const - reassigning a const static local is an error", "[mut][const][
 
 TEST_CASE("Mut - a mut static local can be reassigned", "[mut][semantic]") {
     auto result = analyzeString(R"(
-        i32 tick() {
+        fn tick() -> i32 {
             static mut i32 n = 0;
             n = n + 1;
             return n;
@@ -468,7 +468,7 @@ TEST_CASE("Const - writing a field through a const reference local is an error",
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point& p = new Point(1);
             p.x = 5;
             return 0;
@@ -482,7 +482,7 @@ TEST_CASE("Cast - coercing a const reference into a mut binding warns", "[mut][c
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point& b = new Point(1);
             mut Point& a = b;
             return 0;
@@ -496,7 +496,7 @@ TEST_CASE("Cast - an explicit 'as mut T' silences the const→mut warning", "[mu
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             Point& b = new Point(1);
             mut Point& a = b as mut Point&;
             return 0;
@@ -510,7 +510,7 @@ TEST_CASE("Cast - initialising a mut ref from new (owned) does not warn", "[mut]
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Point& a = new Point(1);
             return 0;
         }
@@ -523,8 +523,8 @@ TEST_CASE("Cast - passing a const reference to a mut ref parameter warns", "[mut
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        void mutate(mut Point& p) { p.x = 1; }
-        i32 main() {
+        fn mutate(mut Point& p) { p.x = 1; }
+        fn main() -> i32 {
             Point& b = new Point(1);
             mutate(b);
             return 0;
@@ -538,8 +538,8 @@ TEST_CASE("Cast - passing a mut reference to a mut ref parameter does not warn",
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        void mutate(mut Point& p) { p.x = 1; }
-        i32 main() {
+        fn mutate(mut Point& p) { p.x = 1; }
+        fn main() -> i32 {
             mut Point& b = new Point(1);
             mutate(b);
             return 0;
@@ -553,7 +553,7 @@ TEST_CASE("Cast - rebinding a mut ref local from a const ref warns", "[mut][cast
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Point& a = new Point(1);
             Point& b = new Point(2);
             a = b;
@@ -568,8 +568,8 @@ TEST_CASE("Cast - passing a mut ref to a read-only parameter is silent", "[mut][
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        i32 readX(Point& p) { return p.x; }
-        i32 main() {
+        fn readX(Point& p) -> i32 { return p.x; }
+        fn main() -> i32 {
             mut Point& b = new Point(1);
             return readX(b);
         }
@@ -582,7 +582,7 @@ TEST_CASE("Mut - a mut ref parameter still may not be rebound", "[mut][semantic]
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }
-        void f(mut Point& p, Point& other) { p = other; }
+        fn f(mut Point& p, Point& other) { p = other; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("cannot rebind reference parameter"));
@@ -593,7 +593,7 @@ TEST_CASE("Const - nested field write through a fully-mut chain is allowed", "[m
     auto result = analyzeString(R"(
         class Inner { mut i32 x; Inner(i32 v) { this.x = v; } }
         class Box   { mut Inner& inner; Box(Inner& i) { this.inner = i; } }
-        i32 main() {
+        fn main() -> i32 {
             mut Box& o = new Box(new Inner(1));
             o.inner.x = 5;
             return 0;
@@ -607,7 +607,7 @@ TEST_CASE("Const - nested field write through a const root is an error", "[mut][
     auto result = analyzeString(R"(
         class Inner { mut i32 x; Inner(i32 v) { this.x = v; } }
         class Box   { mut Inner& inner; Box(Inner& i) { this.inner = i; } }
-        i32 main() {
+        fn main() -> i32 {
             Box& o = new Box(new Inner(1));
             o.inner.x = 5;
             return 0;
@@ -622,7 +622,7 @@ TEST_CASE("Const - nested field write through a const root is an error", "[mut][
 TEST_CASE("Const - static field write through a const instance is allowed", "[mut][const][semantic]") {
     auto result = analyzeString(R"(
         class Counter { static i32 total; }
-        i32 main() {
+        fn main() -> i32 {
             Counter c;
             c.total = 5;
             return Counter::total;
@@ -638,9 +638,9 @@ TEST_CASE("Mut - calling a mut method on a const object is an error", "[mut][con
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc() mut { this.n = this.n + 1; }
+            fn inc() mut { this.n = this.n + 1; }
         }
-        i32 main() {
+        fn main() -> i32 {
             Counter c;
             c.inc();
             return 0;
@@ -655,9 +655,9 @@ TEST_CASE("Mut - calling a mut method on a mut object is allowed", "[mut][semant
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc() mut { this.n = this.n + 1; }
+            fn inc() mut { this.n = this.n + 1; }
         }
-        i32 main() {
+        fn main() -> i32 {
             mut Counter c;
             c.inc();
             return 0;
@@ -672,9 +672,9 @@ TEST_CASE("Const - calling a non-mut method on a const object is allowed", "[mut
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            i32 get() { return this.n; }
+            fn get() -> i32 { return this.n; }
         }
-        i32 main() {
+        fn main() -> i32 {
             Counter c;
             return c.get();
         }
@@ -689,8 +689,8 @@ TEST_CASE("Mut - a non-mut method cannot call a mut method on this", "[mut][sema
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc() mut { this.n = this.n + 1; }
-            void tick() { this.inc(); }
+            fn inc() mut { this.n = this.n + 1; }
+            fn tick() { this.inc(); }
         }
     )");
     REQUIRE(result.hadError);
@@ -703,8 +703,8 @@ TEST_CASE("Mut - a mut method may call a mut method on this", "[mut][semantic]")
         class Counter {
             mut i32 n;
             Counter() { this.n = 0; }
-            void inc()  mut { this.n = this.n + 1; }
-            void tick() mut { this.inc(); }
+            fn inc()  mut { this.n = this.n + 1; }
+            fn tick() mut { this.inc(); }
         }
     )");
     REQUIRE_FALSE(result.hadError);
@@ -716,7 +716,7 @@ TEST_CASE("Mut - a mut method may call a mut method on this", "[mut][semantic]")
 
 TEST_CASE("Mut - a mutated loop lowers to alloca + store + arithmetic", "[mut][codegen]") {
     std::string ir = codegenString(R"(
-        i32 main() {
+        fn main() -> i32 {
             mut i32 total = 0;
             for (mut i32 i = 1; i <= 3; i++) {
                 total = total + i;
@@ -731,7 +731,7 @@ TEST_CASE("Mut - a mutated loop lowers to alloca + store + arithmetic", "[mut][c
 
 TEST_CASE("Const - single defining assignment lowers to a store", "[mut][const][codegen]") {
     std::string ir = codegenString(R"(
-        i32 main() {
+        fn main() -> i32 {
             i32 x;
             x = 7;
             return x;

@@ -2,7 +2,7 @@
 //
 // Wraps the standard process management functions from <stdlib.h>.
 
-extern void exit(i32 status);          // terminate the process with the given exit code
-extern void abort();                   // terminate the process abnormally
-extern ptr  getenv(ptr name);          // get the value of an environment variable; null if absent
-extern i32  system(ptr command);       // run a shell command; returns exit status
+extern exit(i32 status);          // terminate the process with the given exit code
+extern abort();                   // terminate the process abnormally
+extern getenv(ptr name) -> ptr;          // get the value of an environment variable; null if absent
+extern system(ptr command) -> i32;       // run a shell command; returns exit status

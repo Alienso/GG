@@ -6,7 +6,7 @@
 // ============================================================
 
 TEST_CASE("Array - parser produces VarDeclExpr with arraySize", "[array][parser]") {
-    Program program = parseStringRaw("void main() { i32[5] arr; }");
+    Program program = parseStringRaw("fn main() { i32[5] arr; }");
     REQUIRE(program.declarations.size() == 1);
     const auto& fn = asStmt<FunctionDeclStmt>(program.declarations[0]);
     REQUIRE(fn.body.body.size() == 1);
@@ -21,14 +21,14 @@ TEST_CASE("Array - parser produces VarDeclExpr with arraySize", "[array][parser]
 // ============================================================
 
 TEST_CASE("Array - semantic analysis passes for valid declaration", "[array][semantic]") {
-    SemanticResult result = analyzeString("void main() { i32[5] arr; }");
+    SemanticResult result = analyzeString("fn main() { i32[5] arr; }");
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Array - semantic: out-of-bounds constant index is an error", "[array][semantic]") {
     StderrCapture capture;
     SemanticResult result = analyzeString(
-        "void main() { i32[3] arr; arr[5] = 1; }"
+        "fn main() { i32[3] arr; arr[5] = 1; }"
     );
     REQUIRE(result.hadError);
     REQUIRE(capture.contains("out of bounds"));
@@ -36,14 +36,14 @@ TEST_CASE("Array - semantic: out-of-bounds constant index is an error", "[array]
 
 TEST_CASE("Array - semantic: in-bounds constant index is accepted", "[array][semantic]") {
     SemanticResult result = analyzeString(
-        "void main() { i32[3] arr; arr[2] = 1; }"
+        "fn main() { i32[3] arr; arr[2] = 1; }"
     );
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Array - semantic: non-integer index is an error", "[array][semantic]") {
     SemanticResult result = analyzeString(
-        "void main() { i32[3] arr; i32 x = arr[1]; }"
+        "fn main() { i32[3] arr; i32 x = arr[1]; }"
     );
     // 1 is a valid integer index — should pass
     REQUIRE_FALSE(result.hadError);
@@ -51,14 +51,14 @@ TEST_CASE("Array - semantic: non-integer index is an error", "[array][semantic]"
 
 TEST_CASE("Array - semantic: float index is an error", "[array][semantic]") {
     SemanticResult result = analyzeString(
-        "void main() { f64[3] arr; f64 x = arr[1]; }"
+        "fn main() { f64[3] arr; f64 x = arr[1]; }"
     );
     REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("Array - semantic: subscript on non-array is an error", "[array][semantic]") {
     SemanticResult result = analyzeString(
-        "void main() { i32 x = 0; i32 y = x[0]; }"
+        "fn main() { i32 x = 0; i32 y = x[0]; }"
     );
     REQUIRE(result.hadError);
 }
@@ -68,18 +68,18 @@ TEST_CASE("Array - semantic: subscript on non-array is an error", "[array][seman
 // ============================================================
 
 TEST_CASE("Array - codegen: alloca emitted for array declaration", "[array][codegen]") {
-    std::string ir = codegenString("void main() { i32[5] arr; }");
+    std::string ir = codegenString("fn main() { i32[5] arr; }");
     REQUIRE(ir.find("alloca [5 x i32]") != std::string::npos);
 }
 
 TEST_CASE("Array - codegen: zero-initialiser emitted", "[array][codegen]") {
-    std::string ir = codegenString("void main() { i32[5] arr; }");
+    std::string ir = codegenString("fn main() { i32[5] arr; }");
     REQUIRE(ir.find("zeroinitializer") != std::string::npos);
 }
 
 TEST_CASE("Array - codegen: getelementptr emitted on element access", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() { i32[5] arr; i32 x = arr[2]; }"
+        "fn main() { i32[5] arr; i32 x = arr[2]; }"
     );
     REQUIRE(ir.find("getelementptr [5 x i32]") != std::string::npos);
     REQUIRE(ir.find("load i32") != std::string::npos);
@@ -87,7 +87,7 @@ TEST_CASE("Array - codegen: getelementptr emitted on element access", "[array][c
 
 TEST_CASE("Array - codegen: store emitted on element assignment", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() { i32[5] arr; arr[2] = 42; }"
+        "fn main() { i32[5] arr; arr[2] = 42; }"
     );
     REQUIRE(ir.find("getelementptr [5 x i32]") != std::string::npos);
     REQUIRE(ir.find("store i32 42") != std::string::npos);
@@ -95,7 +95,7 @@ TEST_CASE("Array - codegen: store emitted on element assignment", "[array][codeg
 
 TEST_CASE("Array - codegen: bounds check emitted by default", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() { i32[5] arr; arr[2] = 1; }"
+        "fn main() { i32[5] arr; arr[2] = 1; }"
     );
     REQUIRE(ir.find("icmp ult i64") != std::string::npos);
     REQUIRE(ir.find("@abort") != std::string::npos);
@@ -106,7 +106,7 @@ TEST_CASE("Array - codegen: no bounds check with --no-bounds-check", "[array][co
     CompilerOptions opts;
     opts.boundsCheck = false;
     std::string ir = codegenString(
-        "void main() { i32[5] arr; arr[2] = 1; }",
+        "fn main() { i32[5] arr; arr[2] = 1; }",
         opts
     );
     REQUIRE(ir.find("icmp ult") == std::string::npos);
@@ -115,7 +115,7 @@ TEST_CASE("Array - codegen: no bounds check with --no-bounds-check", "[array][co
 
 TEST_CASE("Array - codegen: multiple element types", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() {\n"
+        "fn main() {\n"
         "    f64[4] floats;\n"
         "    floats[0] = 3.14;\n"
         "    bool[2] flags;\n"
@@ -128,7 +128,7 @@ TEST_CASE("Array - codegen: multiple element types", "[array][codegen]") {
 
 TEST_CASE("Array - codegen: variable index access", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() {\n"
+        "fn main() {\n"
         "    i32[10] arr;\n"
         "    i32 i = 3;\n"
         "    arr[i] = 99;\n"
@@ -141,7 +141,7 @@ TEST_CASE("Array - codegen: variable index access", "[array][codegen]") {
 
 TEST_CASE("Array - codegen: abort is auto-declared when bounds checks are on", "[array][codegen]") {
     std::string ir = codegenString(
-        "void main() { i32[3] arr; arr[0] = 1; }"
+        "fn main() { i32[3] arr; arr[0] = 1; }"
     );
     REQUIRE(ir.find("declare void @abort()") != std::string::npos);
 }
@@ -149,8 +149,8 @@ TEST_CASE("Array - codegen: abort is auto-declared when bounds checks are on", "
 TEST_CASE("Array - codegen: abort not duplicated when process.gg already declares it", "[array][codegen]") {
     // Inline both abort declaration and array access; @abort should appear exactly once in declares
     std::string ir = codegenString(
-        "extern void abort();\n"
-        "void main() { i32[3] arr; arr[0] = 1; }"
+        "extern abort();\n"
+        "fn main() { i32[3] arr; arr[0] = 1; }"
     );
     size_t first  = ir.find("declare void @abort()");
     size_t second = ir.find("declare void @abort()", first + 1);

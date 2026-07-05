@@ -46,26 +46,23 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
         if (toks[i].type == TokenType::ENUM && toks[i + 1].type == TokenType::IDENTIFIER)
             classNames.insert(toks[i + 1].lexeme);
     }
-    // Register generic function template names ( "<type|id> name < ... > (" )
-    // so call sites are recognised regardless of declaration order.
-    for (size_t i = 0; i + 2 < toks.size(); ++i) {
-        bool startsType = toks[i].type == TokenType::IDENTIFIER || isTypeKeyword(toks[i].type);
-        if (!startsType) continue;
+    // Register generic function template names so call sites are recognised regardless of
+    // declaration order. Every generic function is `fn name < ... > ( ... )` — the name
+    // follows `fn` directly and is immediately followed by '<'.
+    for (size_t i = 0; i + 3 < toks.size(); ++i) {
+        if (toks[i].type != TokenType::FN) continue;
         size_t nameIdx = i + 1;
-        if (nameIdx < toks.size() && toks[nameIdx].type == TokenType::AMPERSAND) nameIdx++;  // `T&` return
-        if (nameIdx + 1 < toks.size()
-            && toks[nameIdx].type == TokenType::IDENTIFIER
-            && toks[nameIdx + 1].type == TokenType::LESS) {
-            size_t j = nameIdx + 2; int depth = 1;
-            while (j < toks.size() && depth > 0) {
-                if (toks[j].type == TokenType::LESS)             depth++;
-                else if (toks[j].type == TokenType::GREATER)     depth--;
-                else if (toks[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
-                j++;
-            }
-            if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN)
-                gen_->funcNames.insert(toks[nameIdx].lexeme);
+        if (toks[nameIdx].type != TokenType::IDENTIFIER || toks[nameIdx + 1].type != TokenType::LESS)
+            continue;
+        size_t j = nameIdx + 2; int depth = 1;
+        while (j < toks.size() && depth > 0) {
+            if (toks[j].type == TokenType::LESS)             depth++;
+            else if (toks[j].type == TokenType::GREATER)     depth--;
+            else if (toks[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
+            j++;
         }
+        if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN)
+            gen_->funcNames.insert(toks[nameIdx].lexeme);
     }
 }
 
@@ -95,30 +92,32 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
 // ============================================================
 
 bool Parser::tryCaptureFunctionTemplate() {
-    // Return type: one type/type-parameter token, optionally followed by '&' (a
-    // reference return such as `T&`). The name then precedes the '<' type-param list.
-    if (!(isTypeName() || peek().type == TokenType::IDENTIFIER)) return false;
-    size_t nameIdx = current + 1;
-    if (nameIdx < tokens.size() && tokens[nameIdx].type == TokenType::AMPERSAND) nameIdx++;
-    if (nameIdx + 1 >= tokens.size()
-        || tokens[nameIdx].type != TokenType::IDENTIFIER
-        || tokens[nameIdx + 1].type != TokenType::LESS)
+    // Unified generic function: `fn name < params > ( args ) [mut] [-> RetType [alias]] { body }`.
+    // The name follows `fn` directly and precedes the '<' type-parameter list.
+    if (peek().type != TokenType::FN) return false;
+    size_t s = current + 1;   // first token after `fn`
+    if (s + 1 >= tokens.size()
+        || tokens[s].type != TokenType::IDENTIFIER
+        || tokens[s + 1].type != TokenType::LESS)
         return false;
+    size_t nameIdx = s;
 
     // Collect type-parameter names (and optional `: Trait + Trait` bounds) between
     // '<' and '>'; verify the decl continues with '('.
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;
-    size_t j = scanTypeParamList(nameIdx + 2, typeParams, bounds);
+    size_t j = scanTypeParamList(s + 2, typeParams, bounds);
     if (j == 0 || tokens[j].type != TokenType::GREATER) return false;
     size_t afterGt = j + 1;
     if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_PAREN) return false;
     if (typeParams.empty()) return false;
 
-    // Capture: return-type token(s), name, then the parameter list and body verbatim.
+    // Capture with the `<...>` list stripped so the monomorphized re-parse sees an ordinary
+    // declaration: `fn`, the name, the parameter list, then everything up to the body
+    // (`[mut] [-> RetType [alias]]`, whose return type may reference a type parameter).
     std::vector<Token> captured;
-    for (size_t t = current; t < nameIdx; ++t) captured.push_back(tokens[t]);  // retType (+ '&')
-    captured.push_back(tokens[nameIdx]);                                        // function name
+    captured.push_back(tokens[current]);   // `fn`
+    captured.push_back(tokens[nameIdx]);   // function name
 
     size_t k = afterGt;
     int parenDepth = 0;
@@ -128,6 +127,12 @@ bool Parser::tryCaptureFunctionTemplate() {
         captured.push_back(tokens[k]);
         ++k;
     } while (k < tokens.size() && parenDepth > 0);
+
+    // Capture any `mut` and/or `-> RetType alias` between the ')' and the body.
+    while (k < tokens.size() && tokens[k].type != TokenType::LEFT_BRACE) {
+        captured.push_back(tokens[k]);
+        ++k;
+    }
 
     if (k >= tokens.size() || tokens[k].type != TokenType::LEFT_BRACE) return false;
     int braceDepth = 0;
@@ -538,43 +543,66 @@ Stmt Parser::parseDeclaration() {
         return parseImplDecl();
     }
 
-    // Function decl: typeName IDENTIFIER ( ...
-    // Exception: if we are inside a function body and the return type is a class
-    // name (an IDENTIFIER in classNames_), then "ClassName varName(args)" is a
-    // constructor call (VarDecl with ctor initializer), not a function decl.
-    // Keyword-typed patterns like "void inner() { ... }" are always function decls.
-    size_t funcSpan = typeSpanAt(current);
-    if (funcSpan > 0
-        && current + funcSpan + 1 < tokens.size()
-        && tokens[current + funcSpan].type == TokenType::IDENTIFIER
-        && tokens[current + funcSpan + 1].type == TokenType::LEFT_PAREN
-        && !(insideFunction
-             && peek().type == TokenType::IDENTIFIER
-             && (classNames.count(peek().lexeme) || gen_->classNames.count(peek().lexeme)))) {
-        Token returnType = consumeType();
-        Token name       = advance();
-        return parseFunctionDecl(returnType, name);
+    // Every function declaration begins with `fn`.
+    if (match({ TokenType::FN })) {
+        return parseFnDeclaration();
     }
     return parseStatement();
 }
 
-Stmt Parser::parseExternFuncDecl(const Token& keyword) {
-    if (!isTypeName())
-        throw error(peek(), "expected return type after 'extern'");
-    Token returnType = advance();
-    Token name       = consume(TokenType::IDENTIFIER, "expected function name after return type");
+// After the `fn` keyword: a free function `name(params) [-> RetType [alias]] { body }`.
+// No arrow ⇒ void return. An alias names the result (required for object-value returns).
+Stmt Parser::parseFnDeclaration() {
+    Token name = consume(TokenType::IDENTIFIER, "expected function name after 'fn'");
+    std::vector<ParamDecl> params = parseParamList();
+    bool        hasAlias = false;
+    std::string alias;
+    Token retType = parseReturnSuffix(hasAlias, alias);
+    consume(TokenType::LEFT_BRACE, "expected '{' before function body");
+    bool saved = insideFunction;
+    insideFunction = true;
+    BlockStmt body = parseBlockBody();
+    insideFunction = saved;
+    return makeStmt(FunctionDeclStmt{ retType, name, std::move(params), std::move(body),
+                                      hasAlias, alias });
+}
 
+Stmt Parser::parseExternFuncDecl(const Token& keyword) {
+    Token name = consume(TokenType::IDENTIFIER, "expected function name after 'extern'");
+    std::vector<ParamDecl> params = parseParamList();
+    bool        hasAlias = false;
+    std::string alias;
+    Token returnType = parseReturnSuffix(hasAlias, alias);
+    if (hasAlias) throw error(name, "extern functions cannot declare a return alias");
+    consume(TokenType::SEMICOLON, "expected ';' after extern declaration");
+    return makeStmt(ExternFuncDeclStmt{ keyword, returnType, name, std::move(params) });
+}
+
+// `(param, ...)` — the parenthesised parameter list.
+std::vector<ParamDecl> Parser::parseParamList() {
     consume(TokenType::LEFT_PAREN, "expected '(' after function name");
     std::vector<ParamDecl> params;
     if (!check(TokenType::RIGHT_PAREN)) {
-        do {
-            params.push_back(parseParam());
-        } while (match({ TokenType::COMMA }));
+        do { params.push_back(parseParam()); } while (match({ TokenType::COMMA }));
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
-    consume(TokenType::SEMICOLON,   "expected ';' after extern declaration");
+    return params;
+}
 
-    return makeStmt(ExternFuncDeclStmt{ keyword, returnType, name, std::move(params) });
+// Optional `-> RetType [alias]`. Returns the return type token — a synthesized `void`
+// token when there is no arrow — and sets hasAlias/aliasName.
+Token Parser::parseReturnSuffix(bool& hasAlias, std::string& aliasName) {
+    hasAlias = false;
+    if (match({ TokenType::ARROW })) {
+        if (!isTypeName()) throw error(peek(), "expected return type after '->'");
+        Token retType = consumeType();
+        if (check(TokenType::IDENTIFIER)) {         // optional return alias
+            hasAlias  = true;
+            aliasName = advance().lexeme;
+        }
+        return retType;
+    }
+    return Token{ TokenType::VOID, "void", previous().line };  // no arrow ⇒ void
 }
 
 Stmt Parser::parseImportStmt(const Token& keyword) {
@@ -591,24 +619,6 @@ ParamDecl Parser::parseParam() {
     return ParamDecl{ paramType, paramName, isMut };
 }
 
-Stmt Parser::parseFunctionDecl(const Token& returnType, const Token& name) {
-    consume(TokenType::LEFT_PAREN, "expected '(' after function name");
-
-    std::vector<ParamDecl> params;
-    if (!check(TokenType::RIGHT_PAREN)) {
-        do {
-            params.push_back(parseParam());
-        } while (match({ TokenType::COMMA }));
-    }
-    consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
-    consume(TokenType::LEFT_BRACE,  "expected '{' before function body");
-
-    bool savedInsideFunction = insideFunction;
-    insideFunction = true;
-    BlockStmt body = parseBlockBody();
-    insideFunction = savedInsideFunction;
-    return makeStmt(FunctionDeclStmt{ returnType, name, std::move(params), std::move(body) });
-}
 
 Stmt Parser::parseClassDecl() {
     Token name = consume(TokenType::IDENTIFIER, "expected class name after 'class'");
@@ -622,35 +632,40 @@ Stmt Parser::parseClassDecl() {
     return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
 }
 
-// One method inside a trait or impl body: `RetType name(params) [mut] (';' | '{ body }')`.
-// In a trait, `bodyOptional` is true and a `;` yields a required (bodyless) method.
+// One method inside a trait or impl body, `fn`-prefixed and unified:
+// `fn name(params) [mut] [-> RetType [alias]] (';' | '{ body }')`. In a trait,
+// `bodyOptional` is true and a `;` yields a required (bodyless) method.
 MethodDecl Parser::parseTraitMethod(bool bodyOptional) {
-    if (!isTypeName()) throw error(peek(), "expected method return type");
-    Token retType = consumeType();
-    Token mname   = consume(TokenType::IDENTIFIER, "expected method name");
-    consume(TokenType::LEFT_PAREN, "expected '(' after method name");
-    std::vector<ParamDecl> params;
-    if (!check(TokenType::RIGHT_PAREN)) {
-        do { params.push_back(parseParam()); } while (match({ TokenType::COMMA }));
-    }
-    consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
+    consume(TokenType::FN, "expected 'fn' before method");
+    // Unified: `fn name(params) [mut] [-> RetType [alias]] (';' | '{ }')`.
+    Token mname = consume(TokenType::IDENTIFIER, "expected method name after 'fn'");
+    std::vector<ParamDecl> params = parseParamList();
     bool methodMut = match({ TokenType::MUT });
-
+    bool        hasAlias = false;
+    std::string alias;
+    Token retType = parseReturnSuffix(hasAlias, alias);
     bool      hasBody = true;
     BlockStmt body;
-    if (bodyOptional && match({ TokenType::SEMICOLON })) {
-        hasBody = false;   // required (bodyless) trait method
-    } else {
-        consume(TokenType::LEFT_BRACE, bodyOptional ? "expected '{' or ';'" : "expected '{' before method body");
-        bool saved = insideFunction;
-        insideFunction = true;
-        body = parseBlockBody();
-        insideFunction = saved;
-    }
+    parseTraitMethodBody(bodyOptional, hasBody, body);
     return MethodDecl{
         /*isPublic=*/true, /*isConstructor=*/false, /*isDestructor=*/false, /*isStatic=*/false,
-        /*isMut=*/methodMut, hasBody, retType, mname, std::move(params), std::move(body)
+        /*isMut=*/methodMut, hasBody, retType, mname, std::move(params), std::move(body),
+        hasAlias, alias
     };
+}
+
+// Parse the tail of a trait/impl method: a `;` (bodyless, only when bodyOptional) or a
+// `{ body }`. Sets hasBody/body accordingly.
+void Parser::parseTraitMethodBody(bool bodyOptional, bool& hasBody, BlockStmt& body) {
+    if (bodyOptional && match({ TokenType::SEMICOLON })) {
+        hasBody = false;   // required (bodyless) trait method
+        return;
+    }
+    consume(TokenType::LEFT_BRACE, bodyOptional ? "expected '{' or ';'" : "expected '{' before method body");
+    bool saved = insideFunction;
+    insideFunction = true;
+    body = parseBlockBody();
+    insideFunction = saved;
 }
 
 Stmt Parser::parseTraitDecl() {
@@ -716,9 +731,42 @@ void Parser::parseMemberList(const Token& name,
                              bool allowDestructor,
                              bool isEnum) {
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
-        // Members are public by default; 'private' opts out. `static` marks a
-        // class-level field; `mut` marks a reassignable (non-const) field. All
-        // three may appear in any order.
+        // ---- Method: `fn [static] [private] ...` (the `fn` leads; modifiers follow) ----
+        if (match({ TokenType::FN })) {
+            bool mPublic = true;
+            bool mStatic = false;
+            for (;;) {
+                if (match({ TokenType::PRIVATE })) { mPublic = false; continue; }
+                if (match({ TokenType::STATIC  })) { mStatic = true;  continue; }
+                break;
+            }
+            // Unified method: `fn name(params) [mut] [-> RetType [alias]] { }`.
+            Token mname = consume(TokenType::IDENTIFIER, "expected method name after 'fn'");
+            std::vector<ParamDecl> params = parseParamList();
+            bool methodMut = match({ TokenType::MUT });
+            if (methodMut && mStatic)
+                throw error(mname, "static methods cannot be 'mut' (there is no implicit 'this')");
+            if (methodMut && isEnum)
+                throw error(mname, "enum methods cannot be 'mut' — enums are immutable");
+            bool        hasAlias = false;
+            std::string alias;
+            Token retType = parseReturnSuffix(hasAlias, alias);
+            consume(TokenType::LEFT_BRACE, "expected '{' before method body");
+            bool savedIF = insideFunction;
+            insideFunction = true;
+            BlockStmt body = parseBlockBody();
+            insideFunction = savedIF;
+            methods.push_back(MethodDecl{
+                mPublic, /*isConstructor=*/false, /*isDestructor=*/false, mStatic,
+                /*isMut=*/methodMut, /*hasBody=*/true, retType, mname,
+                std::move(params), std::move(body), hasAlias, alias
+            });
+            continue;
+        }
+
+        // ---- Non-method members: fields, constructors, destructors ----
+        // Public by default; 'private' opts out. `static` marks a class-level field; `mut`
+        // marks a reassignable field. All three may appear in any order.
         bool isPublic = true;
         bool isStatic = false;
         bool isMut    = false;
@@ -786,52 +834,25 @@ void Parser::parseMemberList(const Token& name,
             continue;
         }
 
-        // Regular method or field: typeName[&] IDENTIFIER
-        if (!isTypeName()) throw error(peek(), "expected type name for class member");
+        // Field: `[modifiers] Type[&] name [= const];`. A '(' here means a method was
+        // written without the required `fn` keyword.
+        if (!isTypeName()) throw error(peek(), "expected 'fn', a field, or a constructor");
         Token memberType = consumeType();
         Token memberName = consume(TokenType::IDENTIFIER, "expected member name");
 
-        if (check(TokenType::LEFT_PAREN)) {
-            // Method (static methods carry no implicit `this`).
-            if (isMut)
-                throw error(memberName, "'mut' is not allowed on methods");
-            consume(TokenType::LEFT_PAREN, "");
-            std::vector<ParamDecl> params;
-            if (!check(TokenType::RIGHT_PAREN)) {
-                do {
-                    params.push_back(parseParam());
-                } while (match({ TokenType::COMMA }));
-            }
-            consume(TokenType::RIGHT_PAREN, "expected ')' after method parameters");
-            // Trailing `mut` marks a method that may mutate `this` (Rust-like &mut self).
-            bool methodMut = match({ TokenType::MUT });
-            if (methodMut && isStatic)
-                throw error(memberName, "static methods cannot be 'mut' (there is no implicit 'this')");
-            if (methodMut && isEnum)
-                throw error(memberName, "enum methods cannot be 'mut' — enums are immutable");
-            consume(TokenType::LEFT_BRACE,  "expected '{' before method body");
-            bool savedIF2 = insideFunction;
-            insideFunction = true;
-            BlockStmt body = parseBlockBody();
-            insideFunction = savedIF2;
+        if (check(TokenType::LEFT_PAREN))
+            throw error(memberName, "methods must be declared with 'fn' (e.g. 'fn "
+                        + memberType.lexeme + " " + memberName.lexeme + "(...)')");
 
-            methods.push_back(MethodDecl{
-                isPublic, /*isConstructor=*/false, /*isDestructor=*/false, isStatic,
-                /*isMut=*/methodMut, /*hasBody=*/true,
-                memberType, memberName,
-                std::move(params), std::move(body)
-            });
-        } else {
-            // Field — a static field may carry a constant initializer.
-            std::unique_ptr<Expr> initializer;
-            if (isStatic && match({ TokenType::EQUAL })) {
-                initializer = box(parseExpression());
-            }
-            consume(TokenType::SEMICOLON, "expected ';' after field declaration");
-            fields.push_back(FieldDecl{
-                isPublic, isStatic, isMut, memberType, memberName, std::move(initializer)
-            });
+        // Field — a static field may carry a constant initializer.
+        std::unique_ptr<Expr> initializer;
+        if (isStatic && match({ TokenType::EQUAL })) {
+            initializer = box(parseExpression());
         }
+        consume(TokenType::SEMICOLON, "expected ';' after field declaration");
+        fields.push_back(FieldDecl{
+            isPublic, isStatic, isMut, memberType, memberName, std::move(initializer)
+        });
     }
 }
 

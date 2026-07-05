@@ -2,7 +2,7 @@
 class Box<T> {
     T value;
     Box(T v) { this.value = v; }
-    T get()  { return this.value; }
+    fn get() -> T  { return this.value; }
 }
 
-T maxT<T>(T a, T b) { if (a > b) { return a; } return b; }
+fn maxT<T>(T a, T b) -> T { if (a > b) { return a; } return b; }

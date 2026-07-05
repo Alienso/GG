@@ -11,10 +11,10 @@ class Counter {
         Counter::total = Counter::total + 1;   // bump the shared counter
     }
 
-    i32 getTotal() { return Counter::total; }
+    fn getTotal() -> i32 { return Counter::total; }
 }
 
-i32 main() {
+fn main() -> i32 {
     // Initial value comes from the pre-main initializer.
     if (Counter::total != 10) { return 1; }
 

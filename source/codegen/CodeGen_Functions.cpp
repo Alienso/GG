@@ -212,6 +212,47 @@ void CodeGen::emitGlobalCtors() {
         + entries + "]");
 }
 
+// True if the return-type token names a class *value* (sret alias) rather than a
+// primitive / reference / ptr / enum (ordinary returned-local alias).
+bool CodeGen::isObjectReturnType(const Token& typeToken) const {
+    return typeToken.type == TokenType::IDENTIFIER
+        && cgClasses_.count(typeToken.lexeme) > 0
+        && cgEnumNames_.count(typeToken.lexeme) == 0
+        && isError(decodeSynthesizedType(typeToken));   // exclude "Class&" / "ptr<...>"
+}
+
+// Allocate + zero/null-init an ordinary returned-local alias (primitive or reference).
+void CodeGen::setupReturnAliasLocal(const std::string& aliasName, const Type& aliasType) {
+    std::string irt     = irTypeName(aliasType);
+    std::string ptrName = freshAllocaName(aliasName);
+    emitAlloca(ptrName, irt);
+    allocaMap[aliasName]  = ptrName;
+    varTypeMap[aliasName] = aliasType;
+    currentReturnAliasLocal_ = aliasName;
+    if (aliasType.kind == TypeKind::Reference) {
+        emitStore("ptr", "null", ptrName);                       // null until assigned
+        if (!dtorScopes_.empty())
+            dtorScopes_.back().push_back({ ptrName, aliasType.className, /*isReference=*/true });
+    } else {
+        emitStore(irt, isFloat(aliasType.kind) ? "0.0" : "0", ptrName);   // zero-init
+    }
+}
+
+// Return the current returned-local alias (bare `return;` / `return alias;` / fall-through):
+// load it, apply the +1 convention for references, run dtors, then `ret`.
+void CodeGen::emitReturnAlias() {
+    std::string ptr = allocaMap[currentReturnAliasLocal_];
+    Type        t   = currentReturnType;                 // = the alias's type
+    std::string val = emitLoad(irTypeName(t), ptr);
+    if (t.kind == TypeKind::Reference)
+        emit("call void @gg_retain(ptr " + val + ")");   // hand the caller a +1
+    flushTempReleases();
+    for (auto it = dtorScopes_.rbegin(); it != dtorScopes_.rend(); ++it)
+        emitDtorsForScope(*it);
+    emit("ret " + irTypeName(t) + " " + val);
+    if (currentBasicBlock) currentBasicBlock->terminated = true;
+}
+
 void CodeGen::genFunction(const FunctionDeclStmt& function) {
     // Reset per-function state
     tempCounter = 0; labelCounter = 0;
@@ -221,22 +262,30 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     dtorScopes_.clear();
     pendingTemps_.clear();
 
-    currentReturnType        = resolveReturnType(function.returnType);
-    std::string returnIrType = irTypeName(currentReturnType);
+    // An object return alias lowers to sret (void return, hidden slot pointer). A
+    // primitive/reference alias is an ordinary returned local. Everything else is a plain return.
+    bool sret       = function.hasReturnSlot && isObjectReturnType(function.returnType);
+    bool localAlias = function.hasReturnSlot && !sret;
+    currentFnHasReturnSlot_ = sret;
+    currentReturnAliasLocal_.clear();
+
+    Type logicalRet = sret ? makeObjectType(function.returnType.lexeme)
+                           : resolveReturnType(function.returnType);
+    currentReturnType        = sret ? Type{TypeKind::Void} : logicalRet;
+    std::string returnIrType = sret ? "void" : irTypeName(currentReturnType);
 
     std::vector<Type> paramTypes;
     std::string paramStr;
-    bool first = true;
+    if (sret) paramStr = "ptr %" + function.returnSlotName;  // sret slot first
     for (const auto& p : function.params) {
         Type pt = resolveParamType(p);
         paramTypes.push_back(pt);
-        if (!first) paramStr += ", ";
-        first = false;
+        if (!paramStr.empty()) paramStr += ", ";
         paramStr += paramIrType(pt) + " %" + p.name.lexeme;
     }
 
     // Overloaded free functions emit an overload-mangled symbol; others keep the plain name.
-    std::string emitName = overloadEmittedName(function.name.lexeme, paramTypes, currentReturnType);
+    std::string emitName = overloadEmittedName(function.name.lexeme, paramTypes, logicalRet);
     currentStaticPrefix_     = emitName;
 
     IRFunction irFunc;
@@ -246,7 +295,16 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
     currentBasicBlock = &currentFunction->blocks.back();
 
+    // Bind the slot name directly to the sret pointer and zero-init the object in place.
+    if (sret) {
+        allocaMap[function.returnSlotName]  = "%" + function.returnSlotName;
+        varTypeMap[function.returnSlotName] = logicalRet;
+        emit("store %" + function.returnType.lexeme + " zeroinitializer, ptr %"
+             + function.returnSlotName);
+    }
+
     spillParamsToAllocas(function.params);
+    if (localAlias) setupReturnAliasLocal(function.returnSlotName, logicalRet);
     emitFunctionBody(function.body, returnIrType);
 
     currentFunction = nullptr;
@@ -264,16 +322,30 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     currentClassName_ = className;
 
     bool isVoidLike = method.isConstructor || method.isDestructor;
-    currentReturnType        = isVoidLike ? Type{TypeKind::Void} : resolveReturnType(method.returnType);
-    std::string returnIrType = isVoidLike ? "void" : irTypeName(currentReturnType);
+    // An object return alias lowers to sret; a primitive/reference alias is a returned local.
+    bool sret       = method.hasReturnSlot && isObjectReturnType(method.returnType);
+    bool localAlias = method.hasReturnSlot && !sret;
+    currentFnHasReturnSlot_ = sret;
+    currentReturnAliasLocal_.clear();
+    Type logicalRet = sret       ? makeObjectType(method.returnType.lexeme)
+                    : isVoidLike ? Type{TypeKind::Void}
+                    : resolveReturnType(method.returnType);
+    currentReturnType        = sret ? Type{TypeKind::Void} : logicalRet;
+    std::string returnIrType = (isVoidLike || sret) ? "void" : irTypeName(currentReturnType);
 
     std::string base = method.isDestructor
         ? className + "_dtor"
         : className + "_" + method.name.lexeme;
 
-    // Static methods are class-level: no implicit `this`/`%self` parameter.
+    // Param order: sret slot (if any), then implicit `this`, then declared params. Static
+    // methods carry no `this`.
     std::vector<Type> paramTypes;
-    std::string paramStr = method.isStatic ? "" : "ptr %self";
+    std::string paramStr;
+    if (sret) paramStr = "ptr %" + method.returnSlotName;
+    if (!method.isStatic) {
+        if (!paramStr.empty()) paramStr += ", ";
+        paramStr += "ptr %self";
+    }
     for (const auto& p : method.params) {
         Type pt = resolveParamType(p);
         paramTypes.push_back(pt);
@@ -282,7 +354,7 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     }
 
     // Overloaded methods/constructors emit an overload-mangled symbol.
-    std::string mangledName = overloadEmittedName(base, paramTypes, currentReturnType);
+    std::string mangledName = overloadEmittedName(base, paramTypes, logicalRet);
     currentStaticPrefix_ = mangledName;
 
     IRFunction irFunc;
@@ -299,7 +371,16 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
                            : makeObjectType(className);
     }
 
+    // Bind the slot name to the sret pointer and zero-init the object in place.
+    if (sret) {
+        allocaMap[method.returnSlotName]  = "%" + method.returnSlotName;
+        varTypeMap[method.returnSlotName] = logicalRet;
+        emit("store %" + method.returnType.lexeme + " zeroinitializer, ptr %"
+             + method.returnSlotName);
+    }
+
     spillParamsToAllocas(method.params);
+    if (localAlias) setupReturnAliasLocal(method.returnSlotName, logicalRet);
     emitFunctionBody(method.body, returnIrType);
 
     currentFunction = nullptr;
@@ -323,6 +404,8 @@ void CodeGen::genDestructor(const ClassDeclStmt& classDecl) {
     dtorScopes_.clear();
     currentClassName_  = className;
     currentReturnType  = Type{TypeKind::Void};
+    currentFnHasReturnSlot_ = false;
+    currentReturnAliasLocal_.clear();
 
     IRFunction irFunc;
     irFunc.signature = "define void @" + className + "_dtor(ptr %self)";
@@ -465,9 +548,13 @@ void CodeGen::emitFunctionBody(const BlockStmt& body, const std::string& returnI
         if (stmtPtr) genStmt(*stmtPtr);
 
     if (currentBasicBlock && !currentBasicBlock->terminated) {
-        emitDtorsForScope(dtorScopes_.back());
-        emit(returnIrType == "void" ? "ret void" : "unreachable");
-        currentBasicBlock->terminated = true;
+        if (!currentReturnAliasLocal_.empty()) {
+            emitReturnAlias();   // fall-through returns the named alias local (runs dtors + ret)
+        } else {
+            emitDtorsForScope(dtorScopes_.back());
+            emit(returnIrType == "void" ? "ret void" : "unreachable");
+            currentBasicBlock->terminated = true;
+        }
     }
     dtorScopes_.pop_back();
 }

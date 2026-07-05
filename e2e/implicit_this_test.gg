@@ -8,7 +8,7 @@
 
 // Free function — must take priority over any same-named member (none here, but it
 // verifies a bare call resolves to the free function, not a phantom member).
-i32 dbl(i32 v) { return v * 2; }
+fn dbl(i32 v) -> i32 { return v * 2; }
 
 class Counter {
     mut i32 count;
@@ -19,15 +19,15 @@ class Counter {
         total = total + 1;        // bare static-field read + write
     }
 
-    void inc()      mut { count = count + 1; }   // bare read + write
-    void addN(i32 n) mut { count += n; }         // bare compound assign
-    void bump()     mut { count++; }             // bare ++
-    void incTwice() mut { inc(); inc(); }        // bare instance-method calls on this
-    i32  get()          { return count; }        // bare read
-    i32  doubledGet()   { return dbl(get()); }   // free fn (priority) + bare method call
+    fn inc()      mut { count = count + 1; }   // bare read + write
+    fn addN(i32 n) mut { count += n; }         // bare compound assign
+    fn bump()     mut { count++; }             // bare ++
+    fn incTwice() mut { inc(); inc(); }        // bare instance-method calls on this
+    fn get() -> i32          { return count; }        // bare read
+    fn doubledGet() -> i32   { return dbl(get()); }   // free fn (priority) + bare method call
 
-    static i32 getTotal() { return total; }      // bare static-field read
-    i32  viaStatic()      { return getTotal(); } // bare static-method call (this-less)
+    fn static getTotal() -> i32 { return total; }      // bare static-field read
+    fn viaStatic() -> i32      { return getTotal(); } // bare static-method call (this-less)
 }
 
 // Reference-field writes through implicit `this` (retain/release path).
@@ -35,11 +35,11 @@ class Node {
     i32       val;
     mut Node& next;
     Node(i32 x) { val = x; }
-    void link(mut Node& n) mut { next = n; }     // bare reference-field write
-    i32  nextVal()             { return next.val; } // bare ref-field read + member access
+    fn link(mut Node& n) mut { next = n; }     // bare reference-field write
+    fn nextVal() -> i32             { return next.val; } // bare ref-field read + member access
 }
 
-i32 main() {
+fn main() -> i32 {
     mut Counter a(10);
     a.inc();                       // 11
     a.addN(4);                     // 15

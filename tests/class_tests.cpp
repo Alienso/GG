@@ -41,7 +41,7 @@ TEST_CASE("Class - regular method is parsed as MethodDecl with isConstructor=fal
     auto prog = parseString(R"(
         class Counter {
             i32 value;
-            i32 get() { return this.value; }
+            fn get() -> i32 { return this.value; }
         }
     )");
     REQUIRE(prog.declarations.size() == 1);
@@ -66,7 +66,7 @@ TEST_CASE("Class - private member parses with isPublic=false", "[class][parser]"
 TEST_CASE("Class - field access parses to MemberAccessExpr", "[class][parser]") {
     auto prog = parseString(R"(
         class P { f32 x; }
-        f32 foo() {
+        fn foo() -> f32 {
             P p;
             return p.x;
         }
@@ -83,8 +83,8 @@ TEST_CASE("Class - field access parses to MemberAccessExpr", "[class][parser]") 
 
 TEST_CASE("Class - method call parses to MethodCallExpr", "[class][parser]") {
     auto prog = parseString(R"(
-        class C { i32 val() { return 0; } }
-        i32 main() {
+        class C { fn val() -> i32 { return 0; } }
+        fn main() -> i32 {
             C c;
             return c.val();
         }
@@ -98,7 +98,7 @@ TEST_CASE("Class - method call parses to MethodCallExpr", "[class][parser]") {
 TEST_CASE("Class - field assignment parses to MemberAssignExpr", "[class][parser]") {
     auto prog = parseString(R"(
         class P { f32 x; }
-        void foo() {
+        fn foo() {
             P p;
             p.x = 1.0;
         }
@@ -112,7 +112,7 @@ TEST_CASE("Class - field assignment parses to MemberAssignExpr", "[class][parser
 TEST_CASE("Class - constructor call syntax parses to VarDecl with CallExpr initializer", "[class][parser]") {
     auto prog = parseString(R"(
         class P { f32 x; P(f32 x) { this.x = x; } }
-        void main() {
+        fn main() {
             P p(1.0);
         }
     )");
@@ -140,11 +140,11 @@ TEST_CASE("Class - valid class with constructor and method passes", "[class][sem
                 this.x = x;
                 this.y = y;
             }
-            f32 sum() {
+            fn sum() -> f32 {
                 return this.x + this.y;
             }
         }
-        void main() {
+        fn main() {
             Point p(1.0, 2.0);
         }
     )");
@@ -155,7 +155,7 @@ TEST_CASE("Class - accessing undeclared member is an error", "[class][semantic]"
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Foo { i32 a; }
-        void main() {
+        fn main() {
             Foo f;
             i32 x = f.noSuchField;
         }
@@ -167,7 +167,7 @@ TEST_CASE("Class - accessing private field from outside class is a warning, not 
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Foo { private i32 secret; }
-        void main() {
+        fn main() {
             Foo f;
             i32 x = f.secret;
         }
@@ -180,7 +180,7 @@ TEST_CASE("Class - accessing private field from inside class is valid", "[class]
     auto result = analyzeString(R"(
         class Foo {
             private i32 secret;
-            i32 get() { return this.secret; }
+            fn get() -> i32 { return this.secret; }
         }
     )");
     REQUIRE_FALSE(result.hadError);
@@ -190,9 +190,9 @@ TEST_CASE("Class - calling private method from outside class is a warning, not a
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Foo {
-            private i32 hidden() { return 1; }
+            fn private hidden() -> i32 { return 1; }
         }
-        void main() {
+        fn main() {
             Foo f;
             i32 x = f.hidden();
         }
@@ -205,7 +205,7 @@ TEST_CASE("Class - omitting access modifier defaults to public", "[class][parser
     auto prog = parseString(R"(
         class Bar {
             i32 x;
-            i32 get() { return this.x; }
+            fn get() -> i32 { return this.x; }
         }
     )");
     const auto& cls = asStmt<ClassDeclStmt>(prog.declarations[0]);
@@ -220,7 +220,7 @@ TEST_CASE("Class - constructor argument count mismatch is an error", "[class][se
             f32 x;
             Vec(f32 x) { this.x = x; }
         }
-        void main() {
+        fn main() {
             Vec v(1.0, 2.0);
         }
     )");
@@ -232,9 +232,9 @@ TEST_CASE("Class - method argument count mismatch is an error", "[class][semanti
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Calc {
-            i32 add(i32 a, i32 b) { return a + b; }
+            fn add(i32 a, i32 b) -> i32 { return a + b; }
         }
-        void main() {
+        fn main() {
             Calc c;
             c.add(1);
         }
@@ -246,7 +246,7 @@ TEST_CASE("Class - method argument count mismatch is an error", "[class][semanti
 TEST_CASE("Class - 'this' outside class method is an error", "[class][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
-        void foo() { i32 x = this.y; }
+        fn foo() { i32 x = this.y; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("outside of a class"));
@@ -255,7 +255,7 @@ TEST_CASE("Class - 'this' outside class method is an error", "[class][semantic]"
 TEST_CASE("Class - zero-argument constructor call is valid when no constructor defined", "[class][semantic]") {
     auto result = analyzeString(R"(
         class Empty { i32 x; }
-        void main() { Empty e; }
+        fn main() { Empty e; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -264,7 +264,7 @@ TEST_CASE("Class - field type mismatch in assignment is an error", "[class][sema
     StderrCapture cap;
     auto result = analyzeString(R"(
         class P { mut i32 x; }
-        void main() {
+        fn main() {
             mut P p;
             p.x = "hello";
         }
@@ -291,7 +291,7 @@ TEST_CASE("Class - method emitted with mangled name and ptr self parameter", "[c
     std::string ir = codegenString(R"(
         class Counter {
             i32 value;
-            i32 get() { return this.value; }
+            fn get() -> i32 { return this.value; }
         }
     )");
     REQUIRE(ir.find("@Counter_get(ptr %self)") != std::string::npos);
@@ -310,7 +310,7 @@ TEST_CASE("Class - constructor emitted as void mangled function", "[class][codeg
 TEST_CASE("Class - stack alloca emitted for object variable", "[class][codegen]") {
     std::string ir = codegenString(R"(
         class Point { f32 x; f32 y; }
-        void main() { Point p; }
+        fn main() { Point p; }
     )");
     REQUIRE(ir.find("%p.addr = alloca %Point") != std::string::npos);
 }
@@ -318,7 +318,7 @@ TEST_CASE("Class - stack alloca emitted for object variable", "[class][codegen]"
 TEST_CASE("Class - zeroinitializer emitted for object variable", "[class][codegen]") {
     std::string ir = codegenString(R"(
         class Point { f32 x; f32 y; }
-        void main() { Point p; }
+        fn main() { Point p; }
     )");
     REQUIRE(ir.find("store %Point zeroinitializer, ptr %p.addr") != std::string::npos);
 }
@@ -330,7 +330,7 @@ TEST_CASE("Class - constructor call emitted after alloca + zeroinit", "[class][c
             f32 y;
             Point(f32 x, f32 y) { this.x = x; this.y = y; }
         }
-        void main() { Point p(1.0, 2.0); }
+        fn main() { Point p(1.0, 2.0); }
     )");
     REQUIRE(ir.find("call void @Point_Point(ptr %p.addr") != std::string::npos);
 }
@@ -338,7 +338,7 @@ TEST_CASE("Class - constructor call emitted after alloca + zeroinit", "[class][c
 TEST_CASE("Class - field read produces getelementptr + load", "[class][codegen]") {
     std::string ir = codegenString(R"(
         class Point { f32 x; f32 y; }
-        f32 getX(Point& p) {
+        fn getX(Point& p) -> f32 {
             return p.x;
         }
     )");
@@ -350,9 +350,9 @@ TEST_CASE("Class - method call emitted with self pointer as first argument", "[c
     std::string ir = codegenString(R"(
         class Counter {
             i32 value;
-            i32 get() { return this.value; }
+            fn get() -> i32 { return this.value; }
         }
-        i32 main() {
+        fn main() -> i32 {
             Counter c;
             return c.get();
         }
@@ -392,9 +392,9 @@ TEST_CASE("Destructor - class without destructor has no _dtor function in IR", "
     std::string ir = codegenString(R"(
         class Counter {
             i32 value;
-            i32 get() { return this.value; }
+            fn get() -> i32 { return this.value; }
         }
-        i32 main() {
+        fn main() -> i32 {
             Counter c;
             return c.get();
         }
@@ -408,7 +408,7 @@ TEST_CASE("Destructor - @ClassName_dtor function is emitted", "[class][destructo
             i32 value;
             ~Box() { }
         }
-        i32 main() {
+        fn main() -> i32 {
             Box b;
             return 0;
         }
@@ -422,7 +422,7 @@ TEST_CASE("Destructor - called at end of enclosing block", "[class][destructor][
             i32 value;
             ~Box() { }
         }
-        i32 main() {
+        fn main() -> i32 {
             Box b;
             return 0;
         }
@@ -441,7 +441,7 @@ TEST_CASE("Destructor - called before early return", "[class][destructor][codege
             i32 value;
             ~Box() { }
         }
-        i32 main() {
+        fn main() -> i32 {
             Box b;
             return 1;
         }
@@ -463,7 +463,7 @@ TEST_CASE("Destructor - multiple objects destroyed in reverse order", "[class][d
             i32 v;
             ~B() { }
         }
-        i32 main() {
+        fn main() -> i32 {
             A a;
             B b;
             return 0;
@@ -518,7 +518,7 @@ TEST_CASE("Destructor - parser: destructor with params produces no destructor in
 TEST_CASE("ObjectParam - a raw value-object parameter is rejected", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
         class Point { f32 x; f32 y; }
-        void use(Point p) { }
+        fn use(Point p) { }
     )");
     REQUIRE(result.hadError);   // must be declared 'Point&'
 }
@@ -526,7 +526,7 @@ TEST_CASE("ObjectParam - a raw value-object parameter is rejected", "[class][sem
 TEST_CASE("ObjectParam - a reference parameter is accepted", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
         class Point { mut f32 x; f32 y; }
-        void use(mut Point& p) { p.x = 1.0; }
+        fn use(mut Point& p) { p.x = 1.0; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -534,7 +534,7 @@ TEST_CASE("ObjectParam - a reference parameter is accepted", "[class][semantic][
 TEST_CASE("ObjectParam - a method with a raw object parameter is rejected", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
         class Point { f32 x; }
-        class Line { f32 len; void from(Point a) { this.len = a.x; } }
+        class Line { f32 len; fn from(Point a) { this.len = a.x; } }
     )");
     REQUIRE(result.hadError);
 }
@@ -542,15 +542,15 @@ TEST_CASE("ObjectParam - a method with a raw object parameter is rejected", "[cl
 TEST_CASE("ObjectParam - passing a raw value object as an argument is rejected", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
         class Point { f32 x; Point(f32 v) { this.x = v; } }
-        void use(Point& p) { }
-        void main() { Point p(1.0); use(p); }
+        fn use(Point& p) { }
+        fn main() { Point p(1.0); use(p); }
     )");
     REQUIRE(result.hadError);   // p is a value object; pass a reference instead
 }
 
 TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class][codegen][byref]") {
     std::string ir = codegenString(R"(
-        void use(mut i32 n) { n = n + 1; }
+        fn use(mut i32 n) { n = n + 1; }
     )");
     REQUIRE(ir.find("define void @use(i32 %n)") != std::string::npos);
     REQUIRE(ir.find("%n.addr = alloca i32")      != std::string::npos);
@@ -559,7 +559,7 @@ TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class
 
 TEST_CASE("ObjectParam - reassigning a basic-type parameter is still allowed", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
-        void use(mut i32 n) { n = 5; }
+        fn use(mut i32 n) { n = 5; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -573,7 +573,7 @@ TEST_CASE("ObjectParam - reassigning a basic-type parameter is still allowed", "
 TEST_CASE("Reference param - parses as a '<Class>&' type token", "[reference][parser]") {
     auto ast = parseString(R"(
         class Point { i32 x; }
-        void take(Point& p) { }
+        fn take(Point& p) { }
     )");
     REQUIRE(ast.declarations.size() == 2);
     const auto& fn = asStmt<FunctionDeclStmt>(ast.declarations[1]);
@@ -585,7 +585,7 @@ TEST_CASE("Reference param - parses as a '<Class>&' type token", "[reference][pa
 TEST_CASE("Reference param - type-checks without error", "[reference][semantic]") {
     auto result = analyzeString(R"(
         class Point { i32 x; }
-        void take(Point& p) { }
+        fn take(Point& p) { }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -593,7 +593,7 @@ TEST_CASE("Reference param - type-checks without error", "[reference][semantic]"
 TEST_CASE("Reference param - lowers to ptr in the signature", "[reference][codegen]") {
     std::string ir = codegenString(R"(
         class Point { i32 x; i32 y; }
-        void take(Point& p) { }
+        fn take(Point& p) { }
     )");
     REQUIRE(ir.find("define void @take(ptr %p)") != std::string::npos);
 }
@@ -603,7 +603,7 @@ TEST_CASE("Reference param - method taking a reference lowers to ptr", "[referen
         class Point { i32 x; }
         class Line {
             i32 n;
-            void use(Point& p) { }
+            fn use(Point& p) { }
         }
     )");
     REQUIRE(ir.find("define void @Line_use(ptr %self, ptr %p)") != std::string::npos);
@@ -611,7 +611,7 @@ TEST_CASE("Reference param - method taking a reference lowers to ptr", "[referen
 
 TEST_CASE("Reference param - '&' on a primitive type is rejected", "[reference][parser]") {
     StderrCapture cap;
-    auto ast = parseString("void f(i32& x) { }");
+    auto ast = parseString("fn f(i32& x) { }");
     REQUIRE(ast.declarations.empty());   // parse error clears the program
 }
 
@@ -622,7 +622,7 @@ TEST_CASE("Reference param - '&' on a primitive type is rejected", "[reference][
 TEST_CASE("New - parses to a NewExpr with class name and args", "[new][parser]") {
     auto ast = parseString(R"(
         class Point { i32 x; i32 y; Point(i32 a, i32 b){ this.x=a; this.y=b; } }
-        void main() { Point& p = new Point(1, 2); }
+        fn main() { Point& p = new Point(1, 2); }
     )");
     const auto& fn = asStmt<FunctionDeclStmt>(ast.declarations[1]);
     const auto& vd = asExpr<VarDeclExpr>(asStmt<ExprStmt>(*fn.body.body[0]).expression);
@@ -635,14 +635,14 @@ TEST_CASE("New - parses to a NewExpr with class name and args", "[new][parser]")
 
 TEST_CASE("New - 'new' on a non-class name is rejected at parse time", "[new][parser]") {
     StderrCapture cap;
-    auto ast = parseString("void main() { new Nope(); }");
+    auto ast = parseString("fn main() { new Nope(); }");
     REQUIRE(ast.declarations.empty());
 }
 
 TEST_CASE("New - 'Class& r = new Class(..)' type-checks", "[new][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& p = new Point(5); }
+        fn main() { Point& p = new Point(5); }
     )");
     REQUIRE_FALSE(r.hadError);
 }
@@ -651,7 +651,7 @@ TEST_CASE("New - assigning a mismatched reference class is an error", "[new][sem
     auto r = analyzeString(R"(
         class A { i32 x; A(i32 a){ this.x=a; } }
         class B { i32 y; B(i32 a){ this.y=a; } }
-        void main() { A& a = new B(1); }
+        fn main() { A& a = new B(1); }
     )");
     REQUIRE(r.hadError);
 }
@@ -659,7 +659,7 @@ TEST_CASE("New - assigning a mismatched reference class is an error", "[new][sem
 TEST_CASE("New - wrong constructor argument count is an error", "[new][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& p = new Point(1, 2); }
+        fn main() { Point& p = new Point(1, 2); }
     )");
     REQUIRE(r.hadError);
 }
@@ -667,7 +667,7 @@ TEST_CASE("New - wrong constructor argument count is an error", "[new][semantic]
 TEST_CASE("New - emits gg_alloc, sizeof, and the refcount runtime", "[new][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& p = new Point(5); }
+        fn main() { Point& p = new Point(5); }
     )");
     REQUIRE(ir.find("getelementptr %Point, ptr null, i32 1") != std::string::npos);  // sizeof
     REQUIRE(ir.find("call ptr @gg_alloc(")    != std::string::npos);
@@ -679,7 +679,7 @@ TEST_CASE("New - emits gg_alloc, sizeof, and the refcount runtime", "[new][codeg
 TEST_CASE("New - reference owner is released at scope exit", "[new][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& p = new Point(5); }
+        fn main() { Point& p = new Point(5); }
     )");
     REQUIRE(ir.find("call void @gg_release(") != std::string::npos);
     REQUIRE(ir.find(", ptr null)")            != std::string::npos);  // no dtor → null
@@ -688,14 +688,14 @@ TEST_CASE("New - reference owner is released at scope exit", "[new][codegen]") {
 TEST_CASE("New - class with a destructor passes its dtor to gg_release", "[new][codegen]") {
     auto ir = codegenString(R"(
         class Res { i32 x; Res(i32 a){ this.x=a; } ~Res(){ } }
-        void main() { Res& r = new Res(5); }
+        fn main() { Res& r = new Res(5); }
     )");
     REQUIRE(ir.find(", ptr @Res_dtor)") != std::string::npos);
 }
 
 TEST_CASE("New - no 'new' means no refcount runtime is emitted", "[new][codegen]") {
     auto ir = codegenString(R"(
-        void main() { i32 x = 1; }
+        fn main() { i32 x = 1; }
     )");
     REQUIRE(ir.find("@gg_alloc")   == std::string::npos);
     REQUIRE(ir.find("@gg_release") == std::string::npos);
@@ -704,7 +704,7 @@ TEST_CASE("New - no 'new' means no refcount runtime is emitted", "[new][codegen]
 TEST_CASE("New - member access through a reference loads the pointer then GEPs", "[new][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        i32 main() { Point& p = new Point(5); return p.x; }
+        fn main() -> i32 { Point& p = new Point(5); return p.x; }
     )");
     REQUIRE(ir.find("load ptr, ptr %p.addr")        != std::string::npos);
     REQUIRE(ir.find("getelementptr %Point, ptr %t") != std::string::npos);
@@ -715,9 +715,9 @@ TEST_CASE("New - method call through a reference dispatches to the mangled metho
         class Point {
             i32 x;
             Point(i32 a){ this.x=a; }
-            i32 get() { return this.x; }
+            fn get() -> i32 { return this.x; }
         }
-        i32 main() { Point& p = new Point(9); return p.get(); }
+        fn main() -> i32 { Point& p = new Point(9); return p.get(); }
     )");
     REQUIRE(ir.find("call i32 @Point_get(ptr %t") != std::string::npos);
 }
@@ -729,7 +729,7 @@ TEST_CASE("New - method call through a reference dispatches to the mangled metho
 TEST_CASE("Refcount - copying a reference retains it", "[new][refcount][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& a = new Point(1); Point& b = a; }
+        fn main() { Point& a = new Point(1); Point& b = a; }
     )");
     REQUIRE(ir.find("call void @gg_retain(") != std::string::npos);
 }
@@ -737,7 +737,7 @@ TEST_CASE("Refcount - copying a reference retains it", "[new][refcount][codegen]
 TEST_CASE("Refcount - a 'new'-initialised reference is not retained", "[new][refcount][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& a = new Point(1); }
+        fn main() { Point& a = new Point(1); }
     )");
     REQUIRE(ir.find("call void @gg_retain(")  == std::string::npos);
     REQUIRE(ir.find("call void @gg_release(") != std::string::npos);
@@ -746,7 +746,7 @@ TEST_CASE("Refcount - a 'new'-initialised reference is not retained", "[new][ref
 TEST_CASE("Refcount - reference reassignment releases old and retains new", "[new][refcount][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() {
+        fn main() {
             mut Point& a = new Point(1);
             Point& b = new Point(2);
             a = b;
@@ -759,7 +759,7 @@ TEST_CASE("Refcount - reference reassignment releases old and retains new", "[ne
 TEST_CASE("Refcount - reassigning a reference to 'new' does not retain", "[new][refcount][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() {
+        fn main() {
             mut Point& a = new Point(1);
             a = new Point(2);
         }
@@ -771,7 +771,7 @@ TEST_CASE("Refcount - reassigning a reference to 'new' does not retain", "[new][
 TEST_CASE("Refcount - reassigning a reference parameter is an error", "[new][reference][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void f(Point& p) { p = new Point(9); }
+        fn f(Point& p) { p = new Point(9); }
     )");
     REQUIRE(r.hadError);
 }
@@ -779,7 +779,7 @@ TEST_CASE("Refcount - reassigning a reference parameter is an error", "[new][ref
 TEST_CASE("Refcount - retain/release runtime is null-safe", "[new][refcount][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& a = new Point(1); }
+        fn main() { Point& a = new Point(1); }
     )");
     // null guards present in both helpers
     REQUIRE(ir.find("icmp eq ptr %obj, null") != std::string::npos);
@@ -816,7 +816,7 @@ TEST_CASE("RefField - a value-object field is rejected", "[reffield][semantic]")
 TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[reffield][codegen]") {
     auto ir = codegenString(R"(
         class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } }
-        void main() { Node& a = new Node(1); }
+        fn main() { Node& a = new Node(1); }
     )");
     REQUIRE(ir.find("%Node = type { i32, ptr }") != std::string::npos);
 }
@@ -824,7 +824,7 @@ TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[ref
 TEST_CASE("RefField - assigning a reference field retains new and releases old", "[reffield][codegen]") {
     auto ir = codegenString(R"(
         class Node { i32 v; mut Node& next; Node(i32 x){ this.v=x; } }
-        void main() {
+        fn main() {
             mut Node& a = new Node(1);
             Node& b = new Node(2);
             a.next = b;
@@ -838,7 +838,7 @@ TEST_CASE("RefField - class with a ref field but no user dtor gets a synthesized
     auto ir = codegenString(R"(
         class Leaf   { i32 v; Leaf(i32 x){ this.v=x; } }
         class Holder { Leaf& leaf; }
-        void main() { Holder& h = new Holder(); }
+        fn main() { Holder& h = new Holder(); }
     )");
     REQUIRE(ir.find("define void @Holder_dtor(ptr %self)") != std::string::npos);
     REQUIRE(ir.find("call void @gg_release(") != std::string::npos);
@@ -847,7 +847,7 @@ TEST_CASE("RefField - class with a ref field but no user dtor gets a synthesized
 TEST_CASE("RefField - destructor releases reference fields by GEP index", "[reffield][codegen]") {
     auto ir = codegenString(R"(
         class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } ~Node(){ } }
-        void main() { Node& a = new Node(1); }
+        fn main() { Node& a = new Node(1); }
     )");
     auto dtorPos = ir.find("define void @Node_dtor(ptr %self)");
     REQUIRE(dtorPos != std::string::npos);
@@ -863,7 +863,7 @@ TEST_CASE("RefField - destructor releases reference fields by GEP index", "[reff
 TEST_CASE("Clone - 'new Class(value)' copy-constructs via @Class_clone", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; i32 y; Point(i32 a, i32 b){ this.x=a; this.y=b; } }
-        void main() { Point p(1, 2); Point& r = new Point(p); }
+        fn main() { Point p(1, 2); Point& r = new Point(p); }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
     REQUIRE(ir.find("define void @Point_clone(ptr %dest, ptr %src)") != std::string::npos);
@@ -872,7 +872,7 @@ TEST_CASE("Clone - 'new Class(value)' copy-constructs via @Class_clone", "[clone
 TEST_CASE("Clone - copy constructor type-checks", "[clone][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point p(1); Point& q = new Point(p); }
+        fn main() { Point p(1); Point& q = new Point(p); }
     )");
     REQUIRE_FALSE(r.hadError);
 }
@@ -880,7 +880,7 @@ TEST_CASE("Clone - copy constructor type-checks", "[clone][semantic]") {
 TEST_CASE("Clone - value-object assignment deep-copies via clone", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point p(1); mut Point q(2); q = p; }
+        fn main() { Point p(1); mut Point q(2); q = p; }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
 }
@@ -888,7 +888,7 @@ TEST_CASE("Clone - value-object assignment deep-copies via clone", "[clone][code
 TEST_CASE("Clone - value copy-initialisation uses clone", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point p(1); Point q = p; }
+        fn main() { Point p(1); Point q = p; }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
 }
@@ -896,7 +896,7 @@ TEST_CASE("Clone - value copy-initialisation uses clone", "[clone][codegen]") {
 TEST_CASE("Clone - value = reference derefs and clones", "[clone][codegen]") {
     auto ir = codegenString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point& r = new Point(5); mut Point v(0); v = r; }
+        fn main() { Point& r = new Point(5); mut Point v(0); v = r; }
     )");
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);
 }
@@ -905,7 +905,7 @@ TEST_CASE("Clone - clone retains reference fields (option 3)", "[clone][codegen]
     auto ir = codegenString(R"(
         class Leaf   { i32 v; Leaf(i32 x){ this.v=x; } }
         class Holder { Leaf& leaf; }
-        void main() { Holder& a = new Holder(); Holder& b = new Holder(a); }
+        fn main() { Holder& a = new Holder(); Holder& b = new Holder(a); }
     )");
     auto clonePos = ir.find("define void @Holder_clone(ptr %dest, ptr %src)");
     REQUIRE(clonePos != std::string::npos);
@@ -916,7 +916,7 @@ TEST_CASE("Clone - clone retains reference fields (option 3)", "[clone][codegen]
 TEST_CASE("Clone - assigning a value to a reference variable is rejected", "[clone][semantic]") {
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 a){ this.x=a; } }
-        void main() { Point p(1); Point& q = new Point(2); q = p; }
+        fn main() { Point p(1); Point& q = new Point(2); q = p; }
     )");
     REQUIRE(r.hadError);   // Object -> Reference is not implicit; use new Point(p)
 }

@@ -520,6 +520,31 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
 std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
 
+    // Return-slot (sret) call used as a value (not a plain variable initializer — that path
+    // writes in place via emitSlotCall): materialize the result into a temp object.
+    {
+        std::string fn, recv;
+        if (!freeFnBases_.count(call.callee.lexeme) && !currentClassName_.empty()) {
+            std::string mName = calleeName(&call, currentClassName_ + "_" + call.callee.lexeme);
+            if (slotReturningFns_.count(mName)) {
+                auto cgIt = cgClasses_.find(currentClassName_);
+                bool isStatic = cgIt != cgClasses_.end()
+                             && cgIt->second.staticMethods.count(call.callee.lexeme) > 0;
+                fn = mName;
+                recv = isStatic ? "" : (allocaMap.count("this") ? allocaMap["this"] : "null");
+            }
+        }
+        if (fn.empty()) {
+            std::string fnName = calleeName(&call, call.callee.lexeme);
+            if (slotReturningFns_.count(fnName)) fn = fnName;
+        }
+        if (!fn.empty()) {
+            std::string tmp = materializeSlotTemp(resolvedType.className);
+            emitSretCall(fn, call.args, tmp, recv);
+            return tmp;
+        }
+    }
+
     // Implicit `this`: a bare call with no matching free function targets a method of the
     // enclosing class (free functions take priority — mirrors the semantic resolution).
     if (!freeFnBases_.count(call.callee.lexeme) && !currentClassName_.empty()) {
@@ -564,6 +589,84 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     if (resolvedType.kind == TypeKind::Reference)   // a reference-returning call hands back a +1
         pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
+}
+
+// ---- Return-slot (sret) call emission ----
+
+void CodeGen::emitSretCall(const std::string& fn,
+                           const std::vector<std::unique_ptr<Expr>>& args,
+                           const std::string& slotPtr, const std::string& recvPtr) {
+    auto it = funcParamTypes.find(fn);
+    std::string argStr = buildArgString(args, it != funcParamTypes.end() ? &it->second : nullptr);
+    std::string full = "ptr " + slotPtr;
+    if (!recvPtr.empty()) full += ", ptr " + recvPtr;
+    if (!argStr.empty())  full += ", " + argStr;
+    emit("call void @" + fn + "(" + full + ")");
+}
+
+std::string CodeGen::materializeSlotTemp(const std::string& className) {
+    std::string tmp = freshAllocaName("slottmp");
+    emitAlloca(tmp, "%" + className);
+    emit("store %" + className + " zeroinitializer, ptr " + tmp);
+    auto cgIt = cgClasses_.find(className);
+    if (cgIt != cgClasses_.end() && cgIt->second.needsDtor && !dtorScopes_.empty())
+        dtorScopes_.back().push_back({ tmp, className, /*isReference=*/false });
+    return tmp;
+}
+
+// Zero-copy path used by variable initialization: if `init` is a call to a return-slot
+// function/method, emit it writing directly into `slotPtr` and return true. Determines
+// slot-ness with side-effect-free lookups BEFORE emitting anything (so a non-slot call
+// leaves the stream untouched for the caller's fallback path).
+bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
+    if (!init.node) return false;
+    const auto& node = *init.node;
+
+    if (std::holds_alternative<CallExpr>(node)) {
+        const auto& call = std::get<CallExpr>(node);
+        // Implicit-`this` slot method: no matching free function, inside a class body.
+        if (!freeFnBases_.count(call.callee.lexeme) && !currentClassName_.empty()) {
+            std::string mName = calleeName(&call, currentClassName_ + "_" + call.callee.lexeme);
+            if (slotReturningFns_.count(mName)) {
+                auto cgIt = cgClasses_.find(currentClassName_);
+                bool isStatic = cgIt != cgClasses_.end()
+                             && cgIt->second.staticMethods.count(call.callee.lexeme) > 0;
+                std::string recv = isStatic ? "" : (allocaMap.count("this") ? allocaMap["this"] : "null");
+                emitSretCall(mName, call.args, slotPtr, recv);
+                return true;
+            }
+        }
+        std::string fnName = calleeName(&call, call.callee.lexeme);
+        if (!slotReturningFns_.count(fnName)) return false;
+        emitSretCall(fnName, call.args, slotPtr, "");
+        return true;
+    }
+
+    if (std::holds_alternative<MethodCallExpr>(node)) {
+        const auto& mc = std::get<MethodCallExpr>(node);
+        // Static call via type name: Class::method(...).
+        if (std::holds_alternative<IdentifierExpr>(*mc.object->node)) {
+            const auto& id = std::get<IdentifierExpr>(*mc.object->node);
+            auto cgIt = cgClasses_.find(id.name.lexeme);
+            if (cgIt != cgClasses_.end() && cgIt->second.staticMethods.count(mc.method.lexeme)) {
+                std::string mName = calleeName(&mc, id.name.lexeme + "_" + mc.method.lexeme);
+                if (!slotReturningFns_.count(mName)) return false;
+                emitSretCall(mName, mc.args, slotPtr, "");
+                return true;
+            }
+        }
+        Type objType = exprType(*mc.object);
+        if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference) return false;
+        auto cgIt = cgClasses_.find(objType.className);
+        bool isStatic = cgIt != cgClasses_.end() && cgIt->second.staticMethods.count(mc.method.lexeme) > 0;
+        std::string mName = calleeName(&mc, objType.className + "_" + mc.method.lexeme);
+        if (!slotReturningFns_.count(mName)) return false;
+        std::string recv = isStatic ? "" : genExpr(*mc.object);   // only evaluate once confirmed
+        emitSretCall(mName, mc.args, slotPtr, recv);
+        return true;
+    }
+
+    return false;
 }
 
 // ---- VarDecl ----
@@ -697,9 +800,12 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
                 dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/false });
         }
 
-        // Initializer: a constructor call, or a copy from a value/reference.
+        // Initializer: a return-slot call (written in place, no copy), a constructor call,
+        // or a copy from a value/reference.
         if (varDecl.initializer) {
-            if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
+            if (emitSlotCall(*varDecl.initializer, ptrName)) {
+                // Result written directly into this variable's storage — nothing to copy.
+            } else if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
                 const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
                 std::string mangledCtor = calleeName(&ctorCall, className + "_" + className);
                 auto funcIt = funcParamTypes.find(mangledCtor);

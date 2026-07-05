@@ -146,6 +146,38 @@ bare name to a static global or a GEP on `this`; `genCall` falls back to `@Class
 (mangled name present in `funcParamTypes`) with a `ptr this` prefix for instance methods.
 Purely additive — existing `this.`-prefixed code is unaffected.
 
+### Unified signature — `fn NAME(params) [mut] [-> RetType [alias]]`
+One signature shape for every function/method (free, instance/static, trait/impl, generic).
+`fn` leads (before `static`/`private`). The **return type follows `->`**; **omitting the arrow
+means void**. `extern` uses the same order: `extern name(params) [-> RetType];`. Constructors
+(`ClassName(...)`) / destructors (`~ClassName()`) take no `fn` and no return type. Trailing `mut`
+(a `&mut self` method) sits after `)` and before the optional `->`.
+- **Lexer**: `fn` → `TokenType::FN`; `->` is `ARROW`.
+- **Parser**: `parseFnDeclaration` = `name parseParamList() parseReturnSuffix() body`.
+  `parseReturnSuffix` returns the return type token (a synthesized `void` token when there is no
+  arrow) and, if an IDENTIFIER follows the type, the return alias. `parseMemberList` (methods),
+  `parseTraitMethod`, and `parseExternFuncDecl` all use `parseParamList`/`parseReturnSuffix`.
+  `tryCaptureFunctionTemplate`/`prescanTemplateNames` are name-first (`fn name<...>(...)`); the
+  captured tokens keep the `fn` and the `-> RetType alias` so the monomorphized re-parse is a
+  normal decl. A non-`fn` member with `(` errors ("methods must be declared with 'fn'").
+- `fn`/the arrow order are purely syntactic; see the return-alias invariant for alias semantics.
+
+### Return aliases (generalized "return slot")
+`-> RetType alias` names the result binding. Required for object-value returns, optional for
+primitives/references; when present, only `return;`/`return <alias>;` are allowed (`hasReturnSlot`
+/`returnSlotName` on `FunctionDeclStmt`/`MethodDecl` carry it).
+- **Object value** → caller-allocated **sret slot** (unchanged): hidden `ptr` first param, `void`
+  LLVM return, zero-init in place. Detected in codegen by `isObjectReturnType(retTypeToken)`;
+  emitted names go in `slotReturningFns_` / drive `currentFnHasReturnSlot_`.
+- **Primitive** → an ordinary zero-initialized returned local (`setupReturnAliasLocal`,
+  `currentReturnAliasLocal_`); `genReturn`/fall-through do `emitReturnAlias` (load + `ret`).
+- **Reference** → a null-initialized returned local that **must be definitely assigned before
+  return**. Semantic reuses `Symbol::isInitialized`: `setupReturnSlot` declares a reference alias
+  `isInitialized=false`; `analyzeReturn` checks it on bare `return;`, and
+  `checkReturnAliasAssignedAtExit` checks the fall-through path (branch merges via the existing
+  snapshot machinery). Codegen returns it with the +1 retain convention.
+- Void + alias → error; object return with no alias → "requires a return alias".
+
 ### Overloading (functions, constructors, methods)
 Functions, constructors, and methods (instance & static) may be **overloaded** by parameter
 signature **and/or return type**. Enums are excluded (single ctor, no member overloading).
@@ -232,9 +264,9 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
 3. `analyzeStmt` over every declaration — full type checking.
 
 ### Generics — monomorphization entirely in the Parser
-- `class Foo<T>` / `ReturnType bar<T>(...)` captured as raw token slices in `GenericRegistry::templates`.
-  Generic functions use the **same declaration syntax as regular functions**, just with `<T>` after the name.
-  There is no `fn` keyword in GG.
+- `class Foo<T>` / `fn ReturnType bar<T>(...)` captured as raw token slices in `GenericRegistry::templates`.
+  Generic functions use the **same declaration syntax as regular functions**, just with `<T>` after the name
+  (both begin with `fn` — see the `fn` invariant below).
 - Use sites (`Foo<i32>`) queue a `GenericInstantiation` on the worklist.
 - `monomorphize()` substitutes type args, re-parses each instantiation into a concrete
   mangled declaration. **Semantic and CodeGen never see type parameters.**
@@ -245,6 +277,10 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
   - `Vec<Point&>`    → `Vec$Point.ref`
 - **Generic functions may return a reference** (`T& maxOf<T>(...)`): `tryCaptureFunctionTemplate`
   / `prescanTemplateNames` accept an optional `&` between the return type and the name.
+- **Generic functions may use an arrow-form return slot** (`dup<T>(...) -> Point p`, even
+  `zero<T>() -> T out`): the capture leads with the name directly before `<`, strips the
+  `<…>`, and keeps the `-> RetType slot` so the re-parse takes the arrow branch. See the
+  "Return slots" invariant. Generic-class arrow methods work via the verbatim body capture.
 
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
@@ -300,6 +336,16 @@ semantics; bodies may still call any method the concrete type has).
 - `@ClassName_clone(ptr %dest, ptr %src)`: deep copy — copies primitive fields,
   retains reference fields (releasing `dest`'s old reference targets first).
 - Generated on demand when a value-copy initialisation is encountered.
+
+### Object return slot (sret) — call-site lowering
+The object-value case of the return alias (see the "Return aliases" invariant). An object alias
+is a caller-allocated slot: hidden `ptr` first param, `void` LLVM return, zero-init in place; the
+callee never runs the slot's dtor (ownership → caller). Call sites: `genVarDecl` object-init calls
+`emitSlotCall(init, ptrName)` (writes straight into the variable's alloca — no clone/ctor); other
+positions (`genCall`/`genMethodCall`) materialize a temp via `materializeSlotTemp` + `emitSretCall`.
+Works on generics — the alias/slot type may be a type parameter (`fn zero<T>() -> T out`);
+generic-class arrow methods ride the verbatim class-body capture + re-parse. Using a value-return
+call as a nested sub-expression argument is deferred.
 
 ### Enums (Java-style)
 - Declared with `enum Name { VARIANT, ... }` or with a body:
@@ -372,7 +418,8 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**573 test cases / 1140 assertions** (as of generic trait bounds).
+**597 test cases / 1198 assertions** (as of the unified signature order — `fn name(params) ->
+RetType [alias]`, with generalized return aliases).
 
 ## Keeping CLAUDE.md current
 

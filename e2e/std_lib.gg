@@ -1,7 +1,7 @@
 import "../stdlib/string_class.gg";
 import "../stdlib/io.gg";
 
-i32 main(){
+fn main() -> i32{
 
     String s("Hello World!");
     puts(s.data);

@@ -34,7 +34,7 @@ enum class TokenType {
     // Keywords.
     CLASS, ENUM, ELSE, EXTERN, FALSE, FOR, IF, IMPORT,
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
-    PRIVATE, AS, NEW, SIZEOF, STATIC, MUT, TRAIT, IMPL, SELF,
+    PRIVATE, AS, NEW, SIZEOF, STATIC, MUT, TRAIT, IMPL, SELF, FN,
 
     // Type keywords — signed integers.
     I8, I16, I32, I64,

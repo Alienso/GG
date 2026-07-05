@@ -3,58 +3,58 @@
 // (Add, Eq, Ord, Neg, Index get/set). Expected exit code: 0.
 
 trait Describe {
-    i32 combined(Self& other);
+    fn combined(Self& other) -> i32;
 }
 
 class Vec2 {
     mut i32 x;
     mut i32 y;
     Vec2(i32 a, i32 b) { x = a; y = b; }
-    i32 sum() { return x + y; }
+    fn sum() -> i32 { return x + y; }
 }
 
 impl Add for Vec2 {
-    Vec2& add(Vec2& rhs) { return new Vec2(x + rhs.x, y + rhs.y); }
+    fn add(Vec2& rhs) -> Vec2& { return new Vec2(x + rhs.x, y + rhs.y); }
 }
 
 impl Sub for Vec2 {
-    Vec2& sub(Vec2& rhs) { return new Vec2(x - rhs.x, y - rhs.y); }
+    fn sub(Vec2& rhs) -> Vec2& { return new Vec2(x - rhs.x, y - rhs.y); }
 }
 
 impl Mul for Vec2 {
-    Vec2& mul(Vec2& rhs) { return new Vec2(x * rhs.x, y * rhs.y); }
+    fn mul(Vec2& rhs) -> Vec2& { return new Vec2(x * rhs.x, y * rhs.y); }
 }
 
 impl Div for Vec2 {
-    Vec2& div(Vec2& rhs) { return new Vec2(x / rhs.x, y / rhs.y); }
+    fn div(Vec2& rhs) -> Vec2& { return new Vec2(x / rhs.x, y / rhs.y); }
 }
 
 impl Rem for Vec2 {
-    Vec2& rem(Vec2& rhs) { return new Vec2(x % rhs.x, y % rhs.y); }
+    fn rem(Vec2& rhs) -> Vec2& { return new Vec2(x % rhs.x, y % rhs.y); }
 }
 
 impl Eq for Vec2 {
-    bool eq(Vec2& rhs) { return x == rhs.x && y == rhs.y; }
+    fn eq(Vec2& rhs) -> bool { return x == rhs.x && y == rhs.y; }
 }
 
 impl Ord for Vec2 {
-    i32 cmp(Vec2& rhs) { return sum() - rhs.sum(); }
+    fn cmp(Vec2& rhs) -> i32 { return sum() - rhs.sum(); }
 }
 
 impl Neg for Vec2 {
-    Vec2& neg() { return new Vec2(0 - x, 0 - y); }
+    fn neg() -> Vec2& { return new Vec2(0 - x, 0 - y); }
 }
 
 impl Index for Vec2 {
-    i32 get(i32 i) { if (i == 0) { return x; } return y; }
-    void set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
+    fn get(i32 i) -> i32 { if (i == 0) { return x; } return y; }
+    fn set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
 }
 
 impl Describe for Vec2 {
-    i32 combined(Vec2& other) { return sum() + other.sum(); }
+    fn combined(Vec2& other) -> i32 { return sum() + other.sum(); }
 }
 
-i32 main() {
+fn main() -> i32 {
     Vec2& a = new Vec2(1, 2);
     Vec2& b = new Vec2(3, 4);
 

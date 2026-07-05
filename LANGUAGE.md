@@ -325,20 +325,45 @@ local objects in reverse-declaration order (innermost scope first).
 
 ## 6. Functions
 
+Every function and method has a single, uniform signature shape:
+
+```
+fn NAME(params) [mut] [ -> RetType [alias] ]
+```
+
+- `fn` always leads — before `static`/`private` modifiers (e.g. `fn static dims() -> i32`).
+- The **return type follows `->`**. Omitting `-> RetType` means the function returns `void`
+  (`fn greet(ptr name) { … }`).
+- The optional **return alias** names the result binding. It is **required for object-value
+  returns** (which lower to a caller-provided slot) and **optional** for everything else.
+- Trailing `mut` (a method that mutates `this`) goes after the parameter list: `fn f() mut -> i32`.
+- Constructors (`ClassName(...)`) and destructors (`~ClassName()`) are the only exceptions —
+  they do **not** take `fn` and have no return type.
+
+**Return aliases** (`-> RetType alias`) turn the result into a named binding you fill and then
+`return;` (or `return alias;` — those are the *only* returns allowed once an alias is declared):
+- **Object value** (`-> Point p`): required; the alias is a caller-allocated slot filled in
+  place (no copy). Zero-initialised.
+- **Primitive** (`-> i32 r`): optional; a zero-initialised local you fill and return.
+- **Reference** (`-> Node& r`): optional; a null-initialised local that **must be definitely
+  assigned before it is returned** (checked like any other variable, on every path).
+
+Without an alias, use the usual `return <expr>;`.
+
 ### Declaration
 ```gg
 // Returns a value
-i32 add(i32 a, i32 b) {
+fn add(i32 a, i32 b) -> i32 {
     return a + b;
 }
 
 // Returns nothing
-void greet(ptr name) {
+fn greet(ptr name) {
     puts(name);
 }
 
 // Recursive — all top-level functions are forward-hoisted (order does not matter)
-i32 fib(i32 n) {
+fn fib(i32 n) -> i32 {
     if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
@@ -352,7 +377,7 @@ borrows (the caller retains ownership). They may **not** be reassigned inside th
 Value-typed class parameters (`ClassName` without `&`) are not supported;
 
 ```gg
-void bump(Point& p) {
+fn bump(Point& p) {
     p.x = p.x + 1;    // OK — mutate the shared object through the borrow
     // p = other;     // ERROR — cannot reassign a reference parameter
 }
@@ -363,7 +388,7 @@ Parameters are **const by default**, like locals. A primitive parameter that the
 reassigns must be declared `mut`:
 
 ```gg
-i32 countdown(mut i32 n) {
+fn countdown(mut i32 n) -> i32 {
     mut i32 steps = 0;
     while (n > 0) { n--; steps++; }   // both `n` and `steps` are `mut`
     return steps;
@@ -373,8 +398,8 @@ i32 countdown(mut i32 n) {
 Reference parameters come in two flavours (a read-only borrow vs a mutable borrow):
 
 ```gg
-void readOnly(Point& p)  { i32 a = p.x; }   // const borrow — may read, may NOT write fields
-void mutate(mut Point& p) { p.x = 5; }       // mutable borrow — may write the object's mut fields
+fn readOnly(Point& p)  { i32 a = p.x; }   // const borrow — may read, may NOT write fields
+fn mutate(mut Point& p) { p.x = 5; }       // mutable borrow — may write the object's mut fields
 ```
 
 - `Point&` (const borrow) — you may read the object and call its methods, but you may **not**
@@ -397,12 +422,12 @@ Functions may be **overloaded** — several may share a name if they differ in p
 signature and/or return type:
 
 ```gg
-i32 add(i32 a, i32 b)        { return a + b; }
-i32 add(i32 a, i32 b, i32 c) { return a + b + c; }
-f64 add(f64 a, f64 b)        { return a + b; }
+fn add(i32 a, i32 b) -> i32        { return a + b; }
+fn add(i32 a, i32 b, i32 c) -> i32 { return a + b + c; }
+fn add(f64 a, f64 b) -> f64        { return a + b; }
 
-i32 make() { return 7; }     // differs from…
-f64 make() { return 2.5; }   // …only by return type
+fn make() -> i32 { return 7; }     // differs from…
+fn make() -> f64 { return 2.5; }   // …only by return type
 ```
 
 Resolution is **best-match**: the compiler keeps candidates whose arguments are implicitly
@@ -472,12 +497,12 @@ class Point {
     }
 
     // Regular method
-    f32 squaredLen() {
+    fn squaredLen() -> f32 {
         return this.x * this.x + this.y * this.y;
     }
 
     // Void method — mutates fields, so it is a `mut` method
-    void scale(f32 factor) mut {
+    fn scale(f32 factor) mut {
         x = x * factor;   // implicit `this` — same as this.x = this.x * factor
         y = y * factor;
     }
@@ -495,7 +520,7 @@ class Point {
     mut i32 x;
     i32 y;
     Point(i32 a, i32 b) { x = a; y = b; }   // `x`/`y` are the fields (no local shadows them)
-    i32 shift(i32 x) { return x + y; }        // `x` = the parameter; `y` = the field
+    fn shift(i32 x) -> i32 { return x + y; }        // `x` = the parameter; `y` = the field
 }
 ```
 
@@ -563,7 +588,7 @@ class Counter {
     i32 id;             // const — fixed at construction
 
     Counter(i32 id) { this.n = 0; this.id = id; }   // both set in the ctor: OK
-    void inc() mut  { this.n = this.n + 1; }         // OK — `mut` method writing a mut field
+    fn inc() mut  { this.n = this.n + 1; }         // OK — `mut` method writing a mut field
     // void bad()   { this.n = 0; }                  // ERROR — non-mut method writing a field
     // void reid()  { this.id = 7; }                 // ERROR — id is const
 }
@@ -592,8 +617,8 @@ list). This is GG's `&mut self` / `&self` distinction:
 class Counter {
     mut i32 n;
     Counter()      { this.n = 0; }
-    void inc() mut { this.n = this.n + 1; }   // mutates `this` → must be `mut`
-    i32  get()     { return this.n; }         // read-only → no `mut`
+    fn inc() mut { this.n = this.n + 1; }   // mutates `this` → must be `mut`
+    fn get() -> i32     { return this.n; }         // read-only → no `mut`
 }
 
 mut Counter a;  a.inc();   // OK — `a` is a mut binding
@@ -643,12 +668,12 @@ class Counter {
     }
 
     // Static method — no implicit `this`; cannot touch instance fields.
-    static i32 howMany() {
+    fn static howMany() -> i32 {
         return Counter::count;
     }
 }
 
-void main() {
+fn main() {
     Counter a;
     Counter b;
     i32 n = Counter::howMany();   // 2  — via the class
@@ -672,13 +697,13 @@ Inside a function or method body, a `static` local is a **single persistent glob
 it keeps its value across calls and is initialised exactly once before `main`.
 
 ```gg
-i32 nextId() {
+fn nextId() -> i32 {
     static i32 counter = 0;   // initialised once, before main
     counter = counter + 1;    // persists across calls
     return counter;
 }
 
-void main() {
+fn main() {
     i32 a = nextId();   // 1
     i32 b = nextId();   // 2
     i32 c = nextId();   // 3
@@ -709,7 +734,7 @@ enum Color {
     BLUE
 }
 
-void main() {
+fn main() {
     Color c = Color.GREEN;       // variants accessed as Enum.VARIANT
     if (c == Color.GREEN) { }    // identity equality only
     if (c != Color.RED)   { }
@@ -731,12 +756,12 @@ enum Planet {
         this.radius = radius;    // inside the constructor
     }
 
-    f64 gravity() {
+    fn gravity() -> f64 {
         return this.mass / (this.radius * this.radius);
     }
 }
 
-void main() {
+fn main() {
     f64 m = Planet.EARTH.mass;          // field read on a variant
     f64 g = Planet.JUPITER.gravity();   // method call on a variant
 
@@ -838,7 +863,7 @@ type parameters, no boxing, and no overhead versus hand-written concrete types.
 class Box<T> {
     T value;
     Box(T v) { this.value = v; }
-    T get()  { return this.value; }
+    fn get() -> T  { return this.value; }
 }
 
 class Pair<K, V> {
@@ -860,12 +885,12 @@ Each distinct instantiation (`Box<i32>`, `Box<f64>`) is compiled as a separate c
 
 ### Generic functions
 ```gg
-T maxT<T>(T a, T b) {
+fn maxT<T>(T a, T b) -> T {
     if (a > b) { return a; }
     return b;
 }
 
-K firstOf<K, V>(K a, V b) { return a; }
+fn firstOf<K, V>(K a, V b) -> K { return a; }
 ```
 
 Usage:
@@ -887,9 +912,9 @@ A type parameter may carry **trait bounds** requiring the concrete type argument
 implement one or more traits (see §13). Use `T: Trait`, or `T: TraitA + TraitB` for
 several, and bound each parameter independently:
 ```gg
-trait Comparable { i32 compareTo(Self& other); }
+trait Comparable { fn compareTo(Self& other) -> i32; }
 
-T& maxOf<T: Comparable>(T& a, T& b) {
+fn maxOf<T: Comparable>(T& a, T& b) -> T& {
     if (a.compareTo(b) >= 0) { return a; }
     return b;
 }
@@ -930,10 +955,10 @@ Imports are **not** re-exported — if `a.gg` imports `b.gg` and `c.gg` imports 
 
 ### Calling C functions (`extern`)
 ```gg
-extern i32  puts(ptr s);
-extern ptr  malloc(u64 size);
-extern void free(ptr p);
-extern f64  sqrt(f64 x);
+extern puts(ptr s) -> i32;
+extern malloc(u64 size) -> ptr;
+extern free(ptr p);
+extern sqrt(f64 x) -> f64;
 ```
 `extern` declares a C ABI function without a body. The symbol must be provided at link
 time (the Clang step links against libc/libm automatically). `ptr` is used for any
@@ -960,8 +985,8 @@ trait objects. Traits can also bound generic type parameters (`<T: Trait>`, see 
 ### Declaring a trait
 ```gg
 trait Describe {
-    i32 size();            // required method — signature only, ends with ';'
-    Self& merge(Self& other);
+    fn size() -> i32;            // required method — signature only, ends with ';'
+    fn merge(Self& other) -> Self&;
 }
 ```
 - A trait body contains **method signatures only** (no fields, no constructors).
@@ -977,12 +1002,12 @@ trait Describe {
 class Acc {
     mut i32 n;
     Acc(i32 x) { n = x; }
-    i32 get() { return n; }
+    fn get() -> i32 { return n; }
 }
 
 impl Describe for Acc {
-    i32 size() { return n; }
-    Acc& merge(Acc& other) { return new Acc(n + other.n); }   // Self → Acc
+    fn size() -> i32 { return n; }
+    fn merge(Acc& other) -> Acc& { return new Acc(n + other.n); }   // Self → Acc
 }
 ```
 - An impl's methods simply **become methods on the target type** (mangled `@Acc_size`,
@@ -1022,18 +1047,18 @@ they are recognised by name.
 class Vec2 {
     mut i32 x; mut i32 y;
     Vec2(i32 a, i32 b) { x = a; y = b; }
-    i32 sum() { return x + y; }
+    fn sum() -> i32 { return x + y; }
 }
-impl Add   for Vec2 { Vec2& add(Vec2& r) { return new Vec2(x + r.x, y + r.y); } }
-impl Eq    for Vec2 { bool  eq(Vec2& r)  { return x == r.x && y == r.y; } }
-impl Ord   for Vec2 { i32   cmp(Vec2& r) { return sum() - r.sum(); } }
-impl Neg   for Vec2 { Vec2& neg()        { return new Vec2(0 - x, 0 - y); } }
+impl Add   for Vec2 { fn add(Vec2& r) -> Vec2& { return new Vec2(x + r.x, y + r.y); } }
+impl Eq    for Vec2 { fn eq(Vec2& r) -> bool  { return x == r.x && y == r.y; } }
+impl Ord   for Vec2 { fn cmp(Vec2& r) -> i32 { return sum() - r.sum(); } }
+impl Neg   for Vec2 { fn neg() -> Vec2&        { return new Vec2(0 - x, 0 - y); } }
 impl Index for Vec2 {
-    i32  get(i32 i)          { if (i == 0) { return x; } return y; }
-    void set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
+    fn get(i32 i) -> i32          { if (i == 0) { return x; } return y; }
+    fn set(i32 i, i32 v) mut { if (i == 0) { x = v; } else { y = v; } }
 }
 
-i32 main() {
+fn main() -> i32 {
     Vec2& a = new Vec2(1, 2);
     Vec2& b = new Vec2(3, 4);
     Vec2& c = a + b;          // (4, 6)

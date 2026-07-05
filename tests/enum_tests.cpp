@@ -39,7 +39,7 @@ TEST_CASE("Enum - variants with constructor args, fields and methods parse", "[e
                 this.radius = radius;
             }
 
-            f64 getMass() { return this.mass; }
+            fn getMass() -> f64 { return this.mass; }
         }
     )");
     REQUIRE(prog.declarations.size() == 1);
@@ -73,7 +73,7 @@ TEST_CASE("Enum - valid enum with fields and methods passes", "[enum][semantic]"
                 this.radius = radius;
             }
 
-            f64 getMass() { return this.mass; }
+            fn getMass() -> f64 { return this.mass; }
         }
     )");
     REQUIRE_FALSE(result.hadError);
@@ -83,7 +83,7 @@ TEST_CASE("Enum - valid enum with fields and methods passes", "[enum][semantic]"
 TEST_CASE("Enum - static variant access yields the enum type", "[enum][semantic]") {
     auto result = analyzeString(R"(
         enum Color { RED, GREEN, BLUE }
-        void f() {
+        fn f() {
             Color c = Color.GREEN;
         }
     )");
@@ -93,7 +93,7 @@ TEST_CASE("Enum - static variant access yields the enum type", "[enum][semantic]
 TEST_CASE("Enum - identity comparison of same enum is allowed", "[enum][semantic]") {
     auto result = analyzeString(R"(
         enum Color { RED, GREEN }
-        bool f() {
+        fn f() -> bool {
             Color c = Color.RED;
             return c == Color.GREEN;
         }
@@ -105,7 +105,7 @@ TEST_CASE("Enum - unknown variant is an error", "[enum][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         enum Color { RED, GREEN }
-        void f() {
+        fn f() {
             Color c = Color.PURPLE;
         }
     )");
@@ -117,7 +117,7 @@ TEST_CASE("Enum - direct construction is an error", "[enum][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         enum Color { RED, GREEN }
-        void f() {
+        fn f() {
             Color c = Color();
         }
     )");
@@ -129,7 +129,7 @@ TEST_CASE("Enum - new on an enum is an error", "[enum][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         enum Color { RED, GREEN }
-        void f() {
+        fn f() {
             Color c = new Color();
         }
     )");
@@ -145,7 +145,7 @@ TEST_CASE("Enum - assigning to an enum field outside the constructor is an error
             f64 mass;
             Planet(f64 mass) { this.mass = mass; }
         }
-        void f() {
+        fn f() {
             Planet p = Planet.EARTH;
             p.mass = 1.0;
         }
@@ -223,7 +223,7 @@ TEST_CASE("Enum - struct type and variant globals are emitted", "[enum][codegen]
 TEST_CASE("Enum - fieldless enum gets a padding byte for distinct addresses", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }
-        void f() { Color c = Color.RED; }
+        fn f() { Color c = Color.RED; }
     )");
     REQUIRE(ir.find("%Color = type { i8 }") != std::string::npos);
 }
@@ -249,7 +249,7 @@ TEST_CASE("Enum - constructor runs in gg_enum_init registered in global_ctors", 
 TEST_CASE("Enum - fieldless enum emits no gg_enum_init", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }
-        void f() { Color c = Color.RED; }
+        fn f() { Color c = Color.RED; }
     )");
     REQUIRE(ir.find("@gg_enum_init") == std::string::npos);
     REQUIRE(ir.find("@llvm.global_ctors") == std::string::npos);
@@ -258,7 +258,7 @@ TEST_CASE("Enum - fieldless enum emits no gg_enum_init", "[enum][codegen]") {
 TEST_CASE("Enum - static variant access lowers to the global address", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }
-        void f() { Color c = Color.GREEN; }
+        fn f() { Color c = Color.GREEN; }
     )");
     REQUIRE(ir.find("store ptr @Color$GREEN") != std::string::npos);
 }
@@ -266,7 +266,7 @@ TEST_CASE("Enum - static variant access lowers to the global address", "[enum][c
 TEST_CASE("Enum - identity comparison lowers to icmp on ptr", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN }
-        bool f() {
+        fn f() -> bool {
             Color c = Color.RED;
             return c == Color.GREEN;
         }
@@ -277,8 +277,8 @@ TEST_CASE("Enum - identity comparison lowers to icmp on ptr", "[enum][codegen]")
 TEST_CASE("Enum - passed by value as a function parameter", "[enum][semantic]") {
     auto result = analyzeString(R"(
         enum Color { RED, GREEN, BLUE }
-        bool isRed(Color c) { return c == Color.RED; }
-        void f() { bool b = isRed(Color.GREEN); }
+        fn isRed(Color c) -> bool { return c == Color.RED; }
+        fn f() { bool b = isRed(Color.GREEN); }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -286,7 +286,7 @@ TEST_CASE("Enum - passed by value as a function parameter", "[enum][semantic]") 
 TEST_CASE("Enum - returned by value from a function", "[enum][semantic]") {
     auto result = analyzeString(R"(
         enum Color { RED, GREEN, BLUE }
-        Color pick(bool b) {
+        fn pick(bool b) -> Color {
             if (b) { return Color.GREEN; }
             return Color.BLUE;
         }
@@ -297,7 +297,7 @@ TEST_CASE("Enum - returned by value from a function", "[enum][semantic]") {
 TEST_CASE("Enum - value param lowers to ptr", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }
-        bool isRed(Color c) { return c == Color.RED; }
+        fn isRed(Color c) -> bool { return c == Color.RED; }
     )");
     REQUIRE(ir.find("define i1 @isRed(ptr %c)") != std::string::npos);
 }
@@ -305,7 +305,7 @@ TEST_CASE("Enum - value param lowers to ptr", "[enum][codegen]") {
 TEST_CASE("Enum - return-by-value lowers to ptr (not i32)", "[enum][codegen]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }
-        Color pick(bool b) {
+        fn pick(bool b) -> Color {
             if (b) { return Color.GREEN; }
             return Color.BLUE;
         }
@@ -321,9 +321,9 @@ TEST_CASE("Enum - method call dispatches on the variant", "[enum][codegen]") {
             EARTH(5.976);
             f64 mass;
             Planet(f64 mass) { this.mass = mass; }
-            f64 getMass() { return this.mass; }
+            fn getMass() -> f64 { return this.mass; }
         }
-        f64 f() { return Planet.EARTH.getMass(); }
+        fn f() -> f64 { return Planet.EARTH.getMass(); }
     )");
     REQUIRE(ir.find("define double @Planet_getMass(ptr %self)") != std::string::npos);
     REQUIRE(ir.find("call double @Planet_getMass(ptr @Planet$EARTH)") != std::string::npos);

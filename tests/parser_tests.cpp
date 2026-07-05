@@ -6,7 +6,7 @@
 // ============================================================
 
 TEST_CASE("Parser - minimal function declaration", "[parser]") {
-    Program program = parseString("i32 main() { return 0; }");
+    Program program = parseString("fn main() -> i32 { return 0; }");
 
     REQUIRE(program.declarations.size() == 1);
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
@@ -18,7 +18,7 @@ TEST_CASE("Parser - minimal function declaration", "[parser]") {
 }
 
 TEST_CASE("Parser - function with parameters", "[parser]") {
-    Program program = parseString("i32 add(i32 a, i32 b) { return 0; }");
+    Program program = parseString("fn add(i32 a, i32 b) -> i32 { return 0; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
 
     REQUIRE(function.params.size()          == 2);
@@ -32,7 +32,7 @@ TEST_CASE("Parser - function with parameters", "[parser]") {
 // ============================================================
 
 TEST_CASE("Parser - variable declaration without initializer", "[parser]") {
-    Program program = parseString("i32 main() { i32 x; }");
+    Program program = parseString("fn main() -> i32 { i32 x; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ExprStmt>(*function.body.body[0]);
     const auto& decl     = asExpr<VarDeclExpr>(stmt.expression);
@@ -43,7 +43,7 @@ TEST_CASE("Parser - variable declaration without initializer", "[parser]") {
 }
 
 TEST_CASE("Parser - variable declaration with initializer", "[parser]") {
-    Program program = parseString("i32 main() { i32 x = 42; }");
+    Program program = parseString("fn main() -> i32 { i32 x = 42; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ExprStmt>(*function.body.body[0]);
     const auto& decl     = asExpr<VarDeclExpr>(stmt.expression);
@@ -60,7 +60,7 @@ TEST_CASE("Parser - variable declaration with initializer", "[parser]") {
 // ============================================================
 
 TEST_CASE("Parser - if/else structure", "[parser]") {
-    Program program = parseString("i32 main() { if (x) { } else { } }");
+    Program program = parseString("fn main() -> i32 { if (x) { } else { } }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<IfStmt>(*function.body.body[0]);
 
@@ -73,7 +73,7 @@ TEST_CASE("Parser - if/else structure", "[parser]") {
 }
 
 TEST_CASE("Parser - while loop structure", "[parser]") {
-    Program program = parseString("i32 main() { while (1) { } }");
+    Program program = parseString("fn main() -> i32 { while (1) { } }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<WhileStmt>(*function.body.body[0]);
 
@@ -83,7 +83,7 @@ TEST_CASE("Parser - while loop structure", "[parser]") {
 }
 
 TEST_CASE("Parser - for loop with all clauses", "[parser]") {
-    Program program = parseString("i32 main() { for (i32 i = 0; i < 10; i++) { } }");
+    Program program = parseString("fn main() -> i32 { for (i32 i = 0; i < 10; i++) { } }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ForStmt>(*function.body.body[0]);
 
@@ -102,7 +102,7 @@ TEST_CASE("Parser - for loop with all clauses", "[parser]") {
 // ============================================================
 
 TEST_CASE("Parser - return statement with literal", "[parser]") {
-    Program program = parseString("i32 main() { return 7; }");
+    Program program = parseString("fn main() -> i32 { return 7; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ReturnStmt>(*function.body.body[0]);
 
@@ -112,7 +112,7 @@ TEST_CASE("Parser - return statement with literal", "[parser]") {
 }
 
 TEST_CASE("Parser - binary expression operator is captured", "[parser]") {
-    Program program = parseString("i32 main() { i32 x = 1 + 2; }");
+    Program program = parseString("fn main() -> i32 { i32 x = 1 + 2; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ExprStmt>(*function.body.body[0]);
     const auto& decl     = asExpr<VarDeclExpr>(stmt.expression);
@@ -123,7 +123,7 @@ TEST_CASE("Parser - binary expression operator is captured", "[parser]") {
 }
 
 TEST_CASE("Parser - function call with arguments", "[parser]") {
-    Program program = parseString("i32 main() { foo(1, 2); }");
+    Program program = parseString("fn main() -> i32 { foo(1, 2); }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ExprStmt>(*function.body.body[0]);
     const auto& call     = asExpr<CallExpr>(stmt.expression);
@@ -133,7 +133,7 @@ TEST_CASE("Parser - function call with arguments", "[parser]") {
 }
 
 TEST_CASE("Parser - assignment expression", "[parser]") {
-    Program program = parseString("i32 main() { x = 5; }");
+    Program program = parseString("fn main() -> i32 { x = 5; }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& stmt     = asStmt<ExprStmt>(*function.body.body[0]);
     const auto& asgn     = asExpr<AssignExpr>(stmt.expression);
@@ -148,7 +148,7 @@ TEST_CASE("Parser - assignment expression", "[parser]") {
 // ============================================================
 
 TEST_CASE("Parser - break statement inside while loop", "[parser]") {
-    Program program = parseString("void foo() { while (1) { break; } }");
+    Program program = parseString("fn foo() { while (1) { break; } }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& loop     = asStmt<WhileStmt>(*function.body.body[0]);
     const auto& body     = asStmt<BlockStmt>(*loop.body);
@@ -157,7 +157,7 @@ TEST_CASE("Parser - break statement inside while loop", "[parser]") {
 }
 
 TEST_CASE("Parser - continue statement inside for loop", "[parser]") {
-    Program program = parseString("void foo() { for (;;) { continue; } }");
+    Program program = parseString("fn foo() { for (;;) { continue; } }");
     const auto& function = asStmt<FunctionDeclStmt>(program.declarations[0]);
     const auto& loop     = asStmt<ForStmt>(*function.body.body[0]);
     const auto& body     = asStmt<BlockStmt>(*loop.body);
@@ -167,7 +167,7 @@ TEST_CASE("Parser - continue statement inside for loop", "[parser]") {
 
 TEST_CASE("Parser - break and continue preserve surrounding statements", "[parser]") {
     Program program = parseString(R"(
-        void foo() {
+        fn foo() {
             while (1) {
                 i32 x = 0;
                 break;
@@ -189,7 +189,7 @@ TEST_CASE("Parser - break and continue preserve surrounding statements", "[parse
 // ============================================================
 
 TEST_CASE("Parser - extern declaration no params", "[parser]") {
-    Program program = parseString("extern void exit(i32 code);");
+    Program program = parseString("extern exit(i32 code);");
     REQUIRE(program.declarations.size() == 1);
     const auto& externDecl = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
     REQUIRE(externDecl.name.lexeme            == "exit");
@@ -200,7 +200,7 @@ TEST_CASE("Parser - extern declaration no params", "[parser]") {
 }
 
 TEST_CASE("Parser - extern declaration multiple params", "[parser]") {
-    Program program = parseString("extern i32 add(i32 a, i32 b);");
+    Program program = parseString("extern add(i32 a, i32 b) -> i32;");
     const auto& externDecl = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
     REQUIRE(externDecl.name.lexeme              == "add");
     REQUIRE(externDecl.params.size()            == 2);
@@ -208,7 +208,7 @@ TEST_CASE("Parser - extern declaration multiple params", "[parser]") {
 }
 
 TEST_CASE("Parser - extern declaration zero params", "[parser]") {
-    Program program = parseString("extern i64 getTime();");
+    Program program = parseString("extern getTime() -> i64;");
     const auto& externDecl = asStmt<ExternFuncDeclStmt>(program.declarations[0]);
     REQUIRE(externDecl.name.lexeme   == "getTime");
     REQUIRE(externDecl.params.empty());
@@ -216,8 +216,8 @@ TEST_CASE("Parser - extern declaration zero params", "[parser]") {
 
 TEST_CASE("Parser - extern followed by regular function", "[parser]") {
     Program program = parseString(R"(
-        extern void puts(i32 s);
-        void main() { }
+        extern puts(i32 s);
+        fn main() { }
     )");
     REQUIRE(program.declarations.size() == 2);
     asStmt<ExternFuncDeclStmt>(program.declarations[0]);

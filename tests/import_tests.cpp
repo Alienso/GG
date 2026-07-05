@@ -40,7 +40,7 @@ TEST_CASE("Parser - import keyword token is stored", "[parser][import]") {
 // ============================================================
 
 TEST_CASE("ImportResolver - file with no imports returns its declarations", "[import]") {
-    std::string path = writeTempFile("gg_no_imports.gg", "i32 foo() { return 42; }");
+    std::string path = writeTempFile("gg_no_imports.gg", "fn foo() -> i32 { return 42; }");
     ImportResolver resolver;
     Program result = resolver.resolve(path);
     REQUIRE(result.declarations.size() == 1);
@@ -49,9 +49,9 @@ TEST_CASE("ImportResolver - file with no imports returns its declarations", "[im
 
 TEST_CASE("ImportResolver - ImportStmt nodes are stripped from the result", "[import]") {
     // Write the imported file first so the path exists.
-    writeTempFile("gg_empty_lib.gg", "i32 helper() { return 1; }");
+    writeTempFile("gg_empty_lib.gg", "fn helper() -> i32 { return 1; }");
     std::string mainPath = writeTempFile("gg_strip_import.gg",
-        "import \"gg_empty_lib.gg\";\ni32 main() { return 0; }");
+        "import \"gg_empty_lib.gg\";\nfn main() -> i32 { return 0; }");
 
     ImportResolver resolver;
     Program result = resolver.resolve(mainPath);
@@ -66,9 +66,9 @@ TEST_CASE("ImportResolver - ImportStmt nodes are stripped from the result", "[im
 // ============================================================
 
 TEST_CASE("ImportResolver - imported declarations are available", "[import]") {
-    writeTempFile("gg_lib_a.gg", "i32 helper() { return 7; }");
+    writeTempFile("gg_lib_a.gg", "fn helper() -> i32 { return 7; }");
     std::string mainPath = writeTempFile("gg_main_a.gg",
-        "import \"gg_lib_a.gg\";\ni32 main() { return helper(); }");
+        "import \"gg_lib_a.gg\";\nfn main() -> i32 { return helper(); }");
 
     ImportResolver resolver;
     Program result = resolver.resolve(mainPath);
@@ -81,12 +81,12 @@ TEST_CASE("ImportResolver - imported declarations are available", "[import]") {
 }
 
 TEST_CASE("ImportResolver - duplicate import is only included once", "[import]") {
-    writeTempFile("gg_shared.gg", "i32 shared() { return 0; }");
+    writeTempFile("gg_shared.gg", "fn shared() -> i32 { return 0; }");
     // Both mid_a.gg and mid_b.gg import the same shared.gg.
-    writeTempFile("gg_mid_a.gg", "import \"gg_shared.gg\";\ni32 midA() { return 1; }");
-    writeTempFile("gg_mid_b.gg", "import \"gg_shared.gg\";\ni32 midB() { return 2; }");
+    writeTempFile("gg_mid_a.gg", "import \"gg_shared.gg\";\nfn midA() -> i32 { return 1; }");
+    writeTempFile("gg_mid_b.gg", "import \"gg_shared.gg\";\nfn midB() -> i32 { return 2; }");
     std::string rootPath = writeTempFile("gg_root_dedup.gg",
-        "import \"gg_mid_a.gg\";\nimport \"gg_mid_b.gg\";\ni32 root() { return 0; }");
+        "import \"gg_mid_a.gg\";\nimport \"gg_mid_b.gg\";\nfn root() -> i32 { return 0; }");
 
     ImportResolver resolver;
     Program result = resolver.resolve(rootPath);
@@ -97,10 +97,10 @@ TEST_CASE("ImportResolver - duplicate import is only included once", "[import]")
 
 TEST_CASE("ImportResolver - transitive import works end-to-end", "[import]") {
     // io.gg depends on mem.gg; root depends on io.gg.
-    writeTempFile("gg_mem.gg",  "extern ptr malloc(u64 size);");
-    writeTempFile("gg_io.gg",   "import \"gg_mem.gg\";\nextern i32 puts(ptr s);");
+    writeTempFile("gg_mem.gg",  "extern malloc(u64 size) -> ptr;");
+    writeTempFile("gg_io.gg",   "import \"gg_mem.gg\";\nextern puts(ptr s) -> i32;");
     std::string rootPath = writeTempFile("gg_transitive_root.gg",
-        "import \"gg_io.gg\";\nvoid main() { puts(\"hi\"); }");
+        "import \"gg_io.gg\";\nfn main() { puts(\"hi\"); }");
 
     // malloc and puts should both be in scope — no errors expected.
     ImportResolver resolver;

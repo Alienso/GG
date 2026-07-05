@@ -34,6 +34,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     funcReturnTypes.clear();
     overloadedBases_.clear();
     freeFnBases_.clear();
+    slotReturningFns_.clear();
+    currentFnHasReturnSlot_ = false;
+    currentReturnAliasLocal_.clear();
     cgClasses_.clear();
     cgEnumNames_.clear();
     globalCtors_.clear();
@@ -128,8 +131,11 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             std::vector<Type> paramTypes;
             for (const auto& param : function.params)
                 paramTypes.push_back(resolveParamType(param));
-            Type ret = resolveReturnType(function.returnType);
+            bool objSlot = function.hasReturnSlot && isObjectReturnType(function.returnType);
+            Type ret = objSlot ? makeObjectType(function.returnType.lexeme)
+                               : resolveReturnType(function.returnType);
             std::string name = overloadEmittedName(function.name.lexeme, paramTypes, ret);
+            if (objSlot) slotReturningFns_.insert(name);
             funcReturnTypes[name] = ret;
             funcParamTypes[name] = std::move(paramTypes);
         } else if (std::holds_alternative<ExternFuncDeclStmt>(*decl.node)) {
@@ -148,9 +154,13 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
-                Type ret = (md.isConstructor || md.isDestructor)
-                         ? Type{TypeKind::Void} : resolveReturnType(md.returnType);
+                bool objSlot = md.hasReturnSlot && !md.isConstructor && !md.isDestructor
+                            && isObjectReturnType(md.returnType);
+                Type ret = (md.isConstructor || md.isDestructor) ? Type{TypeKind::Void}
+                         : objSlot ? makeObjectType(md.returnType.lexeme)
+                         : resolveReturnType(md.returnType);
                 std::string en2 = overloadEmittedName(base, paramTypes, ret);
+                if (objSlot) slotReturningFns_.insert(en2);
                 funcReturnTypes[en2] = ret;
                 funcParamTypes[en2] = std::move(paramTypes);
             }
@@ -161,7 +171,11 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
-                funcReturnTypes[mangledName] = resolveReturnType(md.returnType);
+                bool objSlot = md.hasReturnSlot && !md.isConstructor
+                            && isObjectReturnType(md.returnType);
+                funcReturnTypes[mangledName] = objSlot ? makeObjectType(md.returnType.lexeme)
+                                                       : resolveReturnType(md.returnType);
+                if (objSlot) slotReturningFns_.insert(mangledName);
                 funcParamTypes[mangledName] = std::move(paramTypes);
             }
         } else if (std::holds_alternative<ImplDeclStmt>(*decl.node)) {
@@ -172,8 +186,11 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
                 std::vector<Type> paramTypes;
                 for (const auto& param : md.params)
                     paramTypes.push_back(resolveParamType(param));
-                Type ret = resolveReturnType(md.returnType);
+                bool objSlot = md.hasReturnSlot && isObjectReturnType(md.returnType);
+                Type ret = objSlot ? makeObjectType(md.returnType.lexeme)
+                                   : resolveReturnType(md.returnType);
                 std::string en3 = overloadEmittedName(base, paramTypes, ret);
+                if (objSlot) slotReturningFns_.insert(en3);
                 funcReturnTypes[en3] = ret;
                 funcParamTypes[en3] = std::move(paramTypes);
             }

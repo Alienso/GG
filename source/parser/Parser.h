@@ -134,7 +134,15 @@ private:
                                             std::deque<MethodDecl>& methods,
                                             bool allowDestructor,
                                             bool isEnum);
-    [[nodiscard]] Stmt      parseFunctionDecl(const Token& returnType, const Token& name);
+    // After the `fn` keyword: a free function `name(params) [-> RetType [alias]] { }`.
+    [[nodiscard]] Stmt      parseFnDeclaration();
+    // Parse the tail of a trait/impl method (`;` bodyless, or `{ body }`).
+    void                    parseTraitMethodBody(bool bodyOptional, bool& hasBody, BlockStmt& body);
+    // Parses `(param, ...)` — the parenthesised parameter list.
+    [[nodiscard]] std::vector<ParamDecl> parseParamList();
+    // Parses an optional `-> RetType [alias]` return suffix. Returns the return type token
+    // (a synthesized `void` token when the arrow is absent); sets hasAlias/aliasName.
+    [[nodiscard]] Token     parseReturnSuffix(bool& hasAlias, std::string& aliasName);
     // Parses one parameter: an optional leading `mut`, then `<type> IDENTIFIER`.
     [[nodiscard]] ParamDecl parseParam();
     [[nodiscard]] Stmt      parseExternFuncDecl(const Token& keyword);

@@ -23,11 +23,11 @@ enum Planet {
         this.radius = radius;
     }
 
-    f64 getMass()   { return this.mass; }
-    f64 getRadius() { return this.radius; }
+    fn getMass() -> f64   { return this.mass; }
+    fn getRadius() -> f64 { return this.radius; }
 
     // surface gravity proxy: mass / (radius * radius)
-    f64 gravity() {
+    fn gravity() -> f64 {
         return this.mass / (this.radius * this.radius);
     }
 }
@@ -42,7 +42,7 @@ enum Color {
     BLUE
 }
 
-i32 main() {
+fn main() -> i32 {
     // 1-2: field access on a variant singleton
     if (Planet.EARTH.mass != 5.976)        { return 1; }
     if (Planet.JUPITER.radius != 71.492)   { return 2; }

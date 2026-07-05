@@ -3,22 +3,22 @@
 // Wraps the standard math functions from <math.h>.
 // All functions operate on f64 (double precision).
 
-extern f64 sin(f64 x);              // sine of x (radians)
-extern f64 cos(f64 x);              // cosine of x (radians)
-extern f64 tan(f64 x);              // tangent of x (radians)
-extern f64 asin(f64 x);             // arc sine (result in radians)
-extern f64 acos(f64 x);             // arc cosine (result in radians)
-extern f64 atan(f64 x);             // arc tangent (result in radians)
-extern f64 atan2(f64 y, f64 x);     // arc tangent of y/x using quadrant signs
-extern f64 sqrt(f64 x);             // square root
-extern f64 cbrt(f64 x);             // cube root
-extern f64 pow(f64 base, f64 exp);  // base raised to the power exp
-extern f64 exp(f64 x);              // e raised to the power x
-extern f64 log(f64 x);              // natural logarithm (base e)
-extern f64 log2(f64 x);             // base-2 logarithm
-extern f64 log10(f64 x);            // base-10 logarithm
-extern f64 fabs(f64 x);             // absolute value
-extern f64 floor(f64 x);            // round toward negative infinity
-extern f64 ceil(f64 x);             // round toward positive infinity
-extern f64 round(f64 x);            // round to nearest integer (halfway rounds away from zero)
-extern f64 fmod(f64 x, f64 y);      // floating-point remainder of x / y
+extern sin(f64 x) -> f64;              // sine of x (radians)
+extern cos(f64 x) -> f64;              // cosine of x (radians)
+extern tan(f64 x) -> f64;              // tangent of x (radians)
+extern asin(f64 x) -> f64;             // arc sine (result in radians)
+extern acos(f64 x) -> f64;             // arc cosine (result in radians)
+extern atan(f64 x) -> f64;             // arc tangent (result in radians)
+extern atan2(f64 y, f64 x) -> f64;     // arc tangent of y/x using quadrant signs
+extern sqrt(f64 x) -> f64;             // square root
+extern cbrt(f64 x) -> f64;             // cube root
+extern pow(f64 base, f64 exp) -> f64;  // base raised to the power exp
+extern exp(f64 x) -> f64;              // e raised to the power x
+extern log(f64 x) -> f64;              // natural logarithm (base e)
+extern log2(f64 x) -> f64;             // base-2 logarithm
+extern log10(f64 x) -> f64;            // base-10 logarithm
+extern fabs(f64 x) -> f64;             // absolute value
+extern floor(f64 x) -> f64;            // round toward negative infinity
+extern ceil(f64 x) -> f64;             // round toward positive infinity
+extern round(f64 x) -> f64;            // round to nearest integer (halfway rounds away from zero)
+extern fmod(f64 x, f64 y) -> f64;      // floating-point remainder of x / y

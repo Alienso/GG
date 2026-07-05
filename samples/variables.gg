@@ -1,11 +1,11 @@
 
-i32 main(){
+fn main() -> i32{
 
     i32 x = 5;
     f32 y = 1.0;
     f64 z = 0.5;
     mut char c = '!';
-    string variable = "Hello World!";
+    ptr message = "Hello World!";   // string literals are C-string pointers (ptr)
 
     bool cond = true;
 

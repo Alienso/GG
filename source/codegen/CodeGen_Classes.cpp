@@ -155,6 +155,39 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
     std::string returnIrType = irTypeName(resolvedType);
 
+    // Return-slot (sret) method used as a value (not a plain variable initializer — that path
+    // writes in place via emitSlotCall): materialize the result into a temp object. Checked
+    // before the ordinary receiver evaluation below.
+    if (resolvedType.kind == TypeKind::Object) {
+        // Static call via type name: Class::make(...).
+        if (std::holds_alternative<IdentifierExpr>(*mc.object->node)) {
+            const auto& id = std::get<IdentifierExpr>(*mc.object->node);
+            auto cgIt = cgClasses_.find(id.name.lexeme);
+            if (cgIt != cgClasses_.end() && cgIt->second.staticMethods.count(mc.method.lexeme)) {
+                std::string mName = calleeName(&mc, id.name.lexeme + "_" + mc.method.lexeme);
+                if (slotReturningFns_.count(mName)) {
+                    std::string tmp = materializeSlotTemp(resolvedType.className);
+                    emitSretCall(mName, mc.args, tmp, "");
+                    return tmp;
+                }
+            }
+        } else {
+            Type objType = exprType(*mc.object);
+            if (objType.kind == TypeKind::Object || objType.kind == TypeKind::Reference) {
+                std::string mName = calleeName(&mc, objType.className + "_" + mc.method.lexeme);
+                if (slotReturningFns_.count(mName)) {
+                    auto cgIt = cgClasses_.find(objType.className);
+                    bool isStatic = cgIt != cgClasses_.end()
+                                 && cgIt->second.staticMethods.count(mc.method.lexeme) > 0;
+                    std::string recv = isStatic ? "" : genExpr(*mc.object);
+                    std::string tmp  = materializeSlotTemp(resolvedType.className);
+                    emitSretCall(mName, mc.args, tmp, recv);
+                    return tmp;
+                }
+            }
+        }
+    }
+
     // Static call through the type name: ClassName::method(args) — no receiver.
     if (std::holds_alternative<IdentifierExpr>(*mc.object->node)) {
         const auto& id = std::get<IdentifierExpr>(*mc.object->node);

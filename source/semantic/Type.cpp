@@ -58,8 +58,19 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     if (from == to)                          return CastResult::Silent;  // identity
     if (isError(from) || isError(to))        return CastResult::None;
 
-    // char and u32 share the same underlying representation (char = Unicode code point)
     TypeKind f = from.kind, t = to.kind;
+
+    // Generic-body checking only: a type parameter `T` and a reference/value of that same
+    // parameter (`T&` / `T`) are interchangeable — the value-vs-reference distinction is a
+    // concrete-lowering detail not knowable abstractly (a bound method may return `Self` or
+    // `Self&`). Gated on a TypeParam being involved, so it never affects concrete-typed code.
+    if ((f == TypeKind::TypeParam || t == TypeKind::TypeParam)
+        && from.className == to.className
+        && (f == TypeKind::TypeParam || f == TypeKind::Reference || f == TypeKind::Object)
+        && (t == TypeKind::TypeParam || t == TypeKind::Reference || t == TypeKind::Object))
+        return CastResult::Silent;
+
+    // char and u32 share the same underlying representation (char = Unicode code point)
     if ((f == TypeKind::Char && t == TypeKind::U32) ||
         (f == TypeKind::U32  && t == TypeKind::Char))
         return CastResult::Silent;
@@ -218,6 +229,7 @@ std::string typeName(const Type& t) {
             Type elem = typedPtrElement(t);
             return "ptr<" + typeName(elem) + ">";
         }
+        case TypeKind::TypeParam: return t.className;   // the parameter name, e.g. "T"
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "<error>";
     }

@@ -976,16 +976,22 @@ class Wrapper<T: Show + Ord> { T& inner; /* ... */ }
 Bounds accept **user traits and the built-in operator traits** (`Add`, `Ord`, `Eq`, …).
 Dispatch is static — bounds add no runtime cost.
 
-Enforcement is at each **instantiation site**: `maxOf<Point>` requires `Point` to
-implement `Comparable`, otherwise you get a clear error —
-`type 'Point' does not satisfy bound 'Comparable' required by 'maxOf$Point'`. A
-primitive argument (`maxOf<i32>`) or an unknown trait name in a bound is likewise
-rejected.
+Enforcement happens in **two** places:
 
-Because generics are monomorphized before type checking, the bound is **not** used to
-pre-check the generic body against the trait interface — a body may call any method the
-concrete type happens to have, not only those declared by its bounds. Bounds document
-intent and guarantee a clean instantiation-site error when a type doesn't conform.
+1. **At each instantiation site**: `maxOf<Point>` requires `Point` to implement `Comparable`,
+   otherwise you get a clear error —
+   `type 'Point' does not satisfy bound 'Comparable' required by 'maxOf$Point'`. A primitive
+   argument (`maxOf<i32>`) or an unknown trait name in a bound is likewise rejected.
+2. **In the body, at the definition**: a bounded parameter is checked against its bounds — a value
+   of `T: A + B` may be used only via the methods/operators that `A` or `B` provide. Calling a
+   method not in any bound, using an operator whose trait isn't bound, or accessing a field of `T`
+   is a compile error *even if the eventual concrete type happens to provide it*. For example, a
+   `fn f<T: Show>(T& a) { … a.compareTo(b) … }` is rejected because `Show` declares no `compareTo`.
+
+**Unbounded** type parameters (`<T>` with no trait) are **not** body-checked — they stay
+permissive (duck-typed at instantiation), so `fn addT<T>(T a, T b) -> T { return a + b; }` and
+`maxT` keep working. Add a bound to opt into definition-time checking. Dispatch remains static —
+bounds add no runtime cost.
 
 ### Other constraints
 - Recursive instantiation (e.g. `Node<Node<T>>`) is supported.

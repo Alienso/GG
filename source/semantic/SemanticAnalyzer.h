@@ -146,12 +146,29 @@ private:
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
+    // Active only while checking a generic template body (checkGenericBodies): maps each type
+    // parameter name to its bound trait names (empty ⇒ unbounded, permissive). A bare `T` /
+    // `T&` value is then an abstract type usable only via what its bounds provide.
+    std::unordered_map<std::string, std::vector<std::string>> currentTypeParamBounds_;
 
     // Pass 0: collect class declarations (before collectFunctions)
     void collectClasses(const Program& program);
     // Pass 0a: reject value-object field cycles (`class A{B b} class B{A a}`) — an infinite-size
     // struct. Only value-object embedding counts; reference/ptr fields break cycles.
     void checkValueFieldCycles(const Program& program);
+    // Definition-time checking of bounded generic template bodies against their bounds: a value of
+    // a bounded param `T: A + B` may be used only via methods/operators that A or B provide.
+    void checkGenericBodies(const Program& program);
+    // If `t` is (a value/reference/param of) a current generic type parameter, return its bound
+    // trait names (may be empty = unbounded); nullptr if `t` is not a type parameter.
+    [[nodiscard]] const std::vector<std::string>* typeParamBoundsOf(const Type& t) const;
+    // Resolve method `name`/arity against a type parameter's bounds (user-trait methods + built-in
+    // operator-trait conventional methods). On success sets `out` (Self → the parameter).
+    [[nodiscard]] bool resolveBoundMethod(const std::vector<std::string>& bounds,
+                                          const std::string& paramName, const std::string& name,
+                                          size_t argc, Type& out);
+    [[nodiscard]] bool builtinBoundMethod(const std::string& trait, const std::string& method,
+                                          size_t argc, const std::string& paramName, Type& out) const;
     // Trait/impl passes: register trait contracts, then attach impl methods to their target
     // class and check conformance.
     void collectTraits(const Program& program);

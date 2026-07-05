@@ -45,6 +45,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     for (const Stmt& stmt : program.declarations)
         analyzeStmt(stmt);      // pass 2: full analysis
 
+    checkGenericBodies(program);  // pass 3: check bounded generic bodies against their bounds
+
     symbolTable.exitScope();
 
     std::unordered_set<std::string> eqImpls;
@@ -406,6 +408,89 @@ void SemanticAnalyzer::checkGenericBounds(const Program& program) {
 }
 
 // ============================================================
+// Pass 3 — check bounded generic bodies against their bounds
+// ============================================================
+
+const std::vector<std::string>* SemanticAnalyzer::typeParamBoundsOf(const Type& t) const {
+    if (currentTypeParamBounds_.empty()) return nullptr;
+    // A bare `T` (TypeParam), a `T&` (Reference), or `T` re-materialised as Object all carry the
+    // parameter name in className; the active param map decides whether that name is a parameter.
+    if (t.kind == TypeKind::TypeParam || t.kind == TypeKind::Reference || t.kind == TypeKind::Object) {
+        auto it = currentTypeParamBounds_.find(t.className);
+        if (it != currentTypeParamBounds_.end()) return &it->second;
+    }
+    return nullptr;
+}
+
+bool SemanticAnalyzer::builtinBoundMethod(const std::string& trait, const std::string& method,
+                                          size_t argc, const std::string& paramName, Type& out) const {
+    if (argc == 1 && ((trait == "Add" && method == "add") || (trait == "Sub" && method == "sub")
+        || (trait == "Mul" && method == "mul") || (trait == "Div" && method == "div")
+        || (trait == "Rem" && method == "rem"))) { out = makeTypeParam(paramName); return true; }
+    if (trait == "Neg" && method == "neg" && argc == 0) { out = makeTypeParam(paramName); return true; }
+    if (trait == "Ord" && method == "cmp" && argc == 1) { out = Type{TypeKind::I32};  return true; }
+    if (trait == "Eq"  && method == "eq"  && argc == 1) { out = Type{TypeKind::Bool}; return true; }
+    return false;
+}
+
+bool SemanticAnalyzer::resolveBoundMethod(const std::vector<std::string>& bounds,
+                                          const std::string& paramName, const std::string& name,
+                                          size_t argc, Type& out) {
+    for (const std::string& b : bounds) {
+        // User trait: its declared method signatures (Self → the parameter).
+        auto tit = traitRegistry.find(b);
+        if (tit != traitRegistry.end()) {
+            for (const MethodDecl& md : tit->second->methods) {
+                if (md.name.lexeme == name && md.params.size() == argc) {
+                    std::string savedSelf = currentSelfType_;
+                    currentSelfType_ = paramName;             // Self resolves to the type parameter
+                    out = resolveTypeToken(md.returnType);
+                    currentSelfType_ = savedSelf;
+                    return true;
+                }
+            }
+        }
+        // Built-in operator trait: its conventional method (add/sub/cmp/eq/neg/…).
+        if (builtinBoundMethod(b, name, argc, paramName, out)) return true;
+    }
+    return false;
+}
+
+void SemanticAnalyzer::checkGenericBodies(const Program& program) {
+    for (const GenericTemplateDecl& gtd : program.genericTemplates) {
+        if (!gtd.decl.node) continue;
+
+        // Bind each type parameter to its bounds (empty ⇒ unbounded / permissive).
+        currentTypeParamBounds_.clear();
+        bool anyBounded = false;
+        for (size_t i = 0; i < gtd.typeParams.size(); ++i) {
+            std::vector<std::string> b = (i < gtd.bounds.size()) ? gtd.bounds[i]
+                                                                 : std::vector<std::string>{};
+            if (!b.empty()) anyBounded = true;
+            currentTypeParamBounds_.emplace(gtd.typeParams[i], std::move(b));
+        }
+        if (!anyBounded) { currentTypeParamBounds_.clear(); continue; }  // nothing to enforce
+
+        if (std::holds_alternative<FunctionDeclStmt>(*gtd.decl.node)) {
+            analyzeFunctionDecl(std::get<FunctionDeclStmt>(*gtd.decl.node));
+        } else if (std::holds_alternative<ClassDeclStmt>(*gtd.decl.node)) {
+            const auto& cls = std::get<ClassDeclStmt>(*gtd.decl.node);
+            const std::string& name = cls.name.lexeme;
+            // Temporarily register the template class (with its type params known as type names)
+            // so field / method / `this` lookups resolve while its method bodies are analysed.
+            for (const auto& [tp, _] : currentTypeParamBounds_) declaredClassNames_.insert(tp);
+            bool hadClass = classRegistry.count(name) > 0;
+            if (!hadClass)
+                classRegistry.emplace(name, buildClassInfo(name, cls.fields, cls.methods, true));
+            analyzeClassDecl(cls);
+            if (!hadClass) classRegistry.erase(name);
+            for (const auto& [tp, _] : currentTypeParamBounds_) declaredClassNames_.erase(tp);
+        }
+        currentTypeParamBounds_.clear();
+    }
+}
+
+// ============================================================
 // Pass 1 — collect top-level function signatures
 // ============================================================
 
@@ -514,9 +599,16 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
         if (synth.className == "Self") synth.className = currentSelfType_;
         return synth;
     }
-    // Bare `Self` → the implementing type (object). Valid only inside a trait/impl body.
-    if (typeToken.type == TokenType::SELF)
-        return currentSelfType_.empty() ? Type{TypeKind::Error} : makeObjectType(currentSelfType_);
+    // Bare `Self` → the implementing type (object); during a generic body-check where Self is a
+    // type parameter, it is the abstract parameter itself.
+    if (typeToken.type == TokenType::SELF) {
+        if (currentSelfType_.empty()) return Type{TypeKind::Error};
+        if (currentTypeParamBounds_.count(currentSelfType_)) return makeTypeParam(currentSelfType_);
+        return makeObjectType(currentSelfType_);
+    }
+    // A bare generic type-parameter name (only while checking a bounded generic body).
+    if (typeToken.type == TokenType::IDENTIFIER && currentTypeParamBounds_.count(typeToken.lexeme))
+        return makeTypeParam(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && enumRegistry.count(typeToken.lexeme))
         return makeEnumType(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))

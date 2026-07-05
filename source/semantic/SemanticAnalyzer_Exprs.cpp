@@ -1,4 +1,5 @@
 #include "SemanticAnalyzer.h"
+#include <algorithm>
 
 // Best-match overload pick for operator desugaring (defined below).
 static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
@@ -231,6 +232,15 @@ Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
             return Type{TypeKind::Bool};
 
         case TokenType::MINUS:
+            // Generic body-check: unary '-' on a type parameter requires a `Neg` bound.
+            if (const std::vector<std::string>* bounds = typeParamBoundsOf(operandType)) {
+                if (bounds->empty()) return Type{TypeKind::Error};
+                if (std::find(bounds->begin(), bounds->end(), "Neg") != bounds->end())
+                    return makeTypeParam(operandType.className);
+                error(unary.operatorToken, "unary '-' on type parameter '" + operandType.className
+                      + "' requires bound 'Neg'");
+                return Type{TypeKind::Error};
+            }
             // Operator overloading: unary '-' on a class → the Neg trait's `neg` method.
             if (operandType.kind == TypeKind::Object || operandType.kind == TypeKind::Reference) {
                 auto implIt = implementedTraits.find(operandType.className);
@@ -314,6 +324,25 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
     Type rightType = analyzeExpr(*binary.right);
 
     if (isError(leftType) || isError(rightType)) return Type{TypeKind::Error};
+
+    // Generic body-check: an operator on a value of a type parameter requires the matching
+    // operator trait among the parameter's bounds. Unbounded ⇒ permissive (suppressed).
+    if (const std::vector<std::string>* bounds = typeParamBoundsOf(leftType)) {
+        if (bounds->empty()) return Type{TypeKind::Error};
+        const auto* ot = operatorTraitFor(binary.operatorToken.type);
+        if (ot) {
+            const std::string& trait = ot->first;
+            if (std::find(bounds->begin(), bounds->end(), trait) != bounds->end())
+                return (trait == "Eq" || trait == "Ord") ? Type{TypeKind::Bool}
+                                                         : makeTypeParam(leftType.className);
+            error(binary.operatorToken, "operator '" + binary.operatorToken.lexeme
+                  + "' on type parameter '" + leftType.className + "' requires bound '" + trait + "'");
+            return Type{TypeKind::Error};
+        }
+        error(binary.operatorToken, "operator '" + binary.operatorToken.lexeme
+              + "' is not available on type parameter '" + leftType.className + "'");
+        return Type{TypeKind::Error};
+    }
 
     // Operator overloading: if the left operand is a class, desugar to its trait method.
     if (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference) {
@@ -797,6 +826,16 @@ Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
 
     if (isError(objectType)) return Type{TypeKind::Error};
 
+    // Generic body-check: `t[i]` on a type parameter requires an `Index` bound. The element type
+    // is not knowable abstractly, so the result is left suppressed (no associated types in v1).
+    if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
+        if (bounds->empty()) return Type{TypeKind::Error};
+        if (std::find(bounds->begin(), bounds->end(), "Index") != bounds->end())
+            return Type{TypeKind::Error};   // element type unknown — permissive
+        error(site, "'[]' on type parameter '" + objectType.className + "' requires bound 'Index'");
+        return Type{TypeKind::Error};
+    }
+
     // Operator overloading: a[i] on a class → the Index trait's `get` method.
     if (objectType.kind == TypeKind::Object || objectType.kind == TypeKind::Reference) {
         auto implIt = implementedTraits.find(objectType.className);
@@ -942,6 +981,15 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
 
     Type objectType = analyzeExpr(*memberAccess.object);
     if (isError(objectType)) return Type{TypeKind::Error};
+
+    // Generic body-check: a type parameter is opaque — traits declare no fields, so field access
+    // on a bounded `T` is an error (unbounded ⇒ permissive/suppressed).
+    if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
+        if (bounds->empty()) return Type{TypeKind::Error};
+        error(memberAccess.field, "cannot access field '" + memberAccess.field.lexeme
+              + "' of type parameter '" + objectType.className + "' (a bound provides methods, not fields)");
+        return Type{TypeKind::Error};
+    }
 
     const ClassInfo* cls = lookupObjectClass(objectType, memberAccess.field);
     if (!cls) return Type{TypeKind::Error};
@@ -1185,6 +1233,23 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     Type objectType = analyzeExpr(*methodCall.object);
     if (isError(objectType)) {
         for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
+    // Generic body-check: a method call on a value of a type parameter resolves against the
+    // parameter's bounds (not a concrete class). Unbounded ⇒ permissive (suppressed).
+    if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
+        for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+        if (bounds->empty()) return Type{TypeKind::Error};   // unbounded — duck-typed at instantiation
+        Type ret;
+        if (resolveBoundMethod(*bounds, objectType.className, methodCall.method.lexeme,
+                               methodCall.args.size(), ret))
+            return ret;
+        std::string list;
+        for (size_t i = 0; i < bounds->size(); ++i) list += (i ? ", " : "") + (*bounds)[i];
+        error(methodCall.method, "no method '" + methodCall.method.lexeme
+              + "' provided by the bounds (" + list + ") of type parameter '"
+              + objectType.className + "'");
         return Type{TypeKind::Error};
     }
 

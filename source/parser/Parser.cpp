@@ -352,6 +352,33 @@ void Parser::runMonomorphization(Program& program) {
         current = 0;
         program.declarations.push_back(parseDeclaration());
     }
+
+    // Surface bounded generic templates for definition-time body checking (semantic pass
+    // checkGenericBodies). Re-parse each template's ORIGINAL body (no type substitution) with
+    // its type-parameter names registered as types, using a throwaway parser with its OWN
+    // registry so the parse cannot perturb this monomorphization or enqueue real instantiations.
+    for (const auto& [tmplName, tmpl] : gen_->templates) {
+        bool hasBound = false;
+        for (const auto& b : tmpl.bounds) if (!b.empty()) { hasBound = true; break; }
+        if (!hasBound) continue;   // only bounded templates are checked
+
+        std::unordered_set<std::string> scratchClasses = classNames;
+        for (const std::string& tp : tmpl.typeParams) scratchClasses.insert(tp);
+
+        std::vector<Token> toks(tmpl.tokens);
+        toks.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
+
+        try {
+            Parser scratch(scratchClasses, /*sharedRegistry=*/nullptr);
+            Program bodyProg = scratch.parse(toks, filename, /*runMonomorphization=*/false);
+            if (!bodyProg.declarations.empty() && bodyProg.declarations.front().node)
+                program.genericTemplates.push_back(GenericTemplateDecl{
+                    std::move(bodyProg.declarations.front()), tmpl.typeParams, tmpl.bounds });
+        } catch (const CompileError&) {
+            // Body could not be re-parsed for checking — skip silently. Monomorphized
+            // instantiations are still analyzed normally; only a definition-time diagnostic is lost.
+        }
+    }
 }
 
 // ============================================================

@@ -330,9 +330,21 @@ struct GenericBoundCheck {
     int         line = 0;    // use-site line for diagnostics
 };
 
+// A generic template surfaced for definition-time body checking against its bounds. `decl` is the
+// template's original body re-parsed with its type-parameter names registered as types (no
+// substitution); `typeParams`/`bounds` are parallel (bounds[i] = trait names on typeParams[i]).
+// Only templates with at least one bounded parameter are surfaced. See
+// SemanticAnalyzer::checkGenericBodies.
+struct GenericTemplateDecl {
+    Stmt                                  decl;        // FunctionDeclStmt or ClassDeclStmt
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;
+};
+
 struct Program {
-    std::vector<Stmt>              declarations;
-    std::vector<GenericBoundCheck> genericBoundChecks;
+    std::vector<Stmt>                  declarations;
+    std::vector<GenericBoundCheck>     genericBoundChecks;
+    std::vector<GenericTemplateDecl>   genericTemplates;   // bounded templates, for body checking
 };
 
 // ============================================================

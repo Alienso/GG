@@ -23,6 +23,9 @@ enum class TypeKind {
     Enum,   // enum value — a pointer to a global singleton variant; className stores the enum name
     Reference, // heap reference to a class instance (Ref<Class>, refcounted); className stores the pointee class
     TypedPtr,  // typed raw pointer ptr<T> (internal); elementKind (+ className) describe the element
+    TypeParam, // abstract generic type parameter (e.g. `T`) during generic-body checking; className
+               // holds the parameter name. Semantic-only — never reaches codegen (which sees only
+               // monomorphized concrete decls). Bounds are looked up by name in the analyzer.
     Void,   // for functions that return nothing
     Error   // sentinel: suppresses cascading errors
 };
@@ -88,6 +91,15 @@ inline Type makeTypedPtr(TypeKind elementKind, const std::string& className = ""
     t.kind        = TypeKind::TypedPtr;
     t.elementKind = elementKind;
     t.className   = className;
+    return t;
+}
+
+// Convenience constructor for an abstract generic type parameter (`T`). Used only while
+// checking a generic body against its bounds; the parameter's bounds are resolved by name.
+inline Type makeTypeParam(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::TypeParam;
+    t.className = name;
     return t;
 }
 

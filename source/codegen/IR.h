@@ -33,6 +33,7 @@ inline std::string irTypeName(const Type& t) {
         case TypeKind::Enum:   return "ptr";   // enum value — a pointer to a global singleton variant
         case TypeKind::Reference: return "ptr";   // refcounted heap reference — an opaque pointer to the object body
         case TypeKind::TypedPtr:  return "ptr";   // typed raw pointer ptr<T> — an opaque pointer at the IR level
+        case TypeKind::TypeParam: return "ptr";   // generic type parameter — semantic-only, never emitted
         case TypeKind::Void:   return "void";
         case TypeKind::Error:  return "i32";   // fallback — suppressed errors
     }

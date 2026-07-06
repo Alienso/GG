@@ -129,6 +129,25 @@ struct SizeofExpr {
     Token typeName;   // the (possibly synthesized) type token
 };
 
+// One arm of a `switch`. `labels` empty ⇒ the `default` arm. Exactly one of
+// `valueExpr` (arrow `-> expr` form) or `block` (arrow `-> { ... }` form) is set.
+// All members are pointers so the struct is usable while Expr/Stmt are incomplete
+// (SwitchExpr is itself an Expr variant alternative). Move-only (Token const members).
+struct SwitchArm {
+    std::vector<std::unique_ptr<Expr>> labels;      // compared against the scrutinee
+    bool                               isDefault = false;
+    std::unique_ptr<Expr>              valueExpr;    // `-> expr ;` form (nullptr if block)
+    std::unique_ptr<Stmt>              block;        // `-> { ... }` form (nullptr if expr)
+    Token                              arrow;        // the '->' token, for diagnostics
+};
+
+// Switch expression: `switch (scrutinee) { arms }` producing a value (see SwitchArm).
+struct SwitchExpr {
+    Token                  keyword;     // the 'switch' token
+    std::unique_ptr<Expr>  scrutinee;
+    std::deque<SwitchArm>  arms;        // deque: SwitchArm is move-only (Token const members)
+};
+
 // ---- Expr wrapper ----
 
 struct Expr {
@@ -150,7 +169,8 @@ struct Expr {
         MethodCallExpr,
         CastExpr,
         NewExpr,
-        SizeofExpr
+        SizeofExpr,
+        SwitchExpr
     >;
     std::unique_ptr<Variant> node;
 };
@@ -196,6 +216,20 @@ struct ContinueStmt {
 struct ReturnStmt {
     Token keyword;
     std::optional<Expr> value;
+};
+
+// Switch statement: `switch (scrutinee) { arms }`. Arrow-form arms (SwitchArm),
+// value discarded. `default` optional (no exhaustiveness requirement).
+struct SwitchStmt {
+    Token                 keyword;     // the 'switch' token
+    Expr                  scrutinee;
+    std::deque<SwitchArm> arms;
+};
+
+// `yield expr;` — produces the value of the enclosing switch-expression arm.
+struct YieldStmt {
+    Token keyword;
+    Expr  value;
 };
 
 struct ParamDecl {
@@ -311,6 +345,8 @@ struct Stmt {
         BreakStmt,
         ContinueStmt,
         ReturnStmt,
+        SwitchStmt,
+        YieldStmt,
         FunctionDeclStmt,
         ExternFuncDeclStmt,
         ImportStmt,

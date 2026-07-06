@@ -149,6 +149,9 @@ private:
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
+    // Result type of each enclosing switch *expression* (a `yield` inside a block arm is checked
+    // against the top). Empty ⇒ no switch expression in scope ⇒ `yield` is an error.
+    std::vector<Type>   switchExprResultStack_;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
     // Active only while checking a generic template body (checkGenericBodies): maps each type
     // parameter name to its bound trait names (empty ⇒ unbounded, permissive). A bare `T` /
@@ -218,6 +221,8 @@ private:
     void analyzeReturn(const ReturnStmt& returnStmt);
     void analyzeBreak(const BreakStmt& breakStmt);
     void analyzeContinue(const ContinueStmt& continueStmt);
+    void analyzeSwitchStmt(const SwitchStmt& switchStmt);
+    void analyzeYield(const YieldStmt& yieldStmt);
     void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
     void analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl);
     void analyzeClassDecl(const ClassDeclStmt& classDecl);
@@ -231,6 +236,22 @@ private:
     [[nodiscard]] Type analyzeIdentifier(const IdentifierExpr& identifier);
     [[nodiscard]] Type analyzeUnary(const UnaryExpr& unary);
     [[nodiscard]] Type analyzeBinary(const BinaryExpr& binary);
+    [[nodiscard]] Type analyzeSwitchExpr(const SwitchExpr& switchExpr);
+    // Shared equality (==/!=) classifier: records the codegen decision (Eq-impl overload /
+    // reference address identity / value-object structural) keyed by `nodeKey`, and returns
+    // Bool (or Error, emitting a diagnostic via `what` at `at`). Reused by switch case labels.
+    [[nodiscard]] Type classifyEquality(const Type& leftType, const Type& rightType,
+                                        const void* nodeKey, const Token& at,
+                                        const std::string& what);
+    // Analyze one switch arm's labels against the scrutinee type and its body; used by both
+    // the statement and expression forms. `expectedResult` (non-null) means expression form:
+    // arm value/yield must produce a value assignable to *expectedResult (updated in place if
+    // it starts as Error to infer from the first arm).
+    void analyzeSwitchArm(const SwitchArm& arm, const Type& scrutineeType,
+                          Type* expectedResult, const Token& switchTok);
+    // Report duplicate case labels that are compile-time identifiable (int/char/bool/string
+    // literals, negated int literals, enum variants, and identifier labels).
+    void checkDuplicateLabels(const std::deque<SwitchArm>& arms);
     [[nodiscard]] Type analyzeAssign(const AssignExpr& assign);
     [[nodiscard]] Type analyzeCompoundAssign(const CompoundAssignExpr& compoundAssign);
     [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);

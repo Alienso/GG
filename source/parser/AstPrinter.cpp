@@ -159,7 +159,33 @@ void AstPrinter::printExpr(const Expr& expr) {
             out("Sizeof '" + sizeofExpr.typeName.lexeme + "'");
         },
 
+        [&](const SwitchExpr& switchExpr) {
+            out("SwitchExpr");
+            indent++;
+            out("scrutinee:");
+            indent++;
+            printExpr(*switchExpr.scrutinee);
+            indent--;
+            for (const SwitchArm& arm : switchExpr.arms) printArm(arm);
+            indent--;
+        },
+
     }, *expr.node);
+}
+
+void AstPrinter::printArm(const SwitchArm& arm) {
+    if (arm.isDefault) {
+        out("default ->");
+    } else {
+        out("case ->");
+        indent++;
+        for (const auto& label : arm.labels) printExpr(*label);
+        indent--;
+    }
+    indent++;
+    if (arm.valueExpr) printExpr(*arm.valueExpr);
+    else if (arm.block) printStmt(*arm.block);
+    indent--;
 }
 
 void AstPrinter::printStmt(const Stmt& stmt) {
@@ -250,6 +276,24 @@ void AstPrinter::printStmt(const Stmt& stmt) {
                 printExpr(*returnStmt.value);
                 indent--;
             }
+        },
+
+        [&](const SwitchStmt& switchStmt) {
+            out("Switch");
+            indent++;
+            out("scrutinee:");
+            indent++;
+            printExpr(switchStmt.scrutinee);
+            indent--;
+            for (const SwitchArm& arm : switchStmt.arms) printArm(arm);
+            indent--;
+        },
+
+        [&](const YieldStmt& yieldStmt) {
+            out("Yield");
+            indent++;
+            printExpr(yieldStmt.value);
+            indent--;
         },
 
         [&](const FunctionDeclStmt& functionDecl) {

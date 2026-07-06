@@ -25,6 +25,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const CastExpr& castExpr)              const { return exprFirstToken(*castExpr.operand); }
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
+        const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -66,6 +67,16 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ForStmt&)             { return false; },  // may not execute
         [](const BreakStmt&)           { return false; },
         [](const ContinueStmt&)        { return false; },
+        [](const SwitchStmt& sw)       {
+            // Exhaustive (has default) and every arm's body always returns.
+            bool hasDefault = false;
+            for (const SwitchArm& arm : sw.arms) {
+                if (arm.isDefault) hasDefault = true;
+                if (!(arm.block && alwaysReturns(*arm.block))) return false;
+            }
+            return hasDefault;
+        },
+        [](const YieldStmt&)           { return false; },  // exits the switch expr, not the fn
         [](const ExprStmt&)            { return false; },
         [](const FunctionDeclStmt&)    { return false; },
         [](const ExternFuncDeclStmt&)  { return false; },
@@ -91,6 +102,8 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ReturnStmt& returnStmt)            { analyzeReturn(returnStmt); },
         [&](const BreakStmt& breakStmt)             { analyzeBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },
+        [&](const SwitchStmt& switchStmt)           { analyzeSwitchStmt(switchStmt); },
+        [&](const YieldStmt& yieldStmt)             { analyzeYield(yieldStmt); },
         [&](const FunctionDeclStmt& functionDecl)    { analyzeFunctionDecl(functionDecl); },
         [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },
         [&](const ImportStmt&)                       { /* resolved before semantic pass */ },
@@ -250,6 +263,28 @@ void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
     // The function's return type is the overload-resolution context for the value.
     Type actualType = analyzeWithExpected(*returnStmt.value, *currentReturnType);
     checkCast(actualType, *currentReturnType, returnStmt.keyword, "return");
+}
+
+void SemanticAnalyzer::analyzeSwitchStmt(const SwitchStmt& switchStmt) {
+    Type scrutineeType = analyzeExpr(switchStmt.scrutinee);
+    checkDuplicateLabels(switchStmt.arms);
+    // Statement form: `default` optional, no exhaustiveness requirement.
+    for (const SwitchArm& arm : switchStmt.arms)
+        analyzeSwitchArm(arm, scrutineeType, /*expectedResult=*/nullptr, switchStmt.keyword);
+}
+
+void SemanticAnalyzer::analyzeYield(const YieldStmt& yieldStmt) {
+    if (switchExprResultStack_.empty()) {
+        error(yieldStmt.keyword, "'yield' is only valid inside a switch expression arm");
+        analyzeExpr(yieldStmt.value);
+        return;
+    }
+    Type expected = switchExprResultStack_.back();
+    Type v = (expected.kind == TypeKind::Error)
+               ? analyzeExpr(yieldStmt.value)
+               : analyzeWithExpected(yieldStmt.value, expected);
+    if (!isError(expected) && !isError(v))
+        checkCast(v, expected, yieldStmt.keyword, "yield value");
 }
 
 // A reference return alias that can be reached by fall-through must be definitely assigned.

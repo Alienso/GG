@@ -1,0 +1,120 @@
+// End-to-end test for Java-style `switch` (statement + expression, arrow form).
+// Case labels compare via the `Eq` trait when implemented, default comparison otherwise.
+// Expected exit code: 0.
+
+enum Color { RED, GREEN, BLUE }
+
+// A class implementing Eq — switch labels dispatch to its `eq`.
+class Money {
+    mut i32 cents;
+    Money(i32 c) { cents = c; }
+}
+impl Eq for Money {
+    fn eq(Money& other) -> bool { return cents == other.cents; }
+}
+
+// A value class without Eq — switch labels compare by memberwise structural equality.
+class Pair { mut i32 a; mut i32 b; Pair(i32 x, i32 y) { a = x; b = y; } }
+
+// A class WITHOUT Eq — two references compare by address identity. Also carries a live-object
+// counter (ctor inc / dtor dec) so the reference-producing switch expression below can prove it
+// releases every allocation exactly once (balanced counter ⇒ no leak / double-free).
+class Node {
+    mut i32 v;
+    static i32 live = 0;
+    Node(i32 x) { v = x; Node::live = Node::live + 1; }
+    ~Node() { Node::live = Node::live - 1; }
+    fn get() -> i32 { return v; }
+}
+
+// Switch expression with a block arm + yield.
+fn classify(i32 n) -> i32 {
+    i32 r = switch (n) {
+        case 0       -> 100;
+        case 1, 2, 3 -> { i32 t = n * 10; yield t; }
+        default      -> -1;
+    };
+    return r;
+}
+
+// Switch statement with multi-label arms (value discarded).
+fn bucket(i32 x) -> i32 {
+    mut i32 out = 0;
+    switch (x) {
+        case 1, 2 -> out = 20;
+        case 3    -> { out = 30; }
+        default   -> out = 99;
+    }
+    return out;
+}
+
+// Switch expression over an enum — exhaustive, so no `default` needed.
+fn code(Color c) -> i32 {
+    return switch (c) {
+        case Color.RED   -> 1;
+        case Color.GREEN -> 2;
+        case Color.BLUE  -> 3;
+    };
+}
+
+fn main() -> i32 {
+    // Switch-expression, primitive, block arm + yield.
+    if (classify(0)  != 100) { return 1; }
+    if (classify(2)  != 20)  { return 2; }   // 2 * 10
+    if (classify(9)  != -1)  { return 3; }
+
+    // Switch statement, multi-label + default.
+    if (bucket(1) != 20) { return 4; }
+    if (bucket(3) != 30) { return 5; }
+    if (bucket(7) != 99) { return 6; }
+
+    // Enum switch expression (exhaustive, no default).
+    if (code(Color.RED)   != 1) { return 7; }
+    if (code(Color.GREEN) != 2) { return 8; }
+    if (code(Color.BLUE)  != 3) { return 9; }
+
+    // Eq-class scrutinee: labels compared via Money.eq (by value).
+    Money price(50);
+    Money lo(25);
+    Money hi(50);
+    i32 label = switch (price) {
+        case lo -> 1;
+        case hi -> 2;
+        default -> 0;
+    };
+    if (label != 2) { return 10; }
+
+    // Value object WITHOUT Eq: labels compared by memberwise structural equality.
+    Pair pr(3, 4);
+    Pair m34(3, 4);
+    Pair m99(9, 9);
+    i32 pk = switch (pr) { case m99 -> 1; case m34 -> 2; default -> 0; };
+    if (pk != 2) { return 15; }
+
+    // Class without Eq: reference address identity. Same reference matches; a distinct one doesn't.
+    // Scoped so these are released before the live-object counter check at the end.
+    {
+        Node& a = new Node(7);
+        Node& b = new Node(7);
+        mut i32 which = 0;
+        switch (a) {
+            case b  -> which = 1;
+            case a  -> which = 2;
+            default -> which = 3;
+        }
+        if (which != 2) { return 11; }
+    }
+
+    // Switch EXPRESSION producing a heap reference (+1 must transfer to the binding, not leak or
+    // double-free). Checked with a balanced live-object counter.
+    {
+        Node& r1 = switch (1) { case 1 -> new Node(100); default -> new Node(0); };
+        Node& r2 = switch (5) { case 1 -> new Node(1);   default -> new Node(200); };
+        if (r1.get() + r2.get() != 300) { return 12; }
+        Node& r3 = switch (1) { case 1 -> r1; default -> r2; };   // borrow arm (retain path)
+        if (r3.get() != 100) { return 13; }
+    }
+    if (Node::live != 0) { return 14; }   // every heap Node released exactly once
+
+    return 0;
+}

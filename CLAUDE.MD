@@ -198,6 +198,41 @@ evaluated per-call **at the call site**.
   positions the caller omitted. Threaded through every call site (free/method/static/ctor/new/sret/
   enum-ctor). Works for object-value (sret) returns and object defaults.
 
+### Switch — statement and expression (Java arrow form)
+Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
+fall-through, no `break`). Two AST nodes: `SwitchStmt` (Stmt) and `SwitchExpr` (Expr), sharing a
+`SwitchArm` (`std::deque<SwitchArm>` — `SwitchArm` has a `Token` and `unique_ptr`s, move-only). An
+arm body is either `-> expr ;` (`valueExpr`) or `-> { ... }` (`block`). `yield expr;` (`YieldStmt`)
+produces a block arm's value in the expression form.
+- **Parser**: `switch` in statement position → `parseSwitchStmt`; in expression position (primary)
+  → `parseSwitchExpr`; shared `parseSwitchArmBlock`. `yield` → `parseYieldStmt`. At most one
+  `default` (parse error otherwise). New keywords `SWITCH`/`CASE`/`DEFAULT`/`YIELD`.
+- **Equality reuse (the key design)**: case labels compare to the scrutinee via the **same
+  `==` machinery**, factored into `SemanticAnalyzer::classifyEquality(left,right,nodeKey,at,what)`
+  (records `resolvedCallee`/`addressIdentityCmp_`/`structuralValueCmp_` keyed by the **label node**)
+  and `CodeGen::emitEquality(nodeKey,lval,lt,rval,rt,op)` (emits structeq / `icmp eq/ne ptr` /
+  `@Class_eq` / primitive `icmp`/`fcmp`). `analyzeBinary`/`genBinary` `==`/`!=` now delegate to
+  these too. So: `Eq` impl → its `eq`; else same-class refs → address identity; else value object →
+  structural; enums → identity; primitives → numeric compare.
+- **Exhaustiveness**: a switch **expression** must be exhaustive — an explicit `default`, **or** an
+  enum scrutinee whose arms cover every variant (`covered == EnumInfo::variantSet`; variant name
+  read from each label's `MemberAccessExpr::field`). A switch **statement** never requires `default`.
+- **Duplicate labels**: `checkDuplicateLabels` (both forms) errors on repeated compile-time-
+  identifiable labels — int/char/bool/string literals, negated int literals, enum variants, and
+  bare identifiers (canonical key via `labelKey`). Non-constant labels (arbitrary/value-object
+  expressions) are skipped (can't be compared at compile time).
+- **Arm typing (expr)**: result type = `expectedType_` (set by `i32 y = switch…`, `return switch…`,
+  etc.) else inferred from the first arm; each arm value/`yield` `checkCast`-ed to it. Value-object
+  results are rejected ("use a reference") — deferred. `yield` is valid only inside a switch-
+  expression block arm (`switchExprResultStack_` / codegen `switchExprStack_`), checked against the
+  result type; a block arm must `yield`/`return` on every path (`blockAlwaysYields`, mirrors
+  `alwaysReturns`, which is itself extended so an exhaustive all-returning switch counts).
+- **Codegen**: scrutinee evaluated **once**; a linear test-chain (`genSwitchArms`) ORs each arm's
+  label comparisons and `emitCondBr`s to the arm body or the next test; `default` is the final
+  fallthrough. Expression form allocates a result slot, each arm stores into it, loaded after the
+  `sw.merge` block. `break`/`continue` inside an arm bind to an enclosing loop (switch pushes nothing
+  on the loop stacks). Not an LLVM `switch` instruction (labels may be arbitrary `eq` calls).
+
 ### Overloading (functions, constructors, methods)
 Functions, constructors, and methods (instance & static) may be **overloaded** by parameter
 signature **and/or return type**. Enums are excluded (single ctor, no member overloading).
@@ -518,7 +553,9 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**652 test cases / 1294 assertions** (as of C++-style default parameter values —
+**672 test cases / 1330 assertions** (as of Java-style `switch` — statement + expression, arrow
+form, `Eq`-trait/default label comparison via factored `classifyEquality`/`emitEquality`, enum
+exhaustiveness, duplicate-label detection, `yield`; C++-style default parameter values —
 contiguous-trailing rule, call-site fill, arity-range overload resolution; generic-body checking
 against trait bounds
 (definition-time, bounded-only, new `TypeKind::TypeParam`); default class `==`/`!=` — reference

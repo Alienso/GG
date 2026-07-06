@@ -321,6 +321,52 @@ return;        // for void functions
 Before returning, the compiler automatically runs destructors for all live
 local objects in reverse-declaration order (innermost scope first).
 
+### switch (statement and expression)
+Java-style `switch`, **arrow form only** — no fall-through, so no `break` is needed. An arm is
+`case L1, L2, … -> body` (one or more labels) or `default -> body`, where `body` is either a single
+`expr;` or a `{ … }` block. At most one `default`.
+
+As a **statement** (the arm value, if any, is discarded):
+```gg
+switch (x) {
+    case 1, 2 -> doA();
+    case 3    -> { doB(); doC(); }
+    default   -> doDefault();     // optional for statements
+}
+```
+
+As an **expression** (each arm produces the switch's value; a block arm uses `yield`):
+```gg
+i32 y = switch (n) {
+    case 0    -> 10;
+    case 1, 2 -> { compute(); yield 20; }
+    default   -> 0;
+};
+```
+
+- **Label comparison** uses the `Eq` trait when the scrutinee's type implements it (dispatching to
+  its `eq`), and the language's **default comparison** otherwise — exactly like `==`: enum variants
+  and same-class references compare by identity, value objects compare memberwise (structural), and
+  primitives compare by value. Labels may be integers, chars, bools, enum variants, or values of an
+  `Eq`-implementing class.
+- **Exhaustiveness**: a switch *expression* must be exhaustive — either it has a `default` arm, or
+  the scrutinee is an enum and every variant is covered:
+  ```gg
+  i32 code = switch (color) {          // Color { RED, GREEN, BLUE }
+      case Color.RED   -> 1;
+      case Color.GREEN -> 2;
+      case Color.BLUE  -> 3;           // all variants covered → no default needed
+  };
+  ```
+  A switch *statement* never requires `default`.
+- **Duplicate labels are an error** when they can be identified at compile time — integer, char,
+  bool and string literals (including negated integers), enum variants, and identifier labels.
+  Labels that are arbitrary runtime expressions are not checked.
+- `yield expr;` supplies the value of a switch-expression block arm; every path through such a
+  block must `yield` (or `return`). `yield` is only valid inside a switch expression.
+- The scrutinee is evaluated once. A switch expression may produce a primitive, `bool`, `char`,
+  enum, or reference — **not** a value object (bind it through a reference instead).
+
 ---
 
 ## 6. Functions
@@ -1200,7 +1246,7 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Control flow
 | Missing feature | Notes |
 |-----------------|-------|
-| `switch` / `match` | Use `if / else if / else` chains instead |
+| `match` (pattern matching / binding) | `switch` (§5) exists, but only value/identity labels — no destructuring patterns |
 | `do-while` loops | Negate condition and use `while` |
 | `goto` | Not present |
 | Exception handling (`try`/`catch`/`throw`) | No exception model; errors are return values |

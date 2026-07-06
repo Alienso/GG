@@ -899,6 +899,8 @@ Stmt Parser::parseStatement() {
     if (match({ TokenType::RETURN }))   return parseReturnStmt();
     if (match({ TokenType::BREAK }))    return parseBreakStmt();
     if (match({ TokenType::CONTINUE })) return parseContinueStmt();
+    if (match({ TokenType::SWITCH }))   return parseSwitchStmt();
+    if (match({ TokenType::YIELD }))    return parseYieldStmt();
     return parseExprStmt();
 }
 
@@ -992,6 +994,66 @@ Stmt Parser::parseContinueStmt() {
     Token keyword = previous();
     consume(TokenType::SEMICOLON, "expected ';' after 'continue'");
     return makeStmt(ContinueStmt{ keyword });
+}
+
+Stmt Parser::parseSwitchStmt() {
+    Token keyword = previous();   // 'switch'
+    consume(TokenType::LEFT_PAREN, "expected '(' after 'switch'");
+    Expr scrutinee = parseExpression();
+    consume(TokenType::RIGHT_PAREN, "expected ')' after switch scrutinee");
+    std::deque<SwitchArm> arms = parseSwitchArmBlock();
+    return makeStmt(SwitchStmt{ keyword, std::move(scrutinee), std::move(arms) });
+}
+
+Expr Parser::parseSwitchExpr() {
+    Token keyword = previous();   // 'switch' (consumed by the caller)
+    consume(TokenType::LEFT_PAREN, "expected '(' after 'switch'");
+    Expr scrutinee = parseExpression();
+    consume(TokenType::RIGHT_PAREN, "expected ')' after switch scrutinee");
+    std::deque<SwitchArm> arms = parseSwitchArmBlock();
+    return makeExpr(SwitchExpr{ keyword, box(std::move(scrutinee)), std::move(arms) });
+}
+
+// Shared by the statement and expression forms. Parses `{ (case ... | default) -> ... }`.
+std::deque<SwitchArm> Parser::parseSwitchArmBlock() {
+    consume(TokenType::LEFT_BRACE, "expected '{' to open switch body");
+    std::deque<SwitchArm> arms;
+    bool sawDefault = false;
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+        std::vector<std::unique_ptr<Expr>> labels;
+        bool isDefault = false;
+        if (match({ TokenType::DEFAULT })) {
+            if (sawDefault) throw error(previous(), "a switch may have at most one 'default' arm");
+            sawDefault = true;
+            isDefault  = true;
+        } else {
+            consume(TokenType::CASE, "expected 'case' or 'default' in switch body");
+            labels.push_back(box(parseExpression()));
+            while (match({ TokenType::COMMA }))
+                labels.push_back(box(parseExpression()));
+        }
+        Token arrow = consume(TokenType::ARROW, "expected '->' after switch case label");
+
+        std::unique_ptr<Expr> valueExpr = nullptr;
+        std::unique_ptr<Stmt> block     = nullptr;
+        if (check(TokenType::LEFT_BRACE)) {
+            block = box(parseBlock());
+        } else {
+            valueExpr = box(parseExpression());
+            consume(TokenType::SEMICOLON, "expected ';' after switch arm expression");
+        }
+        arms.push_back(SwitchArm{ std::move(labels), isDefault,
+                                  std::move(valueExpr), std::move(block), arrow });
+    }
+    consume(TokenType::RIGHT_BRACE, "expected '}' to close switch body");
+    return arms;
+}
+
+Stmt Parser::parseYieldStmt() {
+    Token keyword = previous();   // 'yield'
+    Expr value = parseExpression();
+    consume(TokenType::SEMICOLON, "expected ';' after yield value");
+    return makeStmt(YieldStmt{ keyword, std::move(value) });
 }
 
 Stmt Parser::parseExprStmt() {
@@ -1271,6 +1333,11 @@ Expr Parser::parsePostfix() {
 Expr Parser::parsePrimary() {
     if (match({ TokenType::THIS })) {
         return makeExpr(ThisExpr{ previous() });
+    }
+
+    // Switch expression: `switch (x) { case ... -> v; default -> v; }`
+    if (match({ TokenType::SWITCH })) {
+        return parseSwitchExpr();
     }
 
     // Heap allocation operator: new ClassName(args)  /  new Vec<args>(args)

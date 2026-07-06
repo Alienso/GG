@@ -82,6 +82,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
         [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
+        [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
     }, *expr.node);
 }
 
@@ -324,30 +325,65 @@ static const char* binaryOperatorMethod(TokenType op) {
     }
 }
 
+// Emit `lhs == rhs` as an i1, choosing the path recorded by semantics. Operands are already-
+// evaluated SSA values (value objects → their address). Shared by genBinary and switch labels.
+std::string CodeGen::emitEquality(const void* nodeKey, const std::string& lval, const Type& lt,
+                                  const std::string& rval, const Type& rt, TokenType op) {
+    const bool ne = (op == TokenType::BANG_EQUAL);
+    // Value-object memberwise structural equality (generated @Class_structeq → i1, then negate).
+    if (structuralValueCmp_ && structuralValueCmp_->count(nodeKey)) {
+        structEqNeeded_.insert(lt.className);
+        std::string eq = freshTemp();
+        emit("%" + eq + " = call i1 @" + lt.className + "_structeq(ptr " + lval + ", ptr " + rval + ")");
+        if (!ne) return "%" + eq;
+        std::string t = freshTemp();
+        emit("%" + t + " = xor i1 %" + eq + ", true");
+        return "%" + t;
+    }
+    // Reference address identity (recorded by semantics) or enum singleton identity.
+    bool addrId = addressIdentityCmp_ && addressIdentityCmp_->count(nodeKey);
+    if (addrId || lt.kind == TypeKind::Enum || rt.kind == TypeKind::Enum) {
+        std::string t = freshTemp();
+        emit("%" + t + " = icmp " + (ne ? "ne" : "eq") + " ptr " + lval + ", " + rval);
+        return "%" + t;
+    }
+    // Eq-trait impl on a class → @Class_eq(recv, arg) -> i1 (then negate for `!=`).
+    if (lt.kind == TypeKind::Object || lt.kind == TypeKind::Reference) {
+        Type callRet;
+        std::string res = genTraitMethodCall(nodeKey, lt.className, "eq", lval, { rt }, { rval }, callRet);
+        if (!ne) return res;
+        std::string t = freshTemp();
+        emit("%" + t + " = xor i1 " + res + ", true");
+        return "%" + t;
+    }
+    // Primitive equality: widen to a common type, then icmp/fcmp eq/ne directly.
+    Type common   = commonArithmeticType(lt, rt);
+    std::string l = emitCast(lval, lt, common);
+    std::string r = emitCast(rval, rt, common);
+    std::string t = freshTemp();
+    emit("%" + t + " = " + cmpInstr(op, common) + " "
+         + irTypeName(common) + " " + l + ", " + r);
+    return "%" + t;
+}
+
 std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedType) {
     TokenType operatorType = binary.operatorToken.type;
 
-    // Operator overloading: a class-typed left operand desugars to a trait method call.
+    // Equality (==/!=) → shared classifier (structural / identity / Eq-impl / primitive).
+    if (operatorType == TokenType::EQUAL_EQUAL || operatorType == TokenType::BANG_EQUAL) {
+        Type lt = exprType(*binary.left);
+        Type rt = exprType(*binary.right);
+        std::string lval = genExpr(*binary.left);
+        std::string rval = genExpr(*binary.right);
+        return emitEquality(&binary, lval, lt, rval, rt, operatorType);
+    }
+
+    // Operator overloading: a class-typed left operand desugars to a trait method call
+    // (Add/Sub/Mul/Div/Rem/Ord — equality handled above).
     {
         Type leftType = exprType(*binary.left);
         const char* method = binaryOperatorMethod(operatorType);
-        // A reference `==`/`!=` with no `Eq` impl is address identity (recorded by semantics) —
-        // skip the trait desugar and fall through to the pointer-compare path below.
         bool isAddrIdentity = addressIdentityCmp_ && addressIdentityCmp_->count(&binary);
-        // A value-object `==`/`!=` with no `Eq` impl → generated memberwise structural equality.
-        if (structuralValueCmp_ && structuralValueCmp_->count(&binary)) {
-            std::string a = genExpr(*binary.left);   // both operands are addresses of the struct
-            std::string b = genExpr(*binary.right);  // (value → alloca/GEP; reference → heap body)
-            structEqNeeded_.insert(leftType.className);
-            std::string eq = freshTemp();
-            emit("%" + eq + " = call i1 @" + leftType.className + "_structeq(ptr " + a + ", ptr " + b + ")");
-            if (operatorType == TokenType::BANG_EQUAL) {
-                std::string t = freshTemp();
-                emit("%" + t + " = xor i1 %" + eq + ", true");
-                return "%" + t;
-            }
-            return "%" + eq;
-        }
         if (method && !isAddrIdentity
             && (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference)) {
             std::string recv   = genExpr(*binary.left);

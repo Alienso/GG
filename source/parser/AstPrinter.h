@@ -20,6 +20,7 @@ private:
     void printExpr(const Expr& expr);
     void printStmt(const Stmt& stmt);
     void printBlock(const BlockStmt& block);
+    void printArm(const SwitchArm& arm);
 
     void out(const std::string& text);
 };

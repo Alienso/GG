@@ -56,7 +56,11 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"trait",   TokenType::TRAIT},
     {"impl",    TokenType::IMPL},
     {"Self",    TokenType::SELF},
-    {"fn",      TokenType::FN}
+    {"fn",      TokenType::FN},
+    {"switch",  TokenType::SWITCH},
+    {"case",    TokenType::CASE},
+    {"default", TokenType::DEFAULT},
+    {"yield",   TokenType::YIELD}
 };
 
 TokenType lookupKeyword(const std::string& text) {

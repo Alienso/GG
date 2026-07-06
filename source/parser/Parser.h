@@ -157,6 +157,10 @@ private:
     [[nodiscard]] Stmt      parseReturnStmt();
     [[nodiscard]] Stmt      parseBreakStmt();
     [[nodiscard]] Stmt      parseContinueStmt();
+    [[nodiscard]] Stmt      parseSwitchStmt();
+    [[nodiscard]] Stmt      parseYieldStmt();
+    [[nodiscard]] Expr      parseSwitchExpr();
+    [[nodiscard]] std::deque<SwitchArm> parseSwitchArmBlock();
     [[nodiscard]] Stmt      parseExprStmt();
 
     // ---- Expression parsers (low to high precedence) ----

@@ -16,6 +16,8 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const ReturnStmt& returnStmt)    { genReturn(returnStmt); },
         [&](const BreakStmt& breakStmt)     { genBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },
+        [&](const SwitchStmt& switchStmt)   { genSwitchStmt(switchStmt); },
+        [&](const YieldStmt& yieldStmt)     { genYield(yieldStmt); },
         [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
         [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
         [&](const ImportStmt&)               { /* resolved before codegen pass */ },
@@ -225,4 +227,108 @@ void CodeGen::genBreak(const BreakStmt&) {
 void CodeGen::genContinue(const ContinueStmt&) {
     if (!continueLabelStack.empty())
         emitBr(continueLabelStack.back());
+}
+
+// Comparison-chain skeleton shared by the statement and expression forms. The scrutinee is
+// already evaluated once (`scrutVal`). Each non-default arm becomes a test block that ORs the
+// per-label equality (via emitEquality, honoring the Eq/default decision recorded by semantics)
+// and conditionally branches to the arm body. `default` (if any) is the final fallthrough.
+void CodeGen::genSwitchArms(const std::deque<SwitchArm>& arms, const std::string& scrutVal,
+                            const Type& scrutType, const std::string& mergeLabel,
+                            const std::function<void(const SwitchArm&)>& emitArmBody) {
+    const SwitchArm* defaultArm = nullptr;
+    for (const SwitchArm& arm : arms) {
+        if (arm.isDefault) { defaultArm = &arm; continue; }
+        std::string cond;
+        for (const auto& label : arm.labels) {
+            Type        lblType = exprType(*label);
+            std::string lblVal  = genExpr(*label);
+            std::string eq = emitEquality(label->node.get(), scrutVal, scrutType, lblVal, lblType,
+                                          TokenType::EQUAL_EQUAL);
+            if (cond.empty()) { cond = eq; }
+            else {
+                std::string t = freshTemp();
+                emit("%" + t + " = or i1 " + cond + ", " + eq);
+                cond = "%" + t;
+            }
+        }
+        std::string armLabel  = freshLabel("sw.arm");
+        std::string nextLabel = freshLabel("sw.test");
+        emitCondBr(cond, armLabel, nextLabel);
+        switchBlock(armLabel);
+        emitArmBody(arm);
+        emitBr(mergeLabel);          // no-op if the arm already terminated (yield/return)
+        switchBlock(nextLabel);
+    }
+    // We are now in the no-match block: run `default` (if present), then fall through to merge.
+    if (defaultArm) emitArmBody(*defaultArm);
+    emitBr(mergeLabel);
+}
+
+void CodeGen::genSwitchStmt(const SwitchStmt& switchStmt) {
+    Type        scrutType = exprType(switchStmt.scrutinee);
+    std::string scrutVal  = genExpr(switchStmt.scrutinee);
+    std::string mergeLabel = freshLabel("sw.merge");
+
+    genSwitchArms(switchStmt.arms, scrutVal, scrutType, mergeLabel,
+        [&](const SwitchArm& arm) {
+            if (arm.block)          genStmt(*arm.block);      // genBlock manages its own scope/dtors
+            else if (arm.valueExpr) { genExpr(*arm.valueExpr); flushTempReleases(); }
+        });
+
+    switchBlock(mergeLabel);
+    flushTempReleases();   // release scrutinee temporaries at the switch boundary
+}
+
+std::string CodeGen::genSwitchExpr(const SwitchExpr& switchExpr, const Type& resolvedType) {
+    std::string resultIr = irTypeName(resolvedType);
+    std::string slot = "%" + freshTemp();
+    emitAlloca(slot, resultIr);
+
+    Type        scrutType = exprType(*switchExpr.scrutinee);
+    std::string scrutVal  = genExpr(*switchExpr.scrutinee);
+    std::string mergeLabel = freshLabel("sw.merge");
+
+    switchExprStack_.push_back({ slot, resolvedType, mergeLabel });
+    genSwitchArms(switchExpr.arms, scrutVal, scrutType, mergeLabel,
+        [&](const SwitchArm& arm) {
+            if (arm.valueExpr) {
+                storeSwitchArmValue(*arm.valueExpr, slot, resolvedType);
+                flushTempReleases();
+            } else if (arm.block) {
+                genStmt(*arm.block);   // a `yield` inside stores to the slot + branches to merge
+            }
+        });
+    switchExprStack_.pop_back();
+
+    switchBlock(mergeLabel);
+    std::string result = emitLoad(resultIr, slot);
+    // A reference result carries the +1 the winning arm transferred into the slot; hand it to the
+    // consumer as a pending temp (claimed by a binding/return, else released at the boundary).
+    if (resolvedType.kind == TypeKind::Reference)
+        pendingTemps_.push_back({ result, resolvedType.className });
+    return result;
+}
+
+// Store an arm/yield value into the switch-expression result slot, taking ownership of exactly one
+// +1 for a reference result (claim a +1 producer, else retain a borrow) so the slot owns it.
+void CodeGen::storeSwitchArmValue(const Expr& value, const std::string& slot, const Type& resultType) {
+    Type        vt = exprType(value);
+    bool        plusOne = (resultType.kind == TypeKind::Reference) && producesPlusOne(value);
+    std::string v  = genExpr(value);
+    std::string cv = emitCast(v, vt, resultType);
+    if (resultType.kind == TypeKind::Reference) {
+        usesRefcount_ = true;
+        if (plusOne) claimTemp(cv);
+        else         emit("call void @gg_retain(ptr " + cv + ")");
+    }
+    emitStore(irTypeName(resultType), cv, slot);
+}
+
+void CodeGen::genYield(const YieldStmt& yieldStmt) {
+    if (switchExprStack_.empty()) return;   // semantic already reported the error
+    SwitchExprTarget tgt = switchExprStack_.back();
+    storeSwitchArmValue(yieldStmt.value, tgt.slotPtr, tgt.resultType);
+    flushTempReleases();
+    emitBr(tgt.mergeLabel);
 }

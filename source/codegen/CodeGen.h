@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <functional>
 #include "IR.h"
 #include "../parser/Ast.h"
 #include "../semantic/SemanticAnalyzer.h"
@@ -133,6 +134,11 @@ private:
     std::vector<std::string> breakLabelStack;
     std::vector<std::string> continueLabelStack;
 
+    // Innermost switch-*expression* result target: where a `yield` stores its value and the
+    // block-arm merge label it branches to. Pushed per switch expression, popped after.
+    struct SwitchExprTarget { std::string slotPtr; Type resultType; std::string mergeLabel; };
+    std::vector<SwitchExprTarget> switchExprStack_;
+
     // ---- Function / extern / class codegen ----
     void genFunction(const FunctionDeclStmt& function);
     void genExternDecl(const ExternFuncDeclStmt& ext);
@@ -182,6 +188,18 @@ private:
     void genReturn(const ReturnStmt& returnStmt);
     void genBreak(const BreakStmt& breakStmt);
     void genContinue(const ContinueStmt& continueStmt);
+    void genSwitchStmt(const SwitchStmt& switchStmt);
+    void genYield(const YieldStmt& yieldStmt);
+    // Store a switch-expression arm/yield value into the result slot, taking one +1 of ownership
+    // for a reference result (claim a producer / retain a borrow).
+    void storeSwitchArmValue(const Expr& value, const std::string& slot, const Type& resultType);
+    // Emit the comparison-chain skeleton shared by the statement and expression forms.
+    // `emitArmBody(armIndex)` is invoked in the matched-arm block (it emits the body and, for
+    // the expression form, stores into the result slot); it must leave the block ready for the
+    // trailing branch to `mergeLabel`. Returns nothing.
+    void genSwitchArms(const std::deque<SwitchArm>& arms, const std::string& scrutVal,
+                       const Type& scrutType, const std::string& mergeLabel,
+                       const std::function<void(const SwitchArm&)>& emitArmBody);
 
     // ---- Expression codegen — return SSA value string ("%t3", "42", …) ----
     std::string genExpr(const Expr& expr);
@@ -189,6 +207,13 @@ private:
     std::string genIdentifier(const IdentifierExpr& identifier);
     std::string genUnary(const UnaryExpr& unary, const Type& resolvedType);
     std::string genBinary(const BinaryExpr& binary, const Type& resolvedType);
+    std::string genSwitchExpr(const SwitchExpr& switchExpr, const Type& resolvedType);
+    // Emit `lhs == rhs` (or `!=` when `op` is BANG_EQUAL) as an i1, choosing the path recorded by
+    // semantics (value-object structural / reference or enum identity / Eq-impl method / primitive).
+    // Operands are already-evaluated SSA values (value objects → their address). Switch labels pass
+    // EQUAL_EQUAL.
+    std::string emitEquality(const void* nodeKey, const std::string& lval, const Type& lt,
+                             const std::string& rval, const Type& rt, TokenType op);
     std::string genAssign(const AssignExpr& assign);
     std::string genCompoundAssign(const CompoundAssignExpr& compoundAssign);
     std::string genPostfix(const PostfixExpr& postfix);

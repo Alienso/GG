@@ -202,9 +202,10 @@ bool CodeGen::producesPlusOne(const Expr& e) const {
     if (!e.node) return false;
     if (std::holds_alternative<NewExpr>(*e.node)) return true;   // `new` → +1
     if ((std::holds_alternative<CallExpr>(*e.node)
-         || std::holds_alternative<MethodCallExpr>(*e.node))
+         || std::holds_alternative<MethodCallExpr>(*e.node)
+         || std::holds_alternative<SwitchExpr>(*e.node))
         && exprType(e).kind == TypeKind::Reference)
-        return true;                                              // reference-returning call → +1
+        return true;                          // reference-returning call / switch expr → +1
     return false;
 }
 

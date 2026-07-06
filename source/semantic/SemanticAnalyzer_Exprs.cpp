@@ -29,6 +29,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
+        [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -328,6 +329,62 @@ static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
     return best;
 }
 
+Type SemanticAnalyzer::classifyEquality(const Type& leftType, const Type& rightType,
+                                        const void* nodeKey, const Token& at,
+                                        const std::string& what) {
+    // Class operands: an `Eq` impl overrides; otherwise default equality —
+    //   • two REFERENCES of the same class → address identity (`icmp eq/ne ptr`);
+    //   • at least one VALUE object of the same class → memberwise structural equality.
+    if (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference) {
+        auto implIt = implementedTraits.find(leftType.className);
+        bool hasEq  = implIt != implementedTraits.end() && implIt->second.count("Eq");
+        if (!hasEq) {
+            if ((rightType.kind == TypeKind::Object || rightType.kind == TypeKind::Reference)
+                && rightType.className == leftType.className) {
+                if (leftType.kind == TypeKind::Reference && rightType.kind == TypeKind::Reference)
+                    addressIdentityCmp_.insert(nodeKey);
+                else
+                    structuralValueCmp_.insert(nodeKey);
+                return Type{TypeKind::Bool};
+            }
+            error(at, "type '" + leftType.className + "' does not implement 'Eq' for " + what);
+            return Type{TypeKind::Error};
+        }
+        ClassInfo& info = classRegistry.at(leftType.className);
+        auto mit = info.methods.find("eq");
+        int idx = (mit == info.methods.end()) ? -1 : pickOverloadByArgs(mit->second, { rightType });
+        if (idx < 0) {
+            error(at, "no matching 'eq' method on '" + leftType.className + "' for " + what);
+            return Type{TypeKind::Error};
+        }
+        const ClassInfo::Method& m = mit->second[idx];
+        if (mit->second.size() > 1)
+            resolvedCallee[nodeKey] = mangleOverload(leftType.className + "_eq",
+                                                     m.paramTypes, m.returnType);
+        return Type{TypeKind::Bool};
+    }
+    // Enum identity comparison: both operands must be the same enum type.
+    if (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum) {
+        bool sameEnum = leftType.kind == TypeKind::Enum && rightType.kind == TypeKind::Enum
+                     && leftType.className == rightType.className;
+        if (!sameEnum) {
+            error(at, "incompatible types in " + what + ": "
+                  + typeName(leftType) + " and " + typeName(rightType));
+            return Type{TypeKind::Error};
+        }
+        return Type{TypeKind::Bool};
+    }
+    // Primitives (numeric widen to a common type; bool/char match exactly).
+    bool compatible = (leftType.kind == rightType.kind)
+                   || (isNumeric(leftType.kind) && isNumeric(rightType.kind));
+    if (!compatible) {
+        error(at, "incompatible types in " + what + ": "
+              + typeName(leftType) + " and " + typeName(rightType));
+        return Type{TypeKind::Error};
+    }
+    return Type{TypeKind::Bool};
+}
+
 Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
     Type leftType  = analyzeExpr(*binary.left);
     Type rightType = analyzeExpr(*binary.right);
@@ -353,26 +410,22 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
         return Type{TypeKind::Error};
     }
 
-    // Operator overloading: if the left operand is a class, desugar to its trait method.
+    // Equality (==/!=) goes through the shared classifier (Eq-impl / reference identity / value
+    // structural / enum / primitive) — the same decision switch case labels reuse.
+    if (binary.operatorToken.type == TokenType::EQUAL_EQUAL
+        || binary.operatorToken.type == TokenType::BANG_EQUAL) {
+        return classifyEquality(leftType, rightType, &binary, binary.operatorToken,
+                                "operator '" + binary.operatorToken.lexeme + "'");
+    }
+
+    // Operator overloading (non-equality): if the left operand is a class, desugar to its trait
+    // method (Add/Sub/Mul/Div/Rem/Ord).
     if (leftType.kind == TypeKind::Object || leftType.kind == TypeKind::Reference) {
         if (const auto* ot = operatorTraitFor(binary.operatorToken.type)) {
             const std::string trait  = ot->first;
             const std::string method = ot->second;
             auto implIt = implementedTraits.find(leftType.className);
             if (implIt == implementedTraits.end() || !implIt->second.count(trait)) {
-                // Default `==`/`!=` for classes with no `Eq` impl (an `Eq` impl overrides both):
-                //   • two REFERENCES of the same class → address identity (`icmp eq/ne ptr`);
-                //   • at least one VALUE object of the same class → memberwise structural equality
-                //     (a value has no meaningful address identity). Other operators still error.
-                if (trait == "Eq"
-                    && (rightType.kind == TypeKind::Object || rightType.kind == TypeKind::Reference)
-                    && rightType.className == leftType.className) {
-                    if (leftType.kind == TypeKind::Reference && rightType.kind == TypeKind::Reference)
-                        addressIdentityCmp_.insert(&binary);
-                    else
-                        structuralValueCmp_.insert(&binary);
-                    return Type{TypeKind::Bool};
-                }
                 error(binary.operatorToken, "type '" + leftType.className + "' does not implement '"
                       + trait + "' for operator '" + binary.operatorToken.lexeme + "'");
                 return Type{TypeKind::Error};
@@ -389,7 +442,7 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
             if (mit->second.size() > 1)
                 resolvedCallee[&binary] = mangleOverload(leftType.className + "_" + method,
                                                          m.paramTypes, m.returnType);
-            return (trait == "Eq" || trait == "Ord") ? Type{TypeKind::Bool} : m.returnType;
+            return (trait == "Ord") ? Type{TypeKind::Bool} : m.returnType;
         }
     }
 
@@ -446,30 +499,6 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
             return Type{TypeKind::Bool};
         }
 
-        // Equality comparisons
-        case TokenType::EQUAL_EQUAL:
-        case TokenType::BANG_EQUAL: {
-            // Enum identity comparison: both operands must be the same enum type.
-            if (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum) {
-                bool sameEnum = leftType.kind == TypeKind::Enum
-                             && rightType.kind == TypeKind::Enum
-                             && leftType.className == rightType.className;
-                if (!sameEnum) {
-                    error(binary.operatorToken, "incompatible types for '" + binary.operatorToken.lexeme + "': "
-                          + typeName(leftType) + " and " + typeName(rightType));
-                }
-                return Type{TypeKind::Bool};
-            }
-            bool compatible =
-                (leftType.kind == rightType.kind) ||
-                (isNumeric(leftType.kind) && isNumeric(rightType.kind));
-            if (!compatible) {
-                error(binary.operatorToken, "incompatible types for '" + binary.operatorToken.lexeme + "': "
-                      + typeName(leftType) + " and " + typeName(rightType));
-            }
-            return Type{TypeKind::Bool};
-        }
-
         // Logical
         case TokenType::AND:
         case TokenType::OR: {
@@ -485,6 +514,170 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
         default:
             return Type{TypeKind::Error};
     }
+}
+
+// ---- switch analysis ----
+
+// If `e` is an enum-variant label (`Enum.VARIANT`), return the variant name; else "".
+static std::string enumVariantOfLabel(const Expr& e) {
+    if (const auto* ma = std::get_if<MemberAccessExpr>(e.node.get()))
+        return ma->field.lexeme;
+    return "";
+}
+
+// True if every normal-completion path through the arm block ends in `yield` or `return`.
+static bool blockAlwaysYields(const Stmt& stmt);
+static bool blockAlwaysYields(const BlockStmt& block) {
+    for (const auto& s : block.body)
+        if (blockAlwaysYields(*s)) return true;
+    return false;
+}
+static bool blockAlwaysYields(const Stmt& stmt) {
+    return std::visit(overloaded{
+        [](const YieldStmt&)       { return true; },
+        [](const ReturnStmt&)      { return true; },   // exits the function — no fall-through value
+        [](const BlockStmt& b)     { return blockAlwaysYields(b); },
+        [](const IfStmt& i)        {
+            return i.elseBranch != nullptr
+                   && blockAlwaysYields(*i.thenBranch)
+                   && blockAlwaysYields(*i.elseBranch);
+        },
+        [](const SwitchStmt& sw)   {
+            bool hasDefault = false;
+            for (const SwitchArm& arm : sw.arms) {
+                if (arm.isDefault) hasDefault = true;
+                if (!(arm.block && blockAlwaysYields(*arm.block))) return false;
+            }
+            return hasDefault;
+        },
+        [](const auto&)            { return false; },
+    }, *stmt.node);
+}
+
+// A canonical key for a compile-time-identifiable case label (for duplicate detection), or "" if
+// the label can't be identified at compile time (arbitrary expression / value-object value).
+static std::string labelKey(const Expr& e) {
+    const auto& node = *e.node;
+    if (const auto* lit = std::get_if<LiteralExpr>(&node)) {
+        switch (lit->token.type) {
+            case TokenType::NUMBER:
+                try { return "int:" + std::to_string(std::stoll(lit->token.lexeme, nullptr, 0)); }
+                catch (...) { return "num:" + lit->token.lexeme; }
+            case TokenType::TRUE:   return "bool:1";
+            case TokenType::FALSE:  return "bool:0";
+            case TokenType::CHAR:   return "char:" + lit->token.lexeme;
+            case TokenType::STRING: return "str:" + lit->token.lexeme;
+            default:                return "";
+        }
+    }
+    // Negated integer literal (`case -1`) — a UnaryExpr over a NUMBER.
+    if (const auto* un = std::get_if<UnaryExpr>(&node)) {
+        if (un->operatorToken.type == TokenType::MINUS && un->operand && un->operand->node) {
+            if (const auto* lit = std::get_if<LiteralExpr>(un->operand->node.get()))
+                if (lit->token.type == TokenType::NUMBER)
+                    try { return "int:" + std::to_string(-std::stoll(lit->token.lexeme, nullptr, 0)); }
+                    catch (...) { return "num:-" + lit->token.lexeme; }
+        }
+        return "";
+    }
+    // Enum variant (`Enum.VARIANT`) — within a switch the scrutinee is one enum type, so the
+    // variant name alone is a unique key.
+    if (const auto* ma = std::get_if<MemberAccessExpr>(&node))
+        return "mem:" + ma->field.lexeme;
+    // A bare identifier label (`case lo`) — catches obvious copy-paste duplicates.
+    if (const auto* id = std::get_if<IdentifierExpr>(&node))
+        return "id:" + id->name.lexeme;
+    return "";
+}
+
+void SemanticAnalyzer::checkDuplicateLabels(const std::deque<SwitchArm>& arms) {
+    std::unordered_set<std::string> seen;
+    for (const SwitchArm& arm : arms) {
+        for (const auto& label : arm.labels) {
+            std::string key = labelKey(*label);
+            if (key.empty()) continue;   // not compile-time identifiable — skip
+            if (!seen.insert(key).second)
+                error(exprFirstToken(*label), "duplicate case label in switch");
+        }
+    }
+}
+
+void SemanticAnalyzer::analyzeSwitchArm(const SwitchArm& arm, const Type& scrutineeType,
+                                        Type* expectedResult, const Token& switchTok) {
+    // Labels: each must be comparable to the scrutinee under the same rules as `==`.
+    for (const auto& label : arm.labels) {
+        Type labelType = analyzeExpr(*label);
+        if (!isError(labelType) && !isError(scrutineeType))
+            classifyEquality(scrutineeType, labelType, label->node.get(), switchTok, "switch case");
+    }
+
+    enterScope();
+    if (expectedResult) {
+        // Expression form: the arm must produce a value.
+        if (arm.valueExpr) {
+            Type v = (expectedResult->kind == TypeKind::Error)
+                       ? analyzeExpr(*arm.valueExpr)
+                       : analyzeWithExpected(*arm.valueExpr, *expectedResult);
+            if (expectedResult->kind == TypeKind::Error && !isError(v))
+                *expectedResult = v;   // infer the result type from the first concrete arm
+            else if (!isError(*expectedResult) && !isError(v))
+                checkCast(v, *expectedResult, exprFirstToken(*arm.valueExpr), "switch arm value");
+        } else if (arm.block) {
+            switchExprResultStack_.push_back(*expectedResult);
+            analyzeStmt(*arm.block);
+            switchExprResultStack_.pop_back();
+            if (!blockAlwaysYields(*arm.block))
+                error(arm.arrow, "every path through a switch-expression block arm must 'yield' a value");
+        }
+    } else {
+        // Statement form: value discarded.
+        if (arm.valueExpr)  analyzeExpr(*arm.valueExpr);
+        else if (arm.block) analyzeStmt(*arm.block);
+    }
+    exitScope();
+}
+
+Type SemanticAnalyzer::analyzeSwitchExpr(const SwitchExpr& switchExpr) {
+    Type scrutineeType = analyzeExpr(*switchExpr.scrutinee);
+    checkDuplicateLabels(switchExpr.arms);
+
+    // Result type: the contextual expected type if available; otherwise inferred from the arms.
+    Type result = expectedType_.has_value() ? *expectedType_ : Type{TypeKind::Error};
+
+    // A value object can't be produced by value (would need sret/clone) — require a reference.
+    if (result.kind == TypeKind::Object) {
+        error(switchExpr.keyword,
+              "a switch expression cannot produce a value object '" + result.className
+              + "'; use a reference");
+        result = Type{TypeKind::Error};
+    }
+
+    bool hasDefault = false;
+    std::unordered_set<std::string> covered;
+    for (const SwitchArm& arm : switchExpr.arms) {
+        if (arm.isDefault) { hasDefault = true; continue; }
+        for (const auto& label : arm.labels) {
+            std::string v = enumVariantOfLabel(*label);
+            if (!v.empty()) covered.insert(v);
+        }
+    }
+
+    for (const SwitchArm& arm : switchExpr.arms)
+        analyzeSwitchArm(arm, scrutineeType, &result, switchExpr.keyword);
+
+    // Exhaustiveness: an explicit `default`, or (enum scrutinee) full variant coverage.
+    bool enumExhaustive = false;
+    if (scrutineeType.kind == TypeKind::Enum) {
+        auto eit = enumRegistry.find(scrutineeType.className);
+        if (eit != enumRegistry.end())
+            enumExhaustive = (covered == eit->second.variantSet);
+    }
+    if (!hasDefault && !enumExhaustive)
+        error(switchExpr.keyword,
+              std::string("a switch expression must be exhaustive: add a 'default' arm")
+              + (scrutineeType.kind == TypeKind::Enum ? " or cover every enum variant" : ""));
+
+    return isError(result) ? Type{TypeKind::Error} : result;
 }
 
 Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {

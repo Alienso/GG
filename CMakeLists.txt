@@ -114,6 +114,7 @@ add_executable(GG_tests
         tests/return_slot_tests.cpp
         tests/refcount_tests.cpp
         tests/default_param_tests.cpp
+        tests/switch_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

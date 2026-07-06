@@ -66,7 +66,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
 
     return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
-                          std::move(structuralValueCmp_), std::move(eqImpls) };
+                          std::move(structuralValueCmp_), std::move(eqImpls),
+                          std::move(callableCalls_) };
 }
 
 // ============================================================
@@ -405,17 +406,42 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
 // argument must implement a named trait. Static dispatch: the check is that the type
 // appears in `implementedTraits` for that trait (both user and built-in impls populate
 // it). Primitives and non-implementing classes produce a clear instantiation-site error.
+// Render a bound name for diagnostics: a canonical `Call$p…$ret$R` → `Call(p…) -> R`
+// (with `.ref` shown as `&`); any other trait name is returned unchanged.
+static std::string prettyBound(const std::string& b) {
+    if (b.rfind("Call$", 0) != 0) return b;
+    std::vector<std::string> parts;
+    for (size_t i = 0; i <= b.size(); ) {
+        size_t d = b.find('$', i);
+        if (d == std::string::npos) { parts.push_back(b.substr(i)); break; }
+        parts.push_back(b.substr(i, d - i));
+        i = d + 1;
+    }
+    size_t retIdx = 0;
+    for (size_t i = 1; i < parts.size(); ++i) if (parts[i] == "ret") retIdx = i;
+    if (retIdx == 0 || retIdx + 1 >= parts.size()) return b;   // malformed — leave as-is
+    auto unref = [](std::string s) {
+        size_t p = s.rfind(".ref");
+        if (p != std::string::npos && p == s.size() - 4) s = s.substr(0, p) + "&";
+        return s;
+    };
+    std::string out = "Call(";
+    for (size_t i = 1; i < retIdx; ++i) out += (i > 1 ? ", " : "") + unref(parts[i]);
+    out += ") -> " + unref(parts[retIdx + 1]);
+    return out;
+}
+
 void SemanticAnalyzer::checkGenericBounds(const Program& program) {
     for (const GenericBoundCheck& bc : program.genericBoundChecks) {
         Token where{TokenType::IDENTIFIER, bc.typeName, bc.line};
         if (!isBuiltinTrait(bc.traitName) && !traitRegistry.count(bc.traitName)) {
-            error(where, "unknown trait '" + bc.traitName + "' in bound for '" + bc.context + "'");
+            error(where, "unknown trait '" + prettyBound(bc.traitName) + "' in bound for '" + bc.context + "'");
             continue;
         }
         auto it = implementedTraits.find(bc.typeName);
         bool ok = it != implementedTraits.end() && it->second.count(bc.traitName);
         if (!ok)
-            error(where, "type '" + bc.typeName + "' does not satisfy bound '" + bc.traitName
+            error(where, "type '" + bc.typeName + "' does not satisfy bound '" + prettyBound(bc.traitName)
                   + "' required by '" + bc.context + "'");
     }
 }

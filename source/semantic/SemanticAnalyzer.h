@@ -105,6 +105,9 @@ struct SemanticResult {
     // Classes that implement the `Eq` trait. Used by codegen so a generated structeq dispatches
     // an embedded value-object field with its own `Eq` impl to that `eq` (not memberwise).
     std::unordered_set<std::string> eqImplementors;
+    // `obj(args)` callable-object invocations: CallExpr node → the callee's class name. Codegen
+    // emits `@Class_call(recv, args)` with the callee variable as the receiver.
+    std::unordered_map<const void*, std::string> callableCalls;
 };
 
 class SemanticAnalyzer {
@@ -146,6 +149,8 @@ private:
     std::unordered_set<const void*> addressIdentityCmp_;
     // `==`/`!=` value-object memberwise structural comparison nodes (copied to SemanticResult).
     std::unordered_set<const void*> structuralValueCmp_;
+    // `obj(args)` callable-object invocation nodes → class name (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> callableCalls_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;

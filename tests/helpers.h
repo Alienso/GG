@@ -21,6 +21,11 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <process.h>   // _getpid — per-process temp file name for parallel-safe tests
+#else
+#include <unistd.h>    // getpid
+#endif
 
 // ---- RAII stderr capture ----
 // Redirects std::cerr for the duration of its lifetime.
@@ -51,8 +56,18 @@ inline CompilerOptions defaultTestOptions() {
 // ---- Pipeline helpers ----
 
 namespace detail {
+    // Per-process temp file name so parallel test runners (e.g. `ctest -j`, which launches one
+    // process per test case) don't clobber each other's source through a shared fixed filename.
+    inline const std::string& tempSourceName() {
+#ifdef _WIN32
+        static const std::string name = "gg_test_" + std::to_string(_getpid()) + ".gg";
+#else
+        static const std::string name = "gg_test_" + std::to_string(getpid()) + ".gg";
+#endif
+        return name;
+    }
     inline std::string writeTempSource(const std::string& source) {
-        auto path = (std::filesystem::temp_directory_path() / "gg_test.gg").string();
+        auto path = (std::filesystem::temp_directory_path() / tempSourceName()).string();
         std::ofstream(path) << source;
         return path;
     }

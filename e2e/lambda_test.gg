@@ -1,0 +1,76 @@
+// End-to-end test for lambdas & callable objects.
+//   - `Call(P…)->R` signature-carrying trait bound; `obj(args)` desugars to `obj.call(args)`.
+//   - Lambdas `(params) -> [Ret] { body }` desugar to a value-object class implementing Call,
+//     captured by value (locals, params, and enclosing instance fields); non-escaping.
+//   - A generic `<F: Call(…)>` function accepts both a hand-written callable and a lambda literal.
+// Expected exit code: 0.
+
+fn apply<F: Call(i32) -> i32>(F& f, i32 x) -> i32 { return f(x); }
+fn run<F: Call(i32) -> void>(F& f, i32 x) -> void { f(x); }
+fn apply2<F: Call(i32, i32) -> i32>(F& f, i32 a, i32 b) -> i32 { return f(a, b); }   // multi-param
+fn apply0<F: Call() -> i32>(F& f) -> i32 { return f(); }                            // zero-param
+fn applyc<F: Call(char) -> char>(F& f, char c) -> char { return f(c); }             // char signature
+
+// Hand-written callable object.
+class Adder { i32 n; Adder(i32 a) { n = a; } }
+impl Call for Adder { fn call(i32 x) -> i32 { return x + n; } }
+
+// A class whose method builds a lambda capturing an instance field.
+class Scaler {
+    mut i32 factor;
+    Scaler(i32 f) { factor = f; }
+    fn scale(i32 x) -> i32 { return apply((i32 y) -> i32 { return y * factor; }, x); }  // captures `factor`
+}
+
+// Reference-capture leak check: a lambda retains a captured reference into its field; the value
+// object's dtor releases it exactly once.
+class Box {
+    mut i32 v;
+    static i32 live = 0;
+    Box(i32 x) { v = x; Box::live = Box::live + 1; }
+    ~Box() { Box::live = Box::live - 1; }
+    fn get() -> i32 { return v; }
+    fn set(i32 x) mut -> void { v = x; }
+}
+
+fn main() -> i32 {
+    // Callable object: direct call and through the generic.
+    Adder a(5);
+    if (a(10) != 15)              { return 1; }
+    if (apply<Adder>(a, 100) != 105) { return 2; }
+
+    // Non-capturing lambda literal through the generic (inference).
+    if (apply((i32 y) -> i32 { return y + 1; }, 41) != 42) { return 3; }
+
+    // Varied signatures: multi-param, zero-param (capturing), char.
+    if (apply2((i32 p, i32 q) -> i32 { return p * q; }, 6, 7) != 42) { return 30; }
+    i32 z = 9;
+    if (apply0(() -> i32 { return z; }) != 9) { return 31; }
+    if (applyc((char ch) -> char { return ch; }, 'Z') != 'Z') { return 32; }
+
+    // Untyped/inferred lambda parameters and return type (types come from the Call(…) bound):
+    if (apply(w -> { return w + 1; }, 41) != 42) { return 33; }              // bare single param
+    if (apply((w) -> { return w * 2; }, 21) != 42) { return 34; }            // parenthesized single
+    if (apply2((p, q) -> { return p + q; }, 40, 2) != 42) { return 35; }     // multi, untyped
+    i32 cap = 100;
+    if (apply(w -> { return w + cap; }, 5) != 105) { return 36; }            // untyped + capture
+
+    // Capturing a local by value.
+    i32 base = 1000;
+    if (apply((i32 y) -> i32 { return y + base; }, 7) != 1007) { return 4; }
+
+    // Capturing an enclosing instance field (inside Scaler.scale).
+    Scaler s(3);
+    if (s.scale(4) != 12) { return 5; }
+
+    // Reference capture + void-return lambda (mutates through the captured reference).
+    {
+        Box& b = new Box(50);
+        if (apply((i32 y) -> i32 { return y + b.get(); }, 5) != 55) { return 6; }
+        run((i32 nv) -> { b.set(nv); }, 99);   // captures b, mutates it
+        if (b.get() != 99) { return 7; }
+    }
+    if (Box::live != 0) { return 8; }   // captured reference released exactly once — no leak
+
+    return 0;
+}

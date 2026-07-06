@@ -591,7 +591,48 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
 // ---- Call ----
 
 std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
+    // Callable-object invocation `f(args)` → `f.call(args)` (recorded by semantics). The callee
+    // variable is the receiver: a value object's alloca is its address; a reference is loaded.
+    if (callableCalls_) {
+        auto cit = callableCalls_->find(&call);
+        if (cit != callableCalls_->end()) {
+            const std::string& className = cit->second;
+            std::string recv;
+            auto aIt = allocaMap.find(call.callee.lexeme);
+            Type vt{TypeKind::Object};
+            auto vtIt = varTypeMap.find(call.callee.lexeme);
+            if (vtIt != varTypeMap.end()) vt = vtIt->second;
+            if (aIt != allocaMap.end())
+                recv = (vt.kind == TypeKind::Reference) ? emitLoad("ptr", aIt->second) : aIt->second;
+            std::vector<Type>        argTypes;
+            std::vector<std::string> argVals;
+            for (const auto& a : call.args) { argTypes.push_back(exprType(*a)); argVals.push_back(genExpr(*a)); }
+            Type ret;
+            return genTraitMethodCall(&call, className, "call", recv, argTypes, argVals, ret);
+        }
+    }
+
     std::string returnIrType = irTypeName(resolvedType);
+
+    // Constructor call used as an rvalue (`Class(args)` outside a variable initializer, e.g. as a
+    // function argument): materialize a temp value object and return its ADDRESS. Value objects are
+    // represented by address throughout, so this borrows correctly as a `Class&` argument.
+    if (resolvedType.kind == TypeKind::Object && cgClasses_.count(call.callee.lexeme)) {
+        const std::string& cn = call.callee.lexeme;
+        std::string tmp = freshAllocaName("objtmp");
+        emitAlloca(tmp, "%" + cn);
+        emit("store %" + cn + " zeroinitializer, ptr " + tmp);
+        auto cgIt = cgClasses_.find(cn);
+        if (cgIt != cgClasses_.end() && cgIt->second.needsDtor && !dtorScopes_.empty())
+            dtorScopes_.back().push_back({ tmp, cn, /*isReference=*/false });
+        std::string mangledCtor = calleeName(&call, cn + "_" + cn);
+        auto ctorIt = funcParamTypes.find(mangledCtor);
+        if (ctorIt != funcParamTypes.end()) {
+            std::string argStr = buildArgString(call.args, &ctorIt->second, defaultsFor(mangledCtor));
+            emit("call void @" + mangledCtor + "(ptr " + tmp + (argStr.empty() ? "" : ", " + argStr) + ")");
+        }
+        return tmp;
+    }
 
     // Return-slot (sret) call used as a value (not a plain variable initializer — that path
     // writes in place via emitSlotCall): materialize the result into a temp object.

@@ -884,9 +884,54 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
         return makeObjectType(name);
     }
 
-    // A local/parameter variable shadows any same-named function.
+    // A local/parameter variable shadows any same-named function. It may still be *callable*:
+    //   (a) a bounded type parameter `F: Call(…)` — resolve `call` against the bound (body check);
+    //   (b) a value/reference of a class implementing a `Call` trait → `name.call(args)`.
     const Symbol* sym = symbolTable.lookup(name);
     if (sym && sym->kind == Symbol::Kind::Variable) {
+        // (a) bounded type parameter
+        if (const std::vector<std::string>* bounds = typeParamBoundsOf(sym->type)) {
+            for (const std::string& b : *bounds) {
+                auto tit = traitRegistry.find(b);
+                if (tit == traitRegistry.end()) continue;
+                for (const MethodDecl& md : tit->second->methods) {
+                    if (md.name.lexeme != "call" || md.params.size() != call.args.size()) continue;
+                    for (size_t i = 0; i < call.args.size(); ++i) {
+                        Type at = analyzeExpr(*call.args[i]);
+                        Type pt = resolveTypeToken(md.params[i].typeName);
+                        checkCast(at, pt, call.callee, "call argument");
+                    }
+                    return resolveTypeToken(md.returnType);
+                }
+            }
+            error(call.callee, "type parameter '" + sym->type.className
+                  + "' is not callable with these argument types");
+            for (const auto& arg : call.args) analyzeExpr(*arg);
+            return Type{TypeKind::Error};
+        }
+        // (b) a class value/reference implementing Call
+        const std::string& cn = sym->type.className;
+        auto implIt = implementedTraits.find(cn);
+        bool callable = false;
+        if (implIt != implementedTraits.end())
+            for (const std::string& tr : implIt->second)
+                if (tr.rfind("Call", 0) == 0) { callable = true; break; }
+        if (callable) {
+            ClassInfo& info = classRegistry.at(cn);
+            auto mit = info.methods.find("call");
+            if (mit != info.methods.end() && !mit->second.empty()) {
+                std::vector<OverloadCand> cands;
+                for (const auto& m : mit->second)
+                    cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+                int idx = resolveOverload(call.callee, "call on '" + cn + "'", cands, call.args);
+                if (idx < 0) return Type{TypeKind::Error};
+                const ClassInfo::Method& m = mit->second[idx];
+                callableCalls_[&call] = cn;
+                if (mit->second.size() > 1)
+                    resolvedCallee[&call] = mangleOverload(cn + "_call", m.paramTypes, m.returnType);
+                return m.returnType;
+            }
+        }
         error(call.callee, "'" + name + "' is not a function");
         for (const auto& arg : call.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};

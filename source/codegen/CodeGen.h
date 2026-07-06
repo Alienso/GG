@@ -109,6 +109,8 @@ private:
     // Classes implementing `Eq` — a generated structeq dispatches such an embedded value field
     // to its own `@Class_eq` instead of comparing it memberwise.
     const std::unordered_set<std::string>* eqImplementors_ = nullptr;
+    // `obj(args)` callable-object invocations: CallExpr node → class name; emit `@Class_call(recv,…)`.
+    const std::unordered_map<const void*, std::string>* callableCalls_ = nullptr;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
     // overloaded, otherwise `plainBase`.
     std::string calleeName(const void* node, const std::string& plainBase) const;

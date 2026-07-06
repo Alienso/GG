@@ -7,6 +7,7 @@
 
 #include "Ast.h"
 #include "../lexer/Token.h"
+#include "../semantic/Type.h"
 #include "../CompileError.h"
 
 #include <vector>
@@ -42,6 +43,12 @@ struct GenericRegistry {
     std::unordered_set<std::string>                  classNames;    // generic class names
     std::vector<GenericInstantiation>                worklist;      // instantiation requests
     std::unordered_set<std::string>                  instantiated;  // mangled names already queued
+    std::unordered_set<std::string>                  emittedCallTraits; // canonical Call$… traits emitted (shared dedup)
+    std::unordered_set<std::string>                  lambdaClassNames;  // generated `__lambda_N` class names (shared, seeded at monomorphization)
+    int                                              lambdaCounter = 0;    // unique `__lambda_N` names (shared)
+    // Canonical Call$… trait name → its (parameter type tokens, return type token), so an untyped
+    // lambda argument can infer its parameter/return types from the callee's `Call(…)` bound.
+    std::unordered_map<std::string, std::pair<std::vector<Token>, Token>> callTraitSigs;
 };
 
 class Parser {
@@ -77,6 +84,56 @@ private:
     GenericRegistry* gen_ = &ownedGenerics_;
     int pendingCloseAngles_ = 0;       // virtual '>' tokens from splitting a '>>'
 
+    // ---- Callable (`Call` trait) support ----
+    // `Call(P…)->R` is sugar for a canonical user trait `Call$P…$ret$R` with a `call(P…)->R`
+    // method. Generated once per distinct signature and appended to the Program, so a bound, an
+    // `impl Call`, and a lambda that share a signature all name the same trait.
+    std::vector<Stmt>               pendingCallTraits_;   // canonical Call trait decls to append (this file)
+    std::vector<Stmt>               pendingLambdaDecls_;  // generated `__lambda_N` class + impl decls
+
+    // ---- Lexical scope tracking (for lambda capture analysis) ----
+    // A stack of in-scope local/parameter names → their declared type token. Pushed per block
+    // (parseBlockBody) and seeded from the enclosing function's params. Used only to compute a
+    // lambda's captured free variables; empty of overhead outside function bodies.
+    std::vector<std::unordered_map<std::string, Token>> scopes_;
+    std::vector<std::pair<std::string, Token>>          pendingScopeSeed_;  // params to seed next block scope
+    // Instance fields of the class currently being parsed (name → type token), so a lambda inside
+    // a method can capture an enclosing field by value. Populated as fields are parsed.
+    std::unordered_map<std::string, Token>              classFieldScope_;
+    // Active while parsing a lambda body: names resolved to a scope index < captureBase_ are
+    // captured by value into `captures_` (deduped). Nested lambdas are rejected in v1.
+    bool                                       capturing_   = false;
+    size_t                                     captureBase_ = 0;
+    std::vector<std::pair<std::string, Token>> captures_;
+    void recordLocal(const Token& typeToken, const Token& name);
+    // Expected `Call(…)` signature for a lambda argument at the current call site (param type
+    // tokens + return type token), or nullptr. Lets an untyped lambda infer its parameter/return
+    // types. Points into `gen_->callTraitSigs` (stable), saved/restored around each call's args.
+    const std::pair<std::vector<Token>, Token>* expectedLambdaSig_ = nullptr;
+    // True while parsing a switch case *label*, where a trailing `->` is the arm separator, not a
+    // lambda arrow (a bare-identifier label `case x ->` must not be read as a lambda `x -> …`).
+    bool parsingCaseLabel_ = false;
+    // True if the tokens at the current `(` form a lambda `( … ) -> …` (vs a grouped expression).
+    [[nodiscard]] bool isLambdaAhead() const;
+    // Parse the parenthesized parameter list of a lambda, allowing typed (`i32 x`) and untyped (`x`)
+    // parameters (nullopt type ⇒ inferred from the expected signature).
+    [[nodiscard]] std::vector<std::pair<Token, std::optional<Token>>> parseLambdaParamList();
+    // Finish a lambda given its parameters (types optional): parse `-> [Ret] { body }`, resolve any
+    // omitted parameter/return types from the expected signature, generate the class + impl, and
+    // return the stack-construction expression `__lambda_N(captures…)`.
+    [[nodiscard]] Expr finishLambda(std::vector<std::pair<Token, std::optional<Token>>> params, int line);
+    // Parse a lambda literal `(params) -> [Ret] { body }` (parenthesized-parameter form).
+    [[nodiscard]] Expr parseLambda();
+    // Canonical `Call$…` trait name for a call signature (param type tokens + return type token);
+    // registers the canonical trait decl for emission on first sight.
+    std::string canonicalCallTrait(const std::vector<Token>& paramTypeTokens, const Token& retType);
+    // Read one Call-signature type at raw token index k (a base type optionally followed by '&'),
+    // returning a synthesized type token and advancing k past it; nullopt if k is not a type.
+    [[nodiscard]] std::optional<Token> readCallSigType(size_t& k) const;
+    // Parse a `Call(P…)->R` bound starting at token index k (positioned at `Call`), advancing k
+    // past it; returns the canonical `Call$…` trait name, or nullopt if the signature is malformed.
+    [[nodiscard]] std::optional<std::string> scanCallBound(size_t& k);
+
     // ---- Token stream navigation ----
     [[nodiscard]] const Token& peek() const;
     [[nodiscard]] const Token& peekNext() const;
@@ -104,7 +161,7 @@ private:
     // Scan a `<T, U: Trait + ...>` param list from index `from`; fills typeParams +
     // parallel bounds, returns the closing '>' index (0 if malformed).
     size_t scanTypeParamList(size_t from, std::vector<std::string>& typeParams,
-                             std::vector<std::vector<std::string>>& bounds) const;
+                             std::vector<std::vector<std::string>>& bounds);
     // Number of tokens a complete type occupies at `from` (base + optional <...> + optional &),
     // or 0 if `from` is not the start of a type. Used by declaration-detection lookahead.
     [[nodiscard]] size_t typeSpanAt(size_t from) const;

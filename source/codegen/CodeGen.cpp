@@ -28,6 +28,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->addressIdentityCmp_ = &semanticResult.addressIdentityCmp;
     this->structuralValueCmp_ = &semanticResult.structuralValueCmp;
     this->eqImplementors_ = &semanticResult.eqImplementors;
+    this->callableCalls_ = &semanticResult.callableCalls;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;

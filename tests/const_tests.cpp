@@ -492,7 +492,7 @@ TEST_CASE("Cast - coercing a const reference into a mut binding warns", "[mut][c
     REQUIRE(cap.contains("read-only (const) reference into a 'mut' binding"));
 }
 
-TEST_CASE("Cast - an explicit 'as mut T' silences the const→mut warning", "[mut][cast][semantic]") {
+TEST_CASE("Cast - an explicit 'as mut T' silences the const-to-mut warning", "[mut][cast][semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 x) { this.x = x; } }

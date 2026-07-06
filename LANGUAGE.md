@@ -1209,7 +1209,74 @@ want a heap-allocated result; the value-return form above is simply the allocati
 
 ---
 
-## 14. What GG does NOT support
+## 14. Lambdas & callable objects
+
+Any class can be made **callable** by implementing the built-in **`Call` trait** (like C++'s
+`operator()`): `obj(args)` desugars to `obj.call(args)`.
+
+```gg
+class Adder { i32 n; Adder(i32 a) { n = a; } }
+impl Call for Adder { fn call(i32 x) -> i32 { return x + n; } }
+
+Adder a(5);
+i32 r = a(10);          // 15 — a(10) means a.call(10)
+```
+
+A **lambda** is an anonymous callable written `(params) -> [ReturnType] { body }`:
+
+```gg
+(i32 a, i32 b) -> i32 { return a + b; }   // typed return
+(i32 x) -> { doSomething(x); }            // omitted return type ⇒ void
+() -> i32 { return 42; }                  // no parameters
+```
+
+When a lambda is passed to a `Call`-bounded function (below), its parameter types **and** return
+type can be **omitted** — they are inferred from the callee's `Call(…)` signature. The parentheses
+are optional for a single parameter:
+
+```gg
+apply(x -> { return x + 1; }, 41);        // x and the return type inferred as i32
+apply((x) -> { return x * 2; }, 21);      // same, parenthesized
+apply2((a, b) -> { return a + b; }, 6, 7);// multiple untyped parameters
+```
+
+Lambdas **capture** the enclosing local variables, parameters, and instance fields they use, **by
+value** (primitives copied, references retained). Capture is implicit; reference bare names (not
+`this.field`):
+
+```gg
+i32 base = 100;
+apply((i32 y) -> i32 { return y + base; }, 5);   // captures `base` → 105
+```
+
+### Passing callables to functions
+
+To accept "any callable" a function is generic over a **signature-carrying `Call` bound**
+`F: Call(P…) -> R`. The same function accepts a hand-written callable object **or** a lambda literal;
+a callable whose signature doesn't match is rejected where it's passed. Because object parameters are
+references, the parameter is written `F&` (a lambda/callable value borrows into it):
+
+```gg
+fn apply<F: Call(i32) -> i32>(F& f, i32 x) -> i32 { return f(x); }
+
+apply<Adder>(Adder(5), 100);                     // callable object → 105
+apply((i32 y) -> i32 { return y + 1; }, 41);     // lambda literal   → 42
+apply((f64 y) -> f64 { return y; }, 5);          // ERROR: (f64)->f64 does not satisfy Call(i32)->i32
+```
+
+### Limitations (this version)
+
+- A lambda is a **non-escaping stack value object** — it can be passed *into* a call but not
+  returned, stored in a field, or kept in a container. For escaping behavior, write a callable
+  object and manage it as a heap reference.
+- A lambda is usable **only as a literal argument** to a generic function with **exactly one
+  `Call`-bounded type parameter** (its type is anonymous and unspellable, so it is inferred there).
+- **Nested lambdas** are not supported; a lambda captures **bare** field names (not `this.field`)
+  and cannot capture a `static` field or use `this` as a whole value.
+
+---
+
+## 15. What GG does NOT support
 
 The following features are **currently absent** from the current implementation. They may be added in the future.
 Attempting them will produce a compile error (or will simply not parse).
@@ -1226,10 +1293,9 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Functions & methods
 | Missing feature | Notes |
 |-----------------|-------|
-| Default parameter values | All parameters must be supplied at the call site |
 | Named parameters | Positional only |
 | Variadic functions | No `...` — use `extern` to call C variadics |
-| Closures / lambdas | No anonymous functions or captures |
+| Escaping / stored lambdas | Lambdas (§14) exist but are non-escaping value objects usable only as a literal argument to a `Call`-bounded generic; no `dyn Call` for heterogeneous storage |
 | Multiple return values | Return a class instance instead |
 
 ### Classes

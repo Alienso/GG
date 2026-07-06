@@ -233,6 +233,47 @@ produces a block arm's value in the expression form.
   `sw.merge` block. `break`/`continue` inside an arm bind to an enclosing loop (switch pushes nothing
   on the loop stacks). Not an LLVM `switch` instruction (labels may be arbitrary `eq` calls).
 
+### Lambdas & callable objects (`Call` trait)
+Any class implementing the **`Call` trait** is callable: `obj(args)` desugars to `obj.call(args)`.
+Lambdas `(params) -> [Ret] { body }` are **parser-only sugar** — they lower to a hoisted value-object
+class implementing `Call`, so semantics/codegen gain **no new AST nodes**, only the `Call` desugar.
+- **Signature-carrying bound** `Call(P…) -> R` canonicalizes (parser) to a mangled **user trait**
+  `Call$P…$ret$R` (`fn call(P…) -> R`), auto-emitted once per signature (dedup in
+  `GenericRegistry::emittedCallTraits`). Both a bound and an `impl Call for X` (signature derived
+  from its `call` method) reduce to the same name, so conformance/bound-checking/body-checking reuse
+  the **existing user-trait pipeline** — a signature mismatch is "does not satisfy bound
+  `Call(i32)->i32`" (demangled by `prettyBound`). `mangleType`+`typeFromToken`/`decodeSynthesizedType`
+  compute the canonical name identically on both sides. `readCallSigType`/`scanCallBound`/
+  `canonicalCallTrait` in `Parser.cpp`; recognized in bound (`scanTypeParamList`) and impl positions.
+- **`obj(args)` desugar** (`analyzeCall`): a variable whose class implements a `Call$…` trait →
+  resolve its `call` overload, record `SemanticResult::callableCalls[node]=class`; a bounded type
+  param `F: Call$…` resolves via `resolveBoundMethod` (extended to also **validate argument types**,
+  not just arity). Codegen `genCall` checks `callableCalls_` → receiver (callee var's alloca / loaded
+  ptr) + `genTraitMethodCall(…, "call", …)`.
+- **Untyped/inferred lambda params** (`finishLambda` + `expectedLambdaSig_`): a lambda argument to a
+  single-`Call`-bounded-param generic may omit parameter types and the return type — they're filled
+  from that bound's stored signature (`gen_->callTraitSigs`, keyed by canonical name, threaded into
+  arg parsing). Forms: `x -> {…}` (bare single param), `(x) -> {…}`, `(a, b) -> {…}`; explicit
+  `(i32 x) -> i32 {…}` still works. A bare `IDENTIFIER ->` is a lambda **except** inside a switch
+  case label (`parsingCaseLabel_` guards it, since `case x -> body` uses `->` as the arm separator).
+  An untyped lambda with no inferable signature is a clear error.
+- **Lambda desugar** (`parseLambda`/`finishLambda`): generate `class __lambda_N { <capture fields>; ctor }` +
+  `impl Call for __lambda_N { fn call(params)->ret { body } }`, append to `Program` (like
+  monomorphization); replace the literal with `__lambda_N(capturedVars…)` (stack value object).
+  Omitted return type = `void`. Captured names become **same-named fields**, so the body reuses
+  implicit-`this` unchanged.
+- **By-value capture** (`scopes_` name→type-token stack seeded from params via `pendingScopeSeed_`;
+  `classFieldScope_` for instance fields): enclosing locals/params/instance-fields used in the body
+  are copied into fields (primitives copied, references retained → auto clone/dtor). Captured names
+  used **bare** (not `this.field`). **Non-escaping** value objects; **nested lambdas rejected**;
+  a lambda type is unspellable so it's usable **only as a literal argument** to a generic with
+  **exactly one `Call`-bounded type parameter** (inference in the call-parsing path via
+  `gen_->lambdaClassNames`, shared for monomorphization re-parse). Object params must be references,
+  so consumers take `F& f` (the lambda/callable value borrows in).
+- **Also fixed generally**: a constructor-call **rvalue** `Class(args)` (e.g. as an argument) now
+  materializes a temp value object and yields its address (`genCall`), so it borrows correctly as a
+  `Class&` — previously emitted a bogus `@Class(...)` struct value.
+
 ### Overloading (functions, constructors, methods)
 Functions, constructors, and methods (instance & static) may be **overloaded** by parameter
 signature **and/or return type**. Enums are excluded (single ctor, no member overloading).
@@ -553,7 +594,10 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**672 test cases / 1330 assertions** (as of Java-style `switch` — statement + expression, arrow
+**687 test cases / 1350 assertions** (as of lambdas & callable objects — the `Call` trait with
+signature-carrying `Call(P…)->R` bounds canonicalized to user traits, `obj(args)` desugar,
+parser-desugared value-object lambdas with by-value capture of locals/params/fields, single-param
+inference; Java-style `switch` — statement + expression, arrow
 form, `Eq`-trait/default label comparison via factored `classifyEquality`/`emitEquality`, enum
 exhaustiveness, duplicate-label detection, `yield`; C++-style default parameter values —
 contiguous-trailing rule, call-site fill, arity-range overload resolution; generic-body checking

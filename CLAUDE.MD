@@ -625,7 +625,11 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**696 test cases / 1375 assertions** (as of DWARF debug info — `--debug`/`-g`: Tier 1 line-level
+**700 test cases / 1386 assertions** (as of the stdlib `String` class + CRT-layout test update —
+`stdlib/string.gg` is now a heap-owned UTF-8 `String` (bytes + byte-length; `byteLength`/`length`
+codepoint count/`byteAt`/`charAt` UTF-8 decode to `char`/`cStr`, `Eq` impl for `==`); the old flat
+CRT binding files moved to `stdlib/crt/c*.gg` and `tests/stdlib_tests.cpp` follows the new paths;
+`e2e/string_test.gg` covers runtime behavior). Prior baseline was **696 / 1375** as of DWARF debug info — `--debug`/`-g`: Tier 1 line-level
 `!DICompileUnit`/`!DIFile`/`!DISubprogram`/`!DILocation`, Tier 2 `!DIBasicType`/`!DICompositeType`
 with member offsets/`!DILocalVariable` + `#dbg_declare` records; off by default, IR byte-identical
 when off; `tests/debug_tests.cpp`). Prior baseline was **687 / 1350** as of lambdas & callable

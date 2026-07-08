@@ -822,6 +822,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         emitAlloca(ptrName, "ptr");
         allocaMap[name]  = ptrName;
         varTypeMap[name] = refType;
+        if (debug_) dbgDeclare(ptrName, name, refType, varDecl.name.line, 0);
 
         // Every reference variable co-owns its target and is released at scope exit
         // (release is null-safe, so an uninitialised slot is harmless).
@@ -856,6 +857,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             emitAlloca(ptrName, "ptr");
             allocaMap[name]  = ptrName;
             varTypeMap[name] = synth;
+            if (debug_) dbgDeclare(ptrName, name, synth, varDecl.name.line, 0);
             if (varDecl.initializer) {
                 Type        initType = exprType(*varDecl.initializer);
                 std::string value    = genExpr(*varDecl.initializer);
@@ -880,6 +882,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         emitAlloca(ptrName, "ptr");
         allocaMap[name]  = ptrName;
         varTypeMap[name] = enumType;
+        if (debug_) dbgDeclare(ptrName, name, enumType, varDecl.name.line, 0);
 
         if (varDecl.initializer) {
             Type        initType = exprType(*varDecl.initializer);
@@ -904,6 +907,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         emitAlloca(ptrName, "%" + className);
         allocaMap[name]  = ptrName;
         varTypeMap[name] = objectType;
+        if (debug_) dbgDeclare(ptrName, name, objectType, varDecl.name.line, 0);
 
         // Zero-initialise the struct
         emit("store %" + className + " zeroinitializer, ptr " + ptrName);
@@ -954,6 +958,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     emitAlloca(ptrName, irType);
     allocaMap[name]  = ptrName;
     varTypeMap[name] = declaredType;
+    if (debug_) dbgDeclare(ptrName, name, declaredType, varDecl.name.line, 0);
 
     if (varDecl.initializer) {
         Type        initializerType = exprType(*varDecl.initializer);

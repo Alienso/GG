@@ -70,6 +70,7 @@ set(GG_SOURCES
         source/codegen/CodeGen_Exprs.cpp
         source/codegen/CodeGen_Classes.cpp
         source/codegen/CodeGen_Emit.cpp
+        source/codegen/CodeGen_Debug.cpp
         source/codegen/IRPrinter.h    source/codegen/IRPrinter.cpp
         source/ImportResolver.h       source/ImportResolver.cpp
 )
@@ -116,6 +117,7 @@ add_executable(GG_tests
         tests/default_param_tests.cpp
         tests/switch_tests.cpp
         tests/lambda_tests.cpp
+        tests/debug_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

@@ -22,7 +22,9 @@ via monomorphization.
 11. [Generics](#11-generics)
 12. [Imports & extern](#12-imports--extern)
 13. [Traits & operator overloading](#13-traits--operator-overloading)
-14. [What GG does NOT support](#14-what-gg-does-not-support)
+14. [Lambdas & callable objects](#14-lambdas--callable-objects)
+15. [What GG does NOT support](#15-what-gg-does-not-support)
+16. [Debugging (`--debug` / `-g`)](#16-debugging---debug----g)
 
 ---
 
@@ -1336,3 +1338,33 @@ Attempting them will produce a compile error (or will simply not parse).
 | Modules / namespaces | No namespacing; all declarations share a flat global scope |
 | String interpolation | No template strings |
 | Assertions | Use `if (cond) { exit(1); }` or call `abort()` via `extern` |
+
+## 16. Debugging (`--debug` / `-g`)
+
+GG can emit DWARF debug information so a compiled program is debuggable with standard C/C++
+debuggers (**gdb** / **lldb**) — set breakpoints on `.gg` lines, single-step, inspect a backtrace,
+and print local variables and struct fields.
+
+```powershell
+.\compile.ps1 e2e\class_test.gg -DebugInfo    # GG --debug + clang -g
+```
+
+`-DebugInfo` passes `--debug` to the GG compiler (emit LLVM debug metadata) and `-g` to clang (keep
+DWARF in the executable). Invoking `GG.exe` directly, the flag is `--debug` (or `-g`).
+(The switch is `-DebugInfo`, not `-Debug`: `compile.ps1` is an advanced script, so PowerShell
+reserves `-Debug` as a common parameter.)
+
+What you get:
+- **Line-level** — a breakpoint on a source line (`break class_test.gg:180`), stepping, and
+  backtraces mapped back to `.gg` lines.
+- **Variables & types** — `print p`, `print p.x` for locals and parameters; value objects appear as
+  structs with named fields (correct byte offsets), primitives with their natural type. References,
+  enums, and `ptr` show as pointers (addresses).
+
+Notes / limitations:
+- **Off by default.** Without `-DebugInfo`/`--debug` the emitted IR is identical to a release build —
+  no runtime or size cost.
+- **Single source file.** The debug info uses one compile-unit file (the main source). In a
+  multi-file (imported) build, line numbers are attributed against that file — per-file line
+  mapping is not yet implemented.
+- Debug info is descriptive metadata only; it never changes the generated code.

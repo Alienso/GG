@@ -1,0 +1,25 @@
+{
+  "name": "gg-language",
+  "displayName": "GG Language",
+  "description": "Syntax highlighting for the GG language (.gg).",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.0.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "gg",
+        "aliases": ["GG", "gg"],
+        "extensions": [".gg"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "gg",
+        "scopeName": "source.gg",
+        "path": "./syntaxes/gg.tmLanguage.json"
+      }
+    ]
+  }
+}

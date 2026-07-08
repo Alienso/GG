@@ -356,6 +356,37 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
   `c`, still no heap). Operator **operands** may be value objects (borrowed as `Self&` — see
   the memory-model borrow note).
 
+### Debug info (DWARF) — `--debug` / `-g`
+LLVM debug metadata so a compiled `.gg` is debuggable with gdb/lldb (clang→MinGW emits DWARF).
+**Off by default; with `--debug` off the emitted IR is byte-identical to before** (the only hook in
+the hot path is `emit()` appending `currentDbgLoc_`, which is empty unless debug is on). Flag:
+`CompilerOptions::debugInfo` (+ `sourceFile`, the DWARF `DIFile`); parsed in `main.cpp` (`--debug`/
+`-g`); `compile.ps1 -DebugInfo` passes `--debug` to GG **and** `-g` to clang (named `-DebugInfo`,
+not `-Debug`, which PowerShell reserves as a common parameter on advanced scripts). All emission lives in
+`source/codegen/CodeGen_Debug.cpp` (gated by `CodeGen::debug_`).
+- **Storage / printing**: `IRFunction::dbg` (the ` !dbg !N` suffix on the `define`), `IRModule::debugMeta`
+  (`!N = !DI…` nodes) and `IRModule::namedMeta` (`!llvm.dbg.cu` / `!llvm.module.flags`). `IRPrinter`
+  prints `signature + dbg + " {"` and appends the metadata after the runtime block.
+- **Tier 1 (line-level)**: `dbgInit()` (once, in `generate()`) emits the `!DIFile` + `distinct
+  !DICompileUnit` + the `"Debug Info Version"` module flag. `dbgBeginFunction`/`dbgEndFunction`
+  (in `genFunction`/`genMethod`) create a `distinct !DISubprogram` (attached via `IRFunction::dbg`)
+  with a `!DISubroutineType`; `dbgStmtLine` (called at the top of `genStmt`) sets `currentDbgLoc_`
+  to a `!DILocation` from the statement's leading `Token.line`, which `emit()` appends to every
+  instruction. **Only user functions are decorated** — runtime helpers (`gg_*`), clones, dtors,
+  structeq, enum/static-init are left undecorated (`currentSubprogram_`/`currentDbgLoc_` cleared at
+  `dbgEndFunction`), which the LLVM verifier requires (a subprogram-less function may carry no `!dbg`).
+- **Tier 2 (variables & types)**: `dbgTypeOf(Type)` (cached) maps GG types to DWARF — `!DIBasicType`
+  for primitives, `!DICompositeType` with per-member byte offsets for value objects (offsets from
+  `dbgSizeAlign`, matching LLVM's natural-alignment struct layout), and an opaque
+  `DW_TAG_pointer_type` (`baseType: null`) for references/enums/`ptr`. Object composites reserve
+  their id **before** recursing into fields (cycle-safe). `dbgDeclare` emits a
+  `#dbg_declare(ptr <alloca>, !<DILocalVariable>, !DIExpression(), !<loc>)` **record** (LLVM-22 form,
+  not the old `@llvm.dbg.declare` intrinsic) for each parameter (`arg: N`) and local — hooked in the
+  param-spill loop and each `genVarDecl` branch (scalars/refs/enums/`ptr`/objects; arrays and static
+  locals are skipped). `this` is not declared (it's the `%self` value, not an alloca).
+- **v1 limitation**: a single `DIFile` = the main source; lines from imported files map against it
+  (multi-file line attribution deferred).
+
 ## Architecture summary
 
 ### Compiler pipeline (per source file)
@@ -365,7 +396,7 @@ bounds. Reuses the overloading `resolvedCallee` node→symbol handoff for operat
   → ImportResolver   (3 passes — see below)
   → SemanticAnalyzer (3 passes — see below)
   → CodeGen          (walks AST, emits IRModule)
-  → IRPrinter        (writes .ll text)
+  → IRPrinter        (writes .ll text; appends DWARF metadata when --debug is on)
   → clang            (assembles + links to native .exe)
 ```
 
@@ -594,7 +625,11 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**687 test cases / 1350 assertions** (as of lambdas & callable objects — the `Call` trait with
+**696 test cases / 1375 assertions** (as of DWARF debug info — `--debug`/`-g`: Tier 1 line-level
+`!DICompileUnit`/`!DIFile`/`!DISubprogram`/`!DILocation`, Tier 2 `!DIBasicType`/`!DICompositeType`
+with member offsets/`!DILocalVariable` + `#dbg_declare` records; off by default, IR byte-identical
+when off; `tests/debug_tests.cpp`). Prior baseline was **687 / 1350** as of lambdas & callable
+objects — the `Call` trait with
 signature-carrying `Call(P…)->R` bounds canonicalized to user traits, `obj(args)` desugar,
 parser-desugared value-object lambdas with by-value capture of locals/params/fields, single-param
 inference; Java-style `switch` — statement + expression, arrow

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "GG",
+  "scopeName": "source.gg",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#modifiers" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#language-variables" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.gg",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.gg",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.gg",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.gg", "match": "\\\\." }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.gg",
+      "match": "'(\\\\.|[^'\\\\])'"
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.gg" },
+            "2": { "name": "entity.name.function.gg" }
+          }
+        },
+        {
+          "match": "\\b(class|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.gg" },
+            "2": { "name": "entity.name.type.gg" }
+          }
+        },
+        {
+          "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.impl.gg" },
+            "2": { "name": "entity.name.type.gg" }
+          }
+        },
+        {
+          "match": "\\b(new)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.new.gg" },
+            "2": { "name": "entity.name.type.gg" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.gg",
+          "match": "\\b(if|else|for|while|switch|case|default|yield|return|break|continue)\\b"
+        },
+        {
+          "name": "keyword.declaration.gg",
+          "match": "\\b(fn|class|enum|trait|impl|extern|import|new|static|private|var|super)\\b"
+        }
+      ]
+    },
+    "modifiers": {
+      "name": "storage.modifier.gg",
+      "match": "\\b(mut|as|sizeof)\\b"
+    },
+    "types": {
+      "name": "storage.type.gg",
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|void|ptr|Self)\\b"
+    },
+    "constants": {
+      "name": "constant.language.gg",
+      "match": "\\b(true|false)\\b"
+    },
+    "language-variables": {
+      "name": "variable.language.this.gg",
+      "match": "\\b(this)\\b"
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.gg", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
+        { "name": "constant.numeric.float.gg", "match": "\\b[0-9]+\\.[0-9]+\\b" },
+        { "name": "constant.numeric.integer.gg", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.gg", "match": "->" },
+        { "name": "keyword.operator.scope.gg", "match": "::" },
+        { "name": "keyword.operator.comparison.gg", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.logical.gg", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.assignment.gg", "match": "\\+=|-=|\\*=|/=|%=|=" },
+        { "name": "keyword.operator.arithmetic.gg", "match": "\\+\\+|--|[-+*/%]" },
+        { "name": "keyword.operator.bitwise.gg", "match": "[&|^~]" }
+      ]
+    }
+  }
+}

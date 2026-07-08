@@ -6,13 +6,17 @@
 #   .\compile.ps1 samples\hello.gg -ShowIR
 #   .\compile.ps1 samples\hello.gg -Run
 #   .\compile.ps1 samples\hello.gg -ShowIR -Run
+#   .\compile.ps1 samples\hello.gg -DebugInfo   (emit DWARF for gdb/lldb)
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string] $Source,
 
-    [switch] $ShowIR,   # print the generated LLVM IR to the console
-    [switch] $Run       # run the compiled executable and show its exit code
+    [switch] $ShowIR,     # print the generated LLVM IR to the console
+    [switch] $Run,        # run the compiled executable and show its exit code
+    [switch] $DebugInfo   # emit DWARF debug info (GG --debug + clang -g) for gdb/lldb
+    # NB: named -DebugInfo, not -Debug: this is an advanced script (a [Parameter] attribute
+    # is present), so PowerShell reserves -Debug as a common parameter.
 )
 
 Set-StrictMode -Version Latest
@@ -86,7 +90,9 @@ function Invoke-Native {
 Write-Host ""
 Write-Host "==> [1/2]  GG  $SourceResolved" -ForegroundColor Cyan
 
-$gg = Invoke-Native $GG @("$SourceResolved", "--unsafe-ptr")
+$ggArgs = @("$SourceResolved", "--unsafe-ptr")
+if ($DebugInfo) { $ggArgs += "--debug" }
+$gg = Invoke-Native $GG $ggArgs
 
 foreach ($line in $gg.Stderr) {
     if (!$line) { continue }
@@ -121,7 +127,22 @@ if ($ShowIR) {
 Write-Host ""
 Write-Host "==> [2/2]  clang  $llFile" -ForegroundColor Cyan
 
-$clang = Invoke-Native $Clang @("$llFile", "-o", "$exeOut")
+# If the previous executable is still held open - a running instance, or an active/paused
+# debug session - the linker can't overwrite it and fails with a cryptic "Permission denied".
+# Pre-remove it so a clean run works, and turn a locked file into a clear message.
+if (Test-Path $exeOut) {
+    try {
+        Remove-Item $exeOut -Force -ErrorAction Stop
+    } catch {
+        Write-Host "ERROR: cannot overwrite $exeOut - the file is in use." -ForegroundColor Red
+        Write-Host "       Stop the running program or the active debug session, then rebuild." -ForegroundColor Red
+        exit 1
+    }
+}
+
+$clangArgs = @("$llFile", "-o", "$exeOut")
+if ($DebugInfo) { $clangArgs += "-g" }
+$clang = Invoke-Native $Clang $clangArgs
 
 foreach ($line in ($clang.Stdout + $clang.Stderr)) {
     if (!$line) { continue }

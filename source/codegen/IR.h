@@ -52,6 +52,7 @@ struct BasicBlock {
 
 struct IRFunction {
     std::string              signature;  // "define i32 @add(i32 %a, i32 %b)"
+    std::string              dbg;        // " !dbg !N" debug-info attachment (empty if none)
     std::vector<std::string> allocas;   // alloca lines — prepended to entry block
     std::vector<BasicBlock>  blocks;
 };
@@ -62,6 +63,9 @@ struct IRModule {
     std::vector<std::string> globals;    // @.str.N = private unnamed_addr constant …
     std::vector<IRFunction>  functions;
     std::vector<std::string> runtime;    // verbatim runtime helper definitions (e.g. gg_alloc/retain/release)
+    // Debug info (DWARF via LLVM metadata), emitted only when --debug is set.
+    std::vector<std::string> debugMeta;  // "!N = !DI…(…)" metadata nodes
+    std::vector<std::string> namedMeta;  // "!llvm.dbg.cu = !{…}" / "!llvm.module.flags = !{…}"
 };
 
 #endif

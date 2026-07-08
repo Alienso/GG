@@ -300,6 +300,10 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
     currentBasicBlock = &currentFunction->blocks.back();
 
+    if (debug_)
+        dbgBeginFunction(function.name.lexeme, emitName, function.name.line,
+                         paramTypes, logicalRet, false, "");
+
     // Bind the slot name directly to the sret pointer and zero-init the object in place.
     if (sret) {
         allocaMap[function.returnSlotName]  = "%" + function.returnSlotName;
@@ -309,9 +313,17 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     }
 
     spillParamsToAllocas(function.params);
+    if (debug_)
+        for (size_t i = 0; i < function.params.size(); ++i) {
+            auto it = allocaMap.find(function.params[i].name.lexeme);
+            if (it != allocaMap.end())
+                dbgDeclare(it->second, function.params[i].name.lexeme, paramTypes[i],
+                           function.params[i].name.line, static_cast<int>(i) + 1);
+        }
     if (localAlias) setupReturnAliasLocal(function.returnSlotName, logicalRet);
     emitFunctionBody(function.body, returnIrType);
 
+    if (debug_) dbgEndFunction();
     currentFunction = nullptr;
     currentBasicBlock = nullptr;
 }
@@ -369,6 +381,14 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     currentFunction->blocks.push_back(BasicBlock{"entry", {}, false});
     currentBasicBlock = &currentFunction->blocks.back();
 
+    if (debug_) {
+        std::string pretty = method.isDestructor ? ("~" + className)
+                           : method.isConstructor ? className
+                           : (className + "::" + method.name.lexeme);
+        dbgBeginFunction(pretty, mangledName, method.name.line, paramTypes, logicalRet,
+                         !method.isStatic, className);
+    }
+
     if (!method.isStatic) {
         allocaMap["this"]  = "%self";
         varTypeMap["this"] = cgEnumNames_.count(className)
@@ -385,9 +405,19 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
     }
 
     spillParamsToAllocas(method.params);
+    if (debug_) {
+        int argBase = method.isStatic ? 1 : 2;   // `this` occupies arg 1 when present
+        for (size_t i = 0; i < method.params.size(); ++i) {
+            auto it = allocaMap.find(method.params[i].name.lexeme);
+            if (it != allocaMap.end())
+                dbgDeclare(it->second, method.params[i].name.lexeme, paramTypes[i],
+                           method.params[i].name.line, argBase + static_cast<int>(i));
+        }
+    }
     if (localAlias) setupReturnAliasLocal(method.returnSlotName, logicalRet);
     emitFunctionBody(method.body, returnIrType);
 
+    if (debug_) dbgEndFunction();
     currentFunction = nullptr;
     currentBasicBlock = nullptr;
     currentClassName_ = "";

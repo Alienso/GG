@@ -32,6 +32,10 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;
+    debug_           = options.debugInfo;
+    dbgSourceFile_   = options.sourceFile;
+    dbgNextId_ = 0; dbgFileId_ = -1; dbgCUId_ = -1; currentSubprogram_ = -1;
+    currentDbgLoc_.clear(); dbgLineCache_.clear(); dbgTypeCache_.clear();
     usesRefcount_    = false;
     clonesNeeded_.clear();
     funcParamTypes.clear();
@@ -46,6 +50,8 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     globalCtors_.clear();
     staticLocalInits_.clear();
     usedStaticGlobals_.clear();
+
+    if (debug_) dbgInit();
 
     // Pre-scan all class / enum names so a field type can name a value-object / enum type
     // declared later (forward reference), matching the semantic analyzer.

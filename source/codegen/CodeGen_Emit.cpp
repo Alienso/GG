@@ -103,7 +103,7 @@ void CodeGen::emitRefcountRuntime() {
 
 void CodeGen::emit(const std::string& instruction) {
     if (currentBasicBlock && !currentBasicBlock->terminated)
-        currentBasicBlock->instructions.push_back("  " + instruction);
+        currentBasicBlock->instructions.push_back("  " + instruction + currentDbgLoc_);
 }
 
 void CodeGen::emitAlloca(const std::string& ptrName, const std::string& irType) {

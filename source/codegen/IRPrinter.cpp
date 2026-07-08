@@ -25,7 +25,7 @@ void IRPrinter::print(const IRModule& module, std::ostream& out) {
 
     // Functions
     for (const auto& irFunction : module.functions) {
-        out << irFunction.signature << " {\n";
+        out << irFunction.signature << irFunction.dbg << " {\n";
 
         bool isEntryBlock = true;
         for (const auto& basicBlock : irFunction.blocks) {
@@ -48,4 +48,11 @@ void IRPrinter::print(const IRModule& module, std::ostream& out) {
     // Runtime helper definitions (refcount alloc/retain/release), emitted verbatim.
     for (const auto& def : module.runtime)
         out << def << "\n";
+
+    // Debug-info metadata (DWARF), emitted only with --debug.
+    if (!module.debugMeta.empty() || !module.namedMeta.empty()) {
+        out << "\n";
+        for (const auto& n : module.namedMeta) out << n << "\n";
+        for (const auto& n : module.debugMeta) out << n << "\n";
+    }
 }

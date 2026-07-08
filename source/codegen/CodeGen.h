@@ -120,6 +120,34 @@ private:
 
     bool boundsCheck = true;   // from CompilerOptions; false disables runtime checks
 
+    // ---- Debug info (DWARF via LLVM metadata), gated by CompilerOptions::debugInfo ----
+    bool        debug_ = false;
+    std::string dbgSourceFile_;            // main source path → DWARF DIFile
+    int         dbgNextId_ = 0;            // next "!N" metadata id
+    int         dbgFileId_ = -1;           // !DIFile
+    int         dbgCUId_   = -1;           // !DICompileUnit
+    int         currentSubprogram_ = -1;   // !DISubprogram of the function being emitted (-1 = none)
+    std::string currentDbgLoc_;            // ", !dbg !N" suffix appended by emit() (empty ⇒ none)
+    std::unordered_map<int, int>         dbgLineCache_;  // line → !DILocation id (per function; cleared each fn)
+    std::unordered_map<std::string, int> dbgTypeCache_;  // type key → !DIType id
+    // Append a "!<id> = <body>" metadata node; returns its id.
+    int  dbgAdd(const std::string& body);
+    // !DIType id for a GG type (a distinct sentinel of -1 means the DWARF `null` type, i.e. void).
+    int  dbgTypeOf(const Type& t);
+    // Byte (size, alignment) of a GG type, matching the LLVM struct layout used for `%Class`.
+    std::pair<long long, long long> dbgSizeAlign(const Type& t);
+    void dbgInit();   // create the compile unit + file (called once from generate())
+    // Begin/end a user function's debug scope: create its !DISubprogram, attach it, set the line.
+    void dbgBeginFunction(const std::string& prettyName, const std::string& linkageName, int line,
+                          const std::vector<Type>& paramTypes, const Type& returnType, bool hasThis,
+                          const std::string& thisClass);
+    void dbgEndFunction();
+    void dbgSetLine(int line);   // update currentDbgLoc_ to a !DILocation for `line`
+    void dbgStmtLine(const Stmt& stmt);   // set the current line from a statement's leading token
+    // Emit a #dbg_declare associating an alloca with a source variable (argIndex>0 ⇒ parameter).
+    void dbgDeclare(const std::string& allocaPtr, const std::string& name, const Type& t,
+                    int line, int argIndex);
+
     // varName → alloca pointer register name, e.g. "x" → "%x.addr"
     std::unordered_map<std::string, std::string> allocaMap;
 

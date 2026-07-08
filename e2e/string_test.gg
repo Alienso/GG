@@ -1,0 +1,41 @@
+// e2e/string_test.gg — exercises the stdlib String class (UTF-8 aware).
+// Returns a unique number on the first failing check; 0 on success.
+
+import "../stdlib/string.gg";
+
+fn main() -> i32 {
+    // "café" = c a f é  →  5 bytes (é is 2 bytes), 4 codepoints.
+    String s("café");
+    if (s.byteLength() != 5) { return 1; }
+    if (s.length()     != 4) { return 2; }
+    if (s.isEmpty())         { return 3; }
+
+    // Empty string.
+    String empty("");
+    if (!empty.isEmpty())    { return 4; }
+    if (empty.length() != 0) { return 5; }
+
+    // byteAt — 'c' is ASCII 99.
+    if (s.byteAt(0) != 99)   { return 6; }
+
+    // charAt — ASCII and non-ASCII codepoints.
+    if (s.charAt(0) != 99)   { return 7; }   // 'c'
+    if (s.charAt(2) != 102)  { return 8; }   // 'f'
+    if (s.charAt(3) != 233)  { return 9; }   // 'é' = U+00E9 = 233
+
+    // A 3-byte codepoint: "✓" = U+2713 = 10003.
+    String check("✓");
+    if (check.byteLength() != 3)  { return 10; }
+    if (check.length()     != 1)  { return 11; }
+    if (check.charAt(0)    != 10003) { return 12; }
+
+    // Equality via the Eq impl.
+    String a("hello");
+    String b("hello");
+    String c("world");
+    if (!(a == b)) { return 13; }
+    if (a == c)    { return 14; }
+    if (a != b)    { return 15; }
+
+    return 0;
+}

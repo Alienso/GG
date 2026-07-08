@@ -1,0 +1,14 @@
+
+import "../stdlib/crt/cmem.gg";
+import "../stdlib/crt/cstring.gg";
+import "../stdlib/crt/cio.gg";
+
+import "../stdlib/array.gg";
+
+fn main() -> i32 {
+
+    puts("Hello world!");
+    Array<i32> array = new Array<i32>();
+
+    return 0;
+}

@@ -1,0 +1,28 @@
+import "mem.gg";
+
+class <T> Array {
+
+    ptr<T> data;
+    u64 size;
+    u64 capacity;
+
+    Array() {
+        this.size = 0;
+        this.capacity = 0;
+        this.data = malloc(capacity);
+    }
+
+    ~Array(){
+        free(this.data);
+    }
+
+}
+
+impl Index for Array<T> {
+    fn get(i 32) -> T {
+        return data[i];
+    }
+    fn set(T data) -> void {
+        data[i] = data;
+    }
+}

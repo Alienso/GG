@@ -1,16 +1,125 @@
-// stdlib/string.gg — C string utility bindings
+// stdlib/string.gg — a heap-owned, UTF-8 string.
 //
-// Wraps the standard null-terminated string functions from <string.h>.
-// All strings are represented as `ptr` (opaque pointer to char data).
+// The bytes are stored verbatim (a copy of the source C string), so any valid
+// UTF-8 input — including non-ASCII — round-trips unchanged. `size` is the BYTE
+// length; the character (Unicode codepoint) count is computed on demand, because
+// UTF-8 is variable-width (1-4 bytes per codepoint). A GG `char` is 32-bit, so a
+// decoded codepoint fits directly in a `char`.
+//
+// Requires --unsafe-ptr (the `ptr` field / parameters); compile.ps1 always passes it.
+//
+// Ownership: a String owns its buffer and frees it in the destructor. It is a value
+// object with a raw `ptr` field, so copy-initialising one (`String b = a;`) would
+// shallow-copy the pointer and double-free. Pass a String by reference (`String&`)
+// instead of copying it.
 
-extern strlen(ptr s) -> u64;                        // length of null-terminated string (excluding null)
-extern strcpy(ptr dest, ptr src) -> ptr;            // copy src into dest; returns dest
-extern strncpy(ptr dest, ptr src, u64 n) -> ptr;    // copy at most `n` bytes; returns dest
-extern strcat(ptr dest, ptr src) -> ptr;            // append src to dest; returns dest
-extern strncat(ptr dest, ptr src, u64 n) -> ptr;    // append at most `n` bytes; returns dest
-extern strcmp(ptr a, ptr b) -> i32;                 // compare strings; 0 = equal, <0 / >0 otherwise
-extern strncmp(ptr a, ptr b, u64 n) -> i32;         // compare at most `n` bytes
-extern strchr(ptr s, i32 c) -> ptr;                 // find first occurrence of `c` in s; null if absent
-extern strrchr(ptr s, i32 c) -> ptr;                // find last  occurrence of `c` in s; null if absent
-extern strstr(ptr haystack, ptr needle) -> ptr;     // find first occurrence of needle in haystack
-extern strdup(ptr s) -> ptr;                        // allocate a copy of s (caller must free)
+import "crt/cmem.gg";
+import "crt/cstring.gg";
+
+class String {
+    ptr  data;   // owned, null-terminated UTF-8 byte buffer
+    u64  size;   // byte length (excluding the null terminator)
+
+    // Copy a null-terminated C string (e.g. a string literal) into an owned buffer.
+    String(ptr string) {
+        this.size = strlen(string);
+        u64 allocSize = this.size + 1;          // +1 for the null terminator
+        this.data = malloc(allocSize);
+        memcpy(this.data, string, allocSize);
+    }
+
+    ~String() {
+        free(this.data);
+    }
+
+    // ---- byte view ----
+
+    // Number of bytes (NOT characters). O(1).
+    fn byteLength() -> u64 {
+        return this.size;
+    }
+
+    fn isEmpty() -> bool {
+        return this.size == 0;
+    }
+
+    // The raw byte at position `i`. No bounds check.
+    fn byteAt(u64 i) -> u8 {
+        ptr<u8> bytes = this.data;
+        return bytes[i];
+    }
+
+    // The underlying null-terminated buffer, e.g. to hand to `puts`.
+    fn cStr() -> ptr {
+        return this.data;
+    }
+
+    // ---- UTF-8 (codepoint) view ----
+
+    // Number of Unicode codepoints: every byte that is not a UTF-8 continuation
+    // byte (10xxxxxx) starts a new codepoint. O(n).
+    fn length() -> u64 {
+        ptr<u8> bytes = this.data;
+        mut u64 count = 0;
+        mut u64 i = 0;
+        while (i < this.size) {
+            u8 b = bytes[i];
+            if ((b & 192) != 128) {             // 192 = 11000000, 128 = 10000000
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+        return count;
+    }
+
+    // The Unicode codepoint at codepoint-index `index` (0-based), decoded from its
+    // UTF-8 sequence. Returns 0 if `index` is past the end. O(n).
+    fn charAt(u64 index) -> char {
+        ptr<u8> bytes = this.data;
+        mut u64 cpIndex = 0;
+        mut u64 i = 0;
+        while (i < this.size) {
+            u8 lead = bytes[i];
+
+            // Sequence length from the lead byte's high bits.
+            mut u64 len = 1;
+            if ((lead & 128) == 0)        { len = 1; }   // 0xxxxxxx
+            else if ((lead & 224) == 192) { len = 2; }   // 110xxxxx
+            else if ((lead & 240) == 224) { len = 3; }   // 1110xxxx
+            else if ((lead & 248) == 240) { len = 4; }   // 11110xxx
+
+            if (cpIndex == index) {
+                if (len == 1) {
+                    return lead as char;
+                }
+                if (len == 2) {
+                    i32 cp = ((lead & 31) << 6)
+                           |  (bytes[i + 1] & 63);
+                    return cp as char;
+                }
+                if (len == 3) {
+                    i32 cp = ((lead & 15) << 12)
+                           | ((bytes[i + 1] & 63) << 6)
+                           |  (bytes[i + 2] & 63);
+                    return cp as char;
+                }
+                i32 cp = ((lead & 7) << 18)
+                       | ((bytes[i + 1] & 63) << 12)
+                       | ((bytes[i + 2] & 63) << 6)
+                       |  (bytes[i + 3] & 63);
+                return cp as char;
+            }
+
+            cpIndex = cpIndex + 1;
+            i = i + len;
+        }
+        return 0 as char;
+    }
+}
+
+// Value equality: compare the underlying bytes. Enables `a == b` / `a != b`.
+impl Eq for String {
+    fn eq(String& other) -> bool {
+        return strcmp(this.data, other.data) == 0;
+    }
+}

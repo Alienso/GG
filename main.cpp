@@ -26,7 +26,5 @@ int main(int argc, char** argv) {
     if (options.debugInfo && !paths.empty()) options.sourceFile = paths.front();
 
     GG gg{paths, options};
-    gg.run();
-
-    return 0;
+    return gg.run();
 }

@@ -37,12 +37,25 @@ struct GenericInstantiation {
     std::string                     mangledName;
     std::vector<std::vector<Token>> args;     // each type argument's token slice
 };
+// A generic `impl<T…> Trait for Class<T…> { … }`. Captured like a class template and
+// instantiated automatically whenever `Class<args>` is instantiated: the impl's type
+// parameters are substituted with the class's concrete arguments and the body re-parses
+// as an ordinary concrete impl (so semantics/codegen never see the type parameters).
+struct GenericImplTemplate {
+    std::vector<std::string>              typeParams;        // from `impl<…>`
+    std::vector<std::vector<std::string>> bounds;            // parallel to typeParams (reserved)
+    std::string                           targetClass;       // e.g. "Array"
+    std::vector<std::string>              targetParamAtPos;  // target arg position → impl type-param name
+    std::vector<Token>                    tokens;            // `impl <Trait> for <Class<…>> { … }` (header `<…>` stripped)
+};
 struct GenericRegistry {
     std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
     std::unordered_set<std::string>                  funcNames;     // generic function names
     std::unordered_set<std::string>                  classNames;    // generic class names
     std::vector<GenericInstantiation>                worklist;      // instantiation requests
     std::unordered_set<std::string>                  instantiated;  // mangled names already queued
+    std::vector<GenericImplTemplate>                 implTemplates;    // generic `impl<T> … for Class<T>` blocks
+    std::unordered_set<std::string>                  implInstantiated; // dedup key "<implIndex>@<mangledClass>"
     std::unordered_set<std::string>                  emittedCallTraits; // canonical Call$… traits emitted (shared dedup)
     std::unordered_set<std::string>                  lambdaClassNames;  // generated `__lambda_N` class names (shared, seeded at monomorphization)
     int                                              lambdaCounter = 0;    // unique `__lambda_N` names (shared)
@@ -113,6 +126,14 @@ private:
     // True while parsing a switch case *label*, where a trailing `->` is the arm separator, not a
     // lambda arrow (a bare-identifier label `case x ->` must not be read as a lambda `x -> …`).
     bool parsingCaseLabel_ = false;
+    // True while parsing the method bodies of an `impl` block. Used only to enrich a
+    // "not a known type" diagnostic: `impl` blocks do not introduce type parameters, so a
+    // bare `T` in `impl Trait for Foo<T>` is unresolved.
+    bool inImplBlock_ = false;
+    // Throw a "type expected" error that names the offending token and, inside an `impl`,
+    // explains that generic type parameters are not in scope there. `what` names the position,
+    // e.g. "a return type after '->'".
+    [[noreturn]] void throwTypeExpected(const std::string& what);
     // True if the tokens at the current `(` form a lambda `( … ) -> …` (vs a grouped expression).
     [[nodiscard]] bool isLambdaAhead() const;
     // Parse the parenthesized parameter list of a lambda, allowing typed (`i32 x`) and untyped (`x`)
@@ -158,6 +179,7 @@ private:
     // ---- Generics helpers ----
     bool tryCaptureFunctionTemplate();                       // capture a generic fn decl
     bool tryCaptureClassTemplate();                          // capture a generic class decl
+    bool tryCaptureImplTemplate();                           // capture a generic `impl<T> … for C<T>`
     // Scan a `<T, U: Trait + ...>` param list from index `from`; fills typeParams +
     // parallel bounds, returns the closing '>' index (0 if malformed).
     size_t scanTypeParamList(size_t from, std::vector<std::string>& typeParams,

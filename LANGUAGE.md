@@ -1142,6 +1142,39 @@ impl Describe for Acc {
   signature (after `Self` substitution). A missing or mismatched method is an error.
 - Impl methods participate in the normal overload machinery — you can overload alongside them.
 
+### Implementing a trait for a generic type
+
+To implement a trait for a generic class, declare the impl's type parameters right after `impl`,
+then use them in the target and the method bodies:
+
+```gg
+class Buffer<T> {
+    ptr<T> data;
+    Buffer(u64 cap) { data = malloc(cap * 8); }
+}
+
+impl<T> Index for Buffer<T> {          // note the <T> right after `impl`
+    fn get(u64 i) -> T       { return data[i]; }
+    fn set(u64 i, T v) -> void { data[i] = v; }
+}
+
+fn main() -> i32 {
+    Buffer<i32>& b = new Buffer<i32>(8);
+    b[0] = 7;              // Index::set — T is i32 here
+    return b[0];           // Index::get
+}
+```
+
+- The header form is **`impl<T…> Trait for Class<T…>`**. Each target type argument must be one of
+  the impl's own type parameters (e.g. `impl<K, V> Trait for Pair<K, V>`); nested or concrete
+  arguments in the target (`impl<T> Trait for Box<Foo<T>>`) are not supported.
+- A generic impl is **monomorphized together with the class**: when `Buffer<i32>` is instantiated,
+  its `impl<T> Index` is instantiated too (with `T = i32`), producing an ordinary impl on
+  `Buffer<i32>`. You never write the impl per concrete type.
+- **Forgetting the header is a common mistake:** `impl Index for Buffer<T>` (no `impl<T>`) leaves
+  `T` undeclared and errors with a note pointing you to the `impl<T>` form.
+- A concrete impl on a single instantiation still works too: `impl Index for Buffer<i32> { … }`.
+
 ### Operator overloading
 
 Operators desugar to **named trait methods**. An operator is only overloaded when the
@@ -1159,7 +1192,7 @@ they are recognised by name.
 | `==`, `!=`             | `Eq`   | `bool eq(T& rhs)`            | `bool`                 |
 | `<`, `<=`, `>`, `>=`   | `Ord`  | `i32 cmp(T& rhs)`            | `bool`                 |
 | `-` (unary)            | `Neg`  | `T neg()`                    | the method's return    |
-| `a[i]`                 | `Index`| `E get(I i)`                 | the element type `E`   |
+| `a[i]`                 | `Index`| `E get(I i)` — **or `E& get(I i)`** to return by reference | `E` (or `E&`) |
 | `a[i] = v`             | `Index`| `void set(I i, E v)`         | —                      |
 
 - `a == b` calls `a.eq(b)`; `a != b` calls `a.eq(b)` then negates it.
@@ -1172,6 +1205,14 @@ they are recognised by name.
 - `a < b` calls `a.cmp(b)` and compares the `i32` result against `0` (`< 0`, `<= 0`, `> 0`,
   `>= 0` for `<`, `<=`, `>`, `>=`).
 - Unary `-a` calls `a.neg()`; `a[i]` calls `a.get(i)`; `a[i] = v` calls `a.set(i, v)`.
+- **`get` can return a reference, avoiding a copy.** `a[i]` is typed as exactly what `get` returns,
+  so declare `fn get(I i) -> E&` (with `E` a class) and `a[i]` yields a *reference* to the element —
+  `mut Point& p = a[i]; p.x = 9;` mutates the stored object in place, no copy. Returning `E` (a
+  value) copies. For a generic container this falls out of the element type: `Array<Point&>` with
+  `fn get(I i) -> T` already returns a `Point&`; `Array<Point>` returns a `Point` by value.
+  (A reference is only meaningful for class/reference element types — you can't return a reference
+  to a primitive like `i32`, nor a safe reference into an inline value-object element, since GG
+  references are refcounted; see the memory model, §10.)
 
 **Operators return objects by value, and take operands by value — with no heap allocation.**
 An operator method may return an object *by value* using a return alias (see §6): the result is

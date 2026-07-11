@@ -1117,7 +1117,9 @@ Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
     if (objectType.kind == TypeKind::TypedPtr)
         return typedPtrElement(objectType);
 
-    error(site, "cannot index a value of type " + typeName(objectType));
+    error(site, "cannot index a value of type " + typeName(objectType)
+        + " with '[]'; indexing works on a fixed-size array 'T[N]', a raw pointer 'ptr<T>', "
+          "or a class that implements the 'Index' trait");
     return Type{TypeKind::Error};
 }
 
@@ -1165,7 +1167,9 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
     } else if (objectType.kind == TypeKind::TypedPtr) {
         elementType = typedPtrElement(objectType);
     } else {
-        error(site, "cannot index a value of type " + typeName(objectType));
+        error(site, "cannot index a value of type " + typeName(objectType)
+            + " with '[]'; indexing works on a fixed-size array 'T[N]', a raw pointer 'ptr<T>', "
+              "or a class that implements the 'Index' trait");
         analyzeExpr(*indexAssign.value);
         return Type{TypeKind::Error};
     }

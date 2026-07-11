@@ -88,18 +88,18 @@ TEST_CASE("stdlib/crt/cstring.gg - IR declares strcpy and strdup", "[stdlib][cst
 // ============================================================
 
 TEST_CASE("stdlib/string.gg - semantic analysis passes", "[stdlib][string]") {
-    REQUIRE_FALSE(analyzeStdlib("string.gg").hadError);
+    REQUIRE_FALSE(analyzeStdlib("String.gg").hadError);
 }
 
 TEST_CASE("stdlib/string.gg - IR defines the String type, ctor and dtor", "[stdlib][string]") {
-    std::string ir = stdlibIR("string.gg");
+    std::string ir = stdlibIR("String.gg");
     REQUIRE(ir.find("%String = type") != std::string::npos);
     REQUIRE(ir.find("@String_String(ptr") != std::string::npos);
     REQUIRE(ir.find("@String_dtor(ptr") != std::string::npos);
 }
 
 TEST_CASE("stdlib/string.gg - IR defines the UTF-8 accessor methods", "[stdlib][string]") {
-    std::string ir = stdlibIR("string.gg");
+    std::string ir = stdlibIR("String.gg");
     REQUIRE(ir.find("@String_byteLength(") != std::string::npos);
     REQUIRE(ir.find("@String_length(")     != std::string::npos);
     REQUIRE(ir.find("@String_charAt(")     != std::string::npos);
@@ -107,7 +107,7 @@ TEST_CASE("stdlib/string.gg - IR defines the UTF-8 accessor methods", "[stdlib][
 }
 
 TEST_CASE("stdlib/string.gg - transitively declares the C string/memory bindings", "[stdlib][string]") {
-    std::string ir = stdlibIR("string.gg");
+    std::string ir = stdlibIR("String.gg");
     REQUIRE(ir.find("declare i64 @strlen(ptr)")  != std::string::npos);
     REQUIRE(ir.find("declare i32 @strcmp(ptr, ptr)") != std::string::npos);
     REQUIRE(ir.find("declare ptr @malloc(i64)")  != std::string::npos);

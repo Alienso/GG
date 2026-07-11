@@ -1,7 +1,7 @@
 // e2e/string_test.gg — exercises the stdlib String class (UTF-8 aware).
 // Returns a unique number on the first failing check; 0 on success.
 
-import "../stdlib/string.gg";
+import "../stdlib/String.gg";
 
 fn main() -> i32 {
     // "café" = c a f é  →  5 bytes (é is 2 bytes), 4 codepoints.

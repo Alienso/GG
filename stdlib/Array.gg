@@ -1,6 +1,6 @@
-import "mem.gg";
+import "crt/cmem.gg";
 
-class <T> Array {
+class Array<T> {
 
     ptr<T> data;
     u64 size;
@@ -8,7 +8,7 @@ class <T> Array {
 
     Array() {
         this.size = 0;
-        this.capacity = 0;
+        this.capacity = 8;
         this.data = malloc(capacity);
     }
 
@@ -18,11 +18,11 @@ class <T> Array {
 
 }
 
-impl Index for Array<T> {
-    fn get(i 32) -> T {
+impl <T> Index for Array<T> {
+    fn get(i32 i) -> T {
         return data[i];
     }
-    fn set(T data) -> void {
-        data[i] = data;
+    fn set(i32 i, T data) -> void {
+        this.data[i] = data;
     }
 }

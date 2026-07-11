@@ -516,3 +516,136 @@ TEST_CASE("Trait - a < b lowers to cmp call plus icmp against zero", "[trait][op
     REQUIRE(ir.find("call i32 @V_cmp") != std::string::npos);
     REQUIRE(ir.find("icmp slt") != std::string::npos);
 }
+
+// ============================================================
+// Generic impls — `impl<T> Trait for Class<T>`, monomorphized with the class.
+// ============================================================
+
+TEST_CASE("Generic impl - monomorphizes alongside the class instantiation", "[trait][generic][impl]") {
+    std::string ir = codegenString(R"(
+        class Box<T> { ptr<T> data; Box() { } }
+        impl<T> Index for Box<T> {
+            fn get(i32 i) -> T { return data[i]; }
+        }
+        fn main() -> i32 { Box<i32>& b = new Box<i32>(); return b[0]; }
+    )");
+    // The impl is emitted for the concrete instantiation (mangled class name).
+    REQUIRE(ir.find("@Box$i32_get(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - obj[i] dispatches to the generic Index impl", "[trait][generic][impl]") {
+    std::string ir = codegenString(R"(
+        class Box<T> { ptr<T> data; Box() { } }
+        impl<T> Index for Box<T> {
+            fn get(i32 i) -> T { return data[i]; }
+            fn set(i32 i, T v) -> void { data[i] = v; }
+        }
+        fn main() -> i32 {
+            Box<i32>& b = new Box<i32>();
+            b[0] = 7;
+            return b[0];
+        }
+    )");
+    REQUIRE(ir.find("@Box$i32_get(") != std::string::npos);
+    REQUIRE(ir.find("@Box$i32_set(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - two distinct instantiations each get their own impl", "[trait][generic][impl]") {
+    std::string ir = codegenString(R"(
+        class Box<T> { ptr<T> data; Box() { } }
+        impl<T> Index for Box<T> { fn get(i32 i) -> T { return data[i]; } }
+        fn main() -> i32 {
+            Box<i32>& a = new Box<i32>();
+            Box<i64>& b = new Box<i64>();
+            i32 x = a[0];
+            i64 y = b[0];
+            return x;
+        }
+    )");
+    REQUIRE(ir.find("@Box$i32_get(") != std::string::npos);
+    REQUIRE(ir.find("@Box$i64_get(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - a bare type param without an impl<T> header is a clear error", "[trait][generic][impl]") {
+    StderrCapture cap;
+    parseString(R"(
+        class Foo<T> { T val; Foo(T v) { val = v; } }
+        impl Index for Foo<T> { fn get(i32 i) -> T { return val; } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(cap.contains("impl<T> Trait for Foo<T>"));
+}
+
+TEST_CASE("Generic impl - multi-parameter class with a binary operator (Eq)", "[trait][generic][impl]") {
+    std::string ir = codegenString(R"(
+        class Pair<K, V> { mut K a; mut V b; Pair(K x, V y) { a = x; b = y; } }
+        impl<K, V> Eq for Pair<K, V> { fn eq(Pair<K, V>& o) -> bool { return a == o.a; } }
+        fn main() -> i32 {
+            Pair<i32, i32>& p = new Pair<i32, i32>(1, 2);
+            Pair<i32, i32>& q = new Pair<i32, i32>(1, 3);
+            if (p == q) { return 0; }
+            return 1;
+        }
+    )");
+    REQUIRE(ir.find("@Pair$i32$i32_eq(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - reordered type parameters in the target", "[trait][generic][impl]") {
+    // `impl<A, B> … for Pair<B, A>` binds A to the class's 2nd arg and B to the 1st.
+    std::string ir = codegenString(R"(
+        class Pair<K, V> { mut K a; mut V b; Pair(K x, V y) { a = x; b = y; } }
+        impl<A, B> Eq for Pair<B, A> { fn eq(Pair<B, A>& o) -> bool { return a == o.a; } }
+        fn main() -> i32 {
+            Pair<i32, i64>& p = new Pair<i32, i64>(1, 2);
+            Pair<i32, i64>& q = new Pair<i32, i64>(1, 3);
+            if (p == q) { return 0; }
+            return 1;
+        }
+    )");
+    REQUIRE(ir.find("@Pair$i32$i64_eq(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - a user (non-operator) trait method is callable", "[trait][generic][impl]") {
+    std::string ir = codegenString(R"(
+        trait Show { fn show() -> i32; }
+        class Box<T> { ptr<T> data; Box() { } }
+        impl<T> Show for Box<T> { fn show() -> i32 { return 42; } }
+        fn main() -> i32 { Box<i32>& b = new Box<i32>(); return b.show(); }
+    )");
+    REQUIRE(ir.find("@Box$i32_show(") != std::string::npos);
+}
+
+TEST_CASE("Generic impl - Self resolves to the concrete instantiation", "[trait][generic][impl]") {
+    auto r = analyzeString(R"(
+        trait Combine { fn merge(Self& o) -> Self&; }
+        class Box<T> { ptr<T> data; Box() { } }
+        impl<T> Combine for Box<T> { fn merge(Self& o) -> Self& { return o; } }
+        fn main() -> i32 {
+            Box<i32>& a = new Box<i32>();
+            Box<i32>& b = new Box<i32>();
+            Box<i32>& c = a.merge(b);
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Generic impl - targeting a non-generic class is rejected", "[trait][generic][impl]") {
+    StderrCapture cap;
+    parseString(R"(
+        class Plain { i32 x; Plain(i32 v) { x = v; } }
+        trait Show { fn show() -> i32; }
+        impl<T> Show for Plain { fn show() -> i32 { return 0; } }
+    )");
+    REQUIRE(cap.contains("must target a generic type"));
+}
+
+TEST_CASE("Generic impl - a nested target type argument is rejected", "[trait][generic][impl]") {
+    StderrCapture cap;
+    parseString(R"(
+        class Box<T> { T v; Box(T x) { v = x; } }
+        trait Show { fn show() -> i32; }
+        impl<T> Show for Box<Box<T>> { fn show() -> i32 { return 0; } }
+    )");
+    REQUIRE(cap.contains("name each type parameter directly"));
+}

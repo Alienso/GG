@@ -18,7 +18,7 @@
 class GG {
 public:
     explicit GG(std::vector<std::string>& paths, CompilerOptions options = {});
-    void run();
+    int run();   // process exit code: 0 on success, non-zero if any file failed to compile
 private:
     std::vector<std::string> paths;
     SemanticAnalyzer         semanticAnalyzer;

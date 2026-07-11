@@ -1,0 +1,41 @@
+// e2e/generic_impl_test.gg — a generic Index impl on a generic class.
+// Returns 0 on success.
+
+extern malloc(u64 n) -> ptr;
+extern free(ptr p);
+
+class Buffer<T> {
+    ptr<T> data;
+    mut u64 len;
+
+    Buffer(u64 cap) {
+        this.data = malloc(cap * 8);
+        this.len  = 0;
+    }
+    fn push(T v) mut {
+        this.data[this.len] = v;
+        this.len = this.len + 1;
+    }
+    ~Buffer() { free(this.data); }
+}
+
+impl<T> Index for Buffer<T> {
+    fn get(u64 i) -> T {
+        return this.data[i];
+    }
+    fn set(u64 i, T v) -> void {
+        this.data[i] = v;
+    }
+}
+
+fn main() -> i32 {
+    mut Buffer<i32>& b = new Buffer<i32>(8);
+    b.push(10);
+    b.push(20);
+    b[0] = 99;                 // Index::set
+    i32 a0 = b[0];             // Index::get
+    i32 a1 = b[1];
+    if (a0 != 99) { return 1; }
+    if (a1 != 20) { return 2; }
+    return 0;
+}

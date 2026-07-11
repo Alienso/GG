@@ -431,6 +431,19 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
   `zero<T>() -> T out`): the capture leads with the name directly before `<`, strips the
   `<…>`, and keeps the `-> RetType slot` so the re-parse takes the arrow branch. See the
   "Return slots" invariant. Generic-class arrow methods work via the verbatim body capture.
+- **Generic impls** — `impl<T> Trait for Class<T> { … }` is captured by `tryCaptureImplTemplate`
+  (fires only on `impl <`; a plain `impl Trait for Type` still goes through `parseImplDecl`) as a
+  `GenericImplTemplate` in `GenericRegistry::implTemplates`: its `<T…>` header type params, the
+  target class name, the positional map `targetParamAtPos` (target arg j → impl type-param name),
+  and the captured `impl Trait for Class<…> { … }` tokens **with the `<T…>` header stripped**. In
+  `runMonomorphization`, right after a **class** instantiation is expanded, every generic impl whose
+  `targetClass` matches is instantiated with the **same** type args (impl param ← class arg,
+  positionally), substituted, and re-parsed as an ordinary concrete impl — its `Class<args>` target
+  mangles to the same `Class$args` (via `consumeType`) and attaches through the normal
+  `collectImpls` path, so `arr[i]` etc. dispatch. Deduped by `implInstantiated` ("`<implIdx>@<mangledClass>`").
+  Target args must each be a bare impl type-param (no nested/concrete args) — else a parse error.
+  A bare `T` inside a **non**-generic `impl Trait for Foo<T>` (missing the `impl<T>` header) is an
+  "unknown type" error that points at the `impl<T>` fix (`throwTypeExpected` + `inImplBlock_`).
 
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
@@ -495,10 +508,21 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   body-8, so retaining/releasing/+1-returning one would corrupt memory. The borrow is thus
   safe for pure-borrow callees (operators, readers); it is an unchecked footgun only if the
   callee retains/stores/+1-returns the parameter (no lifetime tracking prevents that).
-- **Refcount runtime** (emitted verbatim into IR when `new` is used):
+  A planned fix — a reject-on-escape analysis (compile error instead of the footgun, plus a
+  threading-ready design) — is speced in `docs/escape-analysis.md` (not yet implemented).
+- **Refcount runtime** (emitted verbatim into IR when `new` is used, in `CodeGen_Emit.cpp`):
   - `gg_alloc(size)` — malloc with 8-byte header, initialises count to 1.
   - `gg_retain(ptr)` — null-safe refcount increment.
   - `gg_release(ptr, dtor)` — null-safe decrement; calls `dtor` + `free` at zero.
+  - **NON-ATOMIC / single-threaded (by design, for now).** The count is a plain
+    load-add-store (an `Rc`, not an `Arc`) — correct and cheap because GG has no threading
+    (no thread-spawn, async, or shared-memory model). If concurrency is ever added, these three
+    helpers must become atomic: a *relaxed* `atomicrmw add` for retain, and an `atomicrmw sub`
+    with `release` ordering + an `acquire` fence on the count-reaches-0 path before dtor/free
+    (the standard `shared_ptr`/`Arc` pattern). That is a ~10-line change here, but atomic counts
+    alone are NOT enough for thread safety — reference **rebind** (`r = e` = retain-new /
+    release-old / store) is three non-atomic steps, and shared mutable object state is
+    unsynchronised, so a real threading story needs a memory model on top (deferred).
 - **+1 return convention**: functions/methods returning `Class&` return a retained (`+1`)
   reference. Callee retains borrowed references before returning. Unbound temporaries
   (e.g. `make(99);`) are released at the full-expression boundary.
@@ -625,7 +649,9 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**700 test cases / 1386 assertions** (as of the stdlib `String` class + CRT-layout test update —
+**704 test cases / 1392 assertions** (as of generic impls — `impl<T> Trait for Class<T>` captured
+as an impl template and monomorphized alongside each `Class<args>` instantiation; `tests/trait_tests.cpp`
+`[generic][impl]`, `e2e/generic_impl_test.gg`). Prior baseline was **700 / 1386** — the stdlib `String` class + CRT-layout test update —
 `stdlib/string.gg` is now a heap-owned UTF-8 `String` (bytes + byte-length; `byteLength`/`length`
 codepoint count/`byteAt`/`charAt` UTF-8 decode to `char`/`cStr`, `Eq` impl for `==`); the old flat
 CRT binding files moved to `stdlib/crt/c*.gg` and `tests/stdlib_tests.cpp` follows the new paths;

@@ -80,6 +80,7 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
     while (!isAtEnd()) {
         if (tryCaptureClassTemplate())    continue;   // generic decls produce no AST node
         if (tryCaptureFunctionTemplate()) continue;
+        if (tryCaptureImplTemplate())     continue;
         program.declarations.push_back(parseDeclaration());
     }
 
@@ -311,6 +312,83 @@ bool Parser::tryCaptureClassTemplate() {
     return true;
 }
 
+bool Parser::tryCaptureImplTemplate() {
+    // Generic impl: `impl<T…> Trait for Class<T…> { … }`.  Only fires on `impl <` — a plain
+    // `impl Trait for Type { … }` still goes through parseImplDecl unchanged.
+    if (!(peek().type == TokenType::IMPL
+          && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LESS))
+        return false;
+
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;
+    size_t j = scanTypeParamList(current + 2, typeParams, bounds);   // j = closing '>'
+    if (j == 0 || tokens[j].type != TokenType::GREATER || typeParams.empty()) return false;
+
+    auto isTypeParam = [&](const std::string& s) {
+        for (const auto& p : typeParams) if (p == s) return true;
+        return false;
+    };
+    auto at = [&](size_t idx) -> const Token& {
+        return tokens[idx < tokens.size() ? idx : tokens.size() - 1];
+    };
+
+    // Header: `<Trait> for <Class> < args >`.
+    size_t p = j + 1;
+    if (at(p).type != TokenType::IDENTIFIER)
+        throw error(at(p), "expected a trait name after 'impl<…>'");
+    if (at(p + 1).type != TokenType::FOR)
+        throw error(at(p + 1), "expected 'for' in 'impl<…> <Trait> for <Type>'");
+    size_t classIdx = p + 2;
+    if (at(classIdx).type != TokenType::IDENTIFIER)
+        throw error(at(classIdx), "expected a class name after 'for'");
+    std::string targetClass = tokens[classIdx].lexeme;
+    if (at(classIdx + 1).type != TokenType::LESS)
+        throw error(at(classIdx + 1), "a generic impl must target a generic type: write "
+            "`impl<T> " + tokens[p].lexeme + " for " + targetClass + "<T>`");
+
+    // Target type arguments — each must be exactly one of the impl's own type parameters.
+    std::vector<std::string> targetParamAtPos;
+    size_t q = classIdx + 2;
+    while (q < tokens.size() && tokens[q].type != TokenType::GREATER) {
+        if (tokens[q].type == TokenType::COMMA) { ++q; continue; }
+        bool ok = tokens[q].type == TokenType::IDENTIFIER && isTypeParam(tokens[q].lexeme)
+               && (tokens[q + 1 < tokens.size() ? q + 1 : q].type == TokenType::COMMA
+                   || tokens[q + 1 < tokens.size() ? q + 1 : q].type == TokenType::GREATER);
+        if (!ok)
+            throw error(at(q), "a generic impl target must name each type parameter directly, e.g. "
+                "`impl<T> " + tokens[p].lexeme + " for " + targetClass
+                + "<T>` — nested or concrete type arguments are not supported here");
+        targetParamAtPos.push_back(tokens[q].lexeme);
+        ++q;
+    }
+    if (q >= tokens.size() || tokens[q].type != TokenType::GREATER)
+        throw error(at(q), "expected '>' to close the impl target type");
+    size_t braceIdx = q + 1;
+    if (at(braceIdx).type != TokenType::LEFT_BRACE)
+        throw error(at(braceIdx), "expected '{' after the impl header");
+
+    // Capture `impl <Trait> for <Class<…>> { … }` WITHOUT the `impl<…>` header, so a
+    // re-parse after substitution is an ordinary impl.
+    std::vector<Token> captured;
+    captured.push_back(tokens[current]);                     // 'impl'
+    for (size_t idx = p; idx <= q; ++idx) captured.push_back(tokens[idx]);   // Trait for Class < … >
+
+    size_t k = braceIdx;
+    int braceDepth = 0;
+    do {
+        if (tokens[k].type == TokenType::LEFT_BRACE)       braceDepth++;
+        else if (tokens[k].type == TokenType::RIGHT_BRACE) braceDepth--;
+        captured.push_back(tokens[k]);
+        ++k;
+    } while (k < tokens.size() && braceDepth > 0);
+
+    gen_->implTemplates.push_back(GenericImplTemplate{
+        std::move(typeParams), std::move(bounds), std::move(targetClass),
+        std::move(targetParamAtPos), std::move(captured) });
+    current = k;   // past the closing '}'
+    return true;
+}
+
 size_t Parser::typeSpanAt(size_t from) const {
     if (from >= tokens.size()) return 0;
     const Token& t = tokens[from];
@@ -453,6 +531,40 @@ void Parser::runMonomorphization(Program& program) {
         tokens  = std::move(out);
         current = 0;
         program.declarations.push_back(parseDeclaration());
+
+        // A generic CLASS instantiation also instantiates every generic `impl … for Class<…>`
+        // with the same type arguments, so e.g. `Array<i32>` gets its `Index` impl.
+        if (gen_->classNames.count(inst.templateName)) {
+            for (size_t ti = 0; ti < gen_->implTemplates.size(); ++ti) {
+                const GenericImplTemplate& impl = gen_->implTemplates[ti];
+                if (impl.targetClass != inst.templateName) continue;
+                if (impl.targetParamAtPos.size() != inst.args.size()) continue;  // arity mismatch
+
+                std::string key = std::to_string(ti) + "@" + inst.mangledName;
+                if (!gen_->implInstantiated.insert(key).second) continue;        // already done
+
+                // impl type-parameter name → the class's concrete argument tokens (positional).
+                std::unordered_map<std::string, std::vector<Token>> isub;
+                for (size_t pos = 0; pos < impl.targetParamAtPos.size(); ++pos)
+                    isub.emplace(impl.targetParamAtPos[pos], inst.args[pos]);
+
+                std::vector<Token> iout;
+                for (const Token& t : impl.tokens) {
+                    if (t.type == TokenType::IDENTIFIER) {
+                        auto sit = isub.find(t.lexeme);
+                        if (sit != isub.end()) { for (const Token& a : sit->second) iout.push_back(a); continue; }
+                    }
+                    iout.push_back(t);
+                }
+                iout.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
+
+                // Re-parse the concrete impl (its `Class<args>` target mangles to the same
+                // `Class$args` and attaches to that class; may enqueue further instantiations).
+                tokens  = std::move(iout);
+                current = 0;
+                program.declarations.push_back(parseDeclaration());
+            }
+        }
     }
 
     // Surface bounded generic templates for definition-time body checking (semantic pass
@@ -529,10 +641,29 @@ const Token& Parser::consume(TokenType type, const std::string& msg) {
 // Error handling
 // ============================================================
 
+void Parser::throwTypeExpected(const std::string& what) {
+    const Token& t = peek();
+    std::string msg = "expected " + what;
+    if (t.type == TokenType::IDENTIFIER) {
+        // A bare identifier in type position looks like a type name that isn't declared.
+        msg += ", but '" + t.lexeme + "' is not a known type "
+               "(expected a primitive, a declared class or enum, or Self)";
+        if (inImplBlock_)
+            msg += ". Note: an `impl` only sees the type parameters it declares — to use `T`, "
+                   "write `impl<T> Trait for Foo<T> { ... }` (declare `T` right after `impl`)";
+    } else {
+        msg += ", but found '" + t.lexeme + "'";
+    }
+    throw error(t, msg);
+}
+
 ParseError Parser::error(const Token& token, const std::string& msg) {
     std::string prefix = filename.empty() ? "" : filename + ":";
     std::string formatted = prefix + std::to_string(token.line) + ": error: " + msg;
-    std::cerr << formatted << '\n';
+    // Do NOT print here — the thrown ParseError carries the message, and the top-level
+    // handler (GG::run / the test helpers) prints it exactly once. Printing here as well
+    // duplicated every parse error, and printed speculative errors that were recovered
+    // from during template/lambda look-ahead (which catch and discard the exception).
     return ParseError(formatted);
 }
 
@@ -745,7 +876,7 @@ void Parser::recordLocal(const Token& typeToken, const Token& name) {
 Token Parser::parseReturnSuffix(bool& hasAlias, std::string& aliasName) {
     hasAlias = false;
     if (match({ TokenType::ARROW })) {
-        if (!isTypeName()) throw error(peek(), "expected return type after '->'");
+        if (!isTypeName()) throwTypeExpected("a return type after '->'");
         Token retType = consumeType();
         if (check(TokenType::IDENTIFIER)) {         // optional return alias
             hasAlias  = true;
@@ -764,7 +895,7 @@ Stmt Parser::parseImportStmt(const Token& keyword) {
 
 ParamDecl Parser::parseParam() {
     bool isMut = match({ TokenType::MUT });
-    if (!isTypeName()) throw error(peek(), "expected parameter type");
+    if (!isTypeName()) throwTypeExpected("a parameter type");
     Token paramType = consumeType();
     Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
     std::unique_ptr<Expr> defaultValue;
@@ -775,6 +906,10 @@ ParamDecl Parser::parseParam() {
 
 
 Stmt Parser::parseClassDecl() {
+    // `class <T> Name` is a common mistake — GG puts type parameters after the name.
+    if (peek().type == TokenType::LESS)
+        throw error(peek(), "type parameters go after the class name: write "
+            "`class Name<T> { ... }`, not `class <T> Name`");
     Token name = consume(TokenType::IDENTIFIER, "expected class name after 'class'");
     consume(TokenType::LEFT_BRACE, "expected '{' after class name");
 
@@ -839,8 +974,10 @@ Stmt Parser::parseImplDecl() {
     Token typeName = consumeType();
     consume(TokenType::LEFT_BRACE, "expected '{' after impl header");
     std::deque<MethodDecl> methods;
+    inImplBlock_ = true;   // enriches a "not a known type" error with the generic-impl note
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd())
         methods.push_back(parseTraitMethod(/*bodyOptional=*/false));
+    inImplBlock_ = false;
     consume(TokenType::RIGHT_BRACE, "expected '}' after impl body");
 
     // `impl Call for X` is sugar: canonicalize the trait to the signature-mangled `Call$…`
@@ -1766,6 +1903,14 @@ Expr Parser::parsePrimary() {
         consume(TokenType::RIGHT_PAREN, "expected ')' after expression");
         return inner;
     }
+
+    // A bare type keyword (i32, f64, ptr, …) where a value is expected is almost always a
+    // generic-type argument that leaked into an expression: if `Name` isn't a declared generic,
+    // `Name<i32>` parses as the comparison `Name < i32 > …` and the type keyword ends up here.
+    if (isTypeName())
+        throw error(peek(), "expected an expression, but found the type '" + peek().lexeme
+            + "'. If you meant a generic type like `Name<" + peek().lexeme
+            + ">`, make sure `Name` is a declared generic (`class Name<T>`)");
 
     throw error(peek(), "expected expression");
 }

@@ -44,8 +44,8 @@
 //   === ALL DESTRUCTOR TESTS PASSED ===
 //   exit code: 0
 
-import "../stdlib/io.gg";
-import "../stdlib/mem.gg";
+import "../stdlib/crt/cio.gg";
+import "../stdlib/crt/cmem.gg";
 
 // ============================================================
 // Buffer — heap-allocated byte array that frees itself.

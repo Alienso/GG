@@ -632,6 +632,9 @@ TEST_CASE("CodeGen - alloca strategy produces no phi nodes", "[codegen]") {
             return x;
         }
     )");
+    // Positive anchor: the function really was emitted with alloca-based mutable state (otherwise
+    // an empty/broken IR would trivially "contain no phi").
+    REQUIRE(irContains(ir, "%x.addr = alloca i32"));
     REQUIRE(!irContains(ir, "phi "));
 }
 
@@ -783,9 +786,8 @@ TEST_CASE("CodeGen - nested loops break targets innermost merge", "[codegen]") {
             }
         }
     )");
-    // Both merge labels exist; the inner break targets the inner one (index 2).
-    REQUIRE(irContains(ir, "for.merge.1"));
-    REQUIRE(irContains(ir, "for.merge.2"));
+    // The inner break must actually branch to the inner merge (index 2), not merely coexist with it.
+    REQUIRE(irContains(ir, "br label %for.merge.2"));
 }
 
 // ============================================================
@@ -1242,6 +1244,9 @@ TEST_CASE("TypedPtr - indexing has no array bounds check", "[typedptr][codegen]"
             i32 v = buf[100];
         }
     )");
+    // Positive anchor: the index actually lowered to a raw GEP (otherwise empty/broken IR would
+    // trivially "contain no @abort").
+    REQUIRE(irContains(ir, "getelementptr i32, ptr "));
     REQUIRE_FALSE(irContains(ir, "@abort"));
 }
 

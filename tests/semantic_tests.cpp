@@ -462,10 +462,12 @@ TEST_CASE("Semantic - string literal has ptr type and passes ptr parameter", "[s
 }
 
 TEST_CASE("Semantic - string is no longer a reserved keyword", "[semantic]") {
-    // 'string' was formerly a type keyword; it is now a plain identifier.
-    // It can therefore be used as a function name without error.
-    auto result = analyzeString("fn string() -> i32 { return 42; }");
-    REQUIRE_FALSE(result.hadError);
+    // 'string' was formerly a type keyword; it is now a plain identifier and may be used as a
+    // function name. If it were still reserved this would be a PARSE error — which analyzeString
+    // swallows (returning hadError == false), so a plain REQUIRE_FALSE would pass vacuously. Prove
+    // it really parsed and lowered by checking the emitted function symbol.
+    std::string ir = codegenString("fn string() -> i32 { return 42; }");
+    REQUIRE(ir.find("define i32 @string(") != std::string::npos);
 }
 
 TEST_CASE("Semantic - ptr function parameter is valid", "[semantic]") {

@@ -9,7 +9,7 @@ fn main() -> i32 {
 
     puts("Hello world!");
     Array<i32> array();
-    array[0] = 56;
+    array[0] = 54;
     putchar(array[0]);
 
     return 0;

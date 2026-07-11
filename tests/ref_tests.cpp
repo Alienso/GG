@@ -140,6 +140,7 @@ TEST_CASE("Ref - a shared (non-mut) borrow cannot mutate through a field", "[ref
         }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("immutable binding"));
 }
 
 TEST_CASE("Ref - a non-mut borrow cannot be rebound", "[ref][semantic]") {
@@ -155,6 +156,7 @@ TEST_CASE("Ref - a non-mut borrow cannot be rebound", "[ref][semantic]") {
         }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("reassign immutable"));
 }
 
 TEST_CASE("Ref - a borrow cannot be converted to an owning reference", "[ref][semantic]") {
@@ -169,6 +171,7 @@ TEST_CASE("Ref - a borrow cannot be converted to an owning reference", "[ref][se
         }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("cannot implicitly convert"));
 }
 
 TEST_CASE("Ref - a class field cannot be a borrow", "[ref][semantic]") {
@@ -321,7 +324,7 @@ TEST_CASE("Ref - compound assignment through a primitive borrow is rejected", "[
         fn main() -> i32 { mut C c(10); mut ref i32 r = c.slot(); r += 5; return c.n; }
     )");
     REQUIRE(r.hadError);
-    REQUIRE(cap.contains("not supported"));
+    REQUIRE(cap.contains("through a borrow"));
 }
 
 TEST_CASE("Ref - `++` through a primitive borrow is rejected", "[ref][semantic]") {
@@ -331,7 +334,7 @@ TEST_CASE("Ref - `++` through a primitive borrow is rejected", "[ref][semantic]"
         fn main() -> i32 { mut C c(10); mut ref i32 r = c.slot(); r++; return c.n; }
     )");
     REQUIRE(r.hadError);
-    REQUIRE(cap.contains("not supported"));
+    REQUIRE(cap.contains("through a borrow"));
 }
 
 TEST_CASE("Ref - a method may return a primitive borrow of a field", "[ref][semantic]") {

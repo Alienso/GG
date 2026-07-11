@@ -110,6 +110,7 @@ TEST_CASE("Escape - a constructor storing a ref param rejects a value object (st
         fn main() -> i32 { Point v(3); Box b(v); return 0; }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("escapes"));
 }
 
 TEST_CASE("Escape - escape through a local reference alias is tracked", "[escape][semantic]") {
@@ -120,6 +121,7 @@ TEST_CASE("Escape - escape through a local reference alias is tracked", "[escape
         fn main() -> i32 { Point v(3); Point& r = f(v); return 0; }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("escapes"));
 }
 
 TEST_CASE("Escape - a store nested inside control flow still escapes", "[escape][semantic]") {
@@ -130,16 +132,19 @@ TEST_CASE("Escape - a store nested inside control flow still escapes", "[escape]
         fn main() -> i32 { Point v(3); mut Box b; b.keep(v, true); return 0; }
     )");
     REQUIRE(r.hadError);
+    REQUIRE(cap.contains("escapes"));
 }
 
 TEST_CASE("Escape - only the escaping parameter is rejected (per-parameter)", "[escape][semantic]") {
     // set2 stores `a` but not `b`. Value object as `a` → error; as `b` → OK.
+    StderrCapture cap;
     auto bad = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         class Box { mut Point& p; Box() { } fn set2(Point& a, Point& b) mut { p = a; } }
         fn main() -> i32 { Point v(3); Point& r = new Point(9); mut Box b; b.set2(v, r); return 0; }
     )");
     REQUIRE(bad.hadError);
+    REQUIRE(cap.contains("escapes"));
 
     auto ok = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }

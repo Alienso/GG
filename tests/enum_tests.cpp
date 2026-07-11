@@ -134,7 +134,9 @@ TEST_CASE("Enum - new on an enum is an error", "[enum][semantic]") {
         }
     )");
     REQUIRE(result.hadError);
-    REQUIRE(cap.contains("enum"));
+    // Assert the `new`-specific message, not just "enum" (which also matches the neighbouring
+    // "cannot construct enum" diagnostic).
+    REQUIRE(cap.contains("'new' an enum"));
 }
 
 TEST_CASE("Enum - assigning to an enum field outside the constructor is an error", "[enum][semantic]") {

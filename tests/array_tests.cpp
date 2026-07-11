@@ -41,26 +41,29 @@ TEST_CASE("Array - semantic: in-bounds constant index is accepted", "[array][sem
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Array - semantic: non-integer index is an error", "[array][semantic]") {
+TEST_CASE("Array - semantic: an integer index is accepted", "[array][semantic]") {
     SemanticResult result = analyzeString(
         "fn main() { i32[3] arr; i32 x = arr[1]; }"
     );
-    // 1 is a valid integer index — should pass
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Array - semantic: float index is an error", "[array][semantic]") {
+TEST_CASE("Array - semantic: a float index is rejected", "[array][semantic]") {
+    StderrCapture cap;
     SemanticResult result = analyzeString(
-        "fn main() { f64[3] arr; f64 x = arr[1]; }"
+        "fn main() { mut f64 f = 1.5; i32[3] arr; i32 x = arr[f]; }"
     );
-    REQUIRE_FALSE(result.hadError);
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("index must be an integer"));
 }
 
 TEST_CASE("Array - semantic: subscript on non-array is an error", "[array][semantic]") {
+    StderrCapture cap;
     SemanticResult result = analyzeString(
         "fn main() { i32 x = 0; i32 y = x[0]; }"
     );
     REQUIRE(result.hadError);
+    REQUIRE(cap.contains("cannot index a value of type"));
 }
 
 // ============================================================

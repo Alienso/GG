@@ -182,7 +182,8 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
         // Reference return: hand the caller an owned (+1) reference.
         //   +1 producer (new / ref-returning call) → take ownership of its pending release.
         //   borrowed reference (variable / field / param) → retain to produce the +1.
-        if (currentReturnType.kind == TypeKind::Reference) {
+        // A `ref` (borrow) return owns nothing — return the address as-is, no retain.
+        if (currentReturnType.kind == TypeKind::Reference && !currentReturnType.borrow) {
             if (producesPlusOne(*returnStmt.value)) claimTemp(retVal);
             else                                    emit("call void @gg_retain(ptr " + retVal + ")");
         }

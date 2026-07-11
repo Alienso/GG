@@ -500,6 +500,15 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
     if (!resolveAssignTarget(assign.name.lexeme, ptrName, lhsType)) return "0";
     std::string irType  = irTypeName(lhsType);
 
+    // Borrow rebind (`ref` local): just re-point it — no retain/release (it doesn't own the target).
+    if (lhsType.kind == TypeKind::Reference && lhsType.borrow) {
+        Type        rhsType = exprType(*assign.value);
+        std::string newVal  = genExpr(*assign.value);
+        newVal = emitCast(newVal, rhsType, lhsType);
+        emitStore("ptr", newVal, ptrName);
+        return newVal;
+    }
+
     // Reference rebind: retain the new target, release the old, then store.
     // retain-before-release keeps self-assignment (a = a) safe.
     if (lhsType.kind == TypeKind::Reference) {
@@ -808,6 +817,30 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         emit("store " + arrayIrType + " zeroinitializer, ptr " + ptrName);
 
         return ptrName;
+    }
+
+    // ---- Borrow (`ref Class`) declaration ----
+    // A non-owning reference: a ptr to the object body, NOT retained and NOT released at scope exit
+    // (so it is never registered in a dtor scope). Same IR as a reference otherwise.
+    {
+        Type synth = decodeSynthesizedType(varDecl.typeName);
+        if (synth.kind == TypeKind::Reference && synth.borrow) {
+            std::string name    = varDecl.name.lexeme;
+            std::string ptrName = freshAllocaName(name);
+            emitAlloca(ptrName, "ptr");
+            allocaMap[name]  = ptrName;
+            varTypeMap[name] = synth;
+            if (debug_) dbgDeclare(ptrName, name, synth, varDecl.name.line, 0);
+            if (varDecl.initializer) {
+                Type        initType = exprType(*varDecl.initializer);
+                std::string value    = genExpr(*varDecl.initializer);
+                value = emitCast(value, initType, synth);   // object/ref → borrow: address, no-op
+                emitStore("ptr", value, ptrName);            // borrow: no retain
+            } else {
+                emitStore("ptr", "null", ptrName);
+            }
+            return ptrName;
+        }
     }
 
     // ---- Reference (Class&) declaration ----

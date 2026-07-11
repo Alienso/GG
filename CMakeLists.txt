@@ -62,6 +62,7 @@ set(GG_SOURCES
         source/semantic/SemanticAnalyzer.cpp
         source/semantic/SemanticAnalyzer_Stmts.cpp
         source/semantic/SemanticAnalyzer_Exprs.cpp
+        source/semantic/SemanticAnalyzer_Escape.cpp
         source/codegen/IR.h
         source/codegen/CodeGen.h
         source/codegen/CodeGen.cpp
@@ -118,6 +119,8 @@ add_executable(GG_tests
         tests/switch_tests.cpp
         tests/lambda_tests.cpp
         tests/debug_tests.cpp
+        tests/escape_tests.cpp
+        tests/ref_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

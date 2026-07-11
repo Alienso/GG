@@ -57,6 +57,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"impl",    TokenType::IMPL},
     {"Self",    TokenType::SELF},
     {"fn",      TokenType::FN},
+    {"ref",     TokenType::REF},
     {"switch",  TokenType::SWITCH},
     {"case",    TokenType::CASE},
     {"default", TokenType::DEFAULT},

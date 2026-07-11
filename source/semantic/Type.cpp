@@ -75,6 +75,14 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
         (f == TypeKind::U32  && t == TypeKind::Char))
         return CastResult::Silent;
 
+    // A `ref T` (non-owning borrow) is the target: an owning reference, a value object, or another
+    // borrow of the same class may all be borrowed into it (address-of, no retain/release). The
+    // reverse — widening a borrow to an owning `Class&` — is NOT allowed (it doesn't own the target),
+    // and falls through to None below.
+    if (t == TypeKind::Reference && to.borrow && from.className == to.className
+        && (f == TypeKind::Reference || f == TypeKind::Object))
+        return CastResult::Silent;
+
     // Heap reference → value of the same class: permitted. In an assignment or
     // initializer this performs a deep copy (clone); when passed to a value
     // parameter it borrows. (The reverse, value → reference, requires explicit
@@ -224,7 +232,7 @@ std::string typeName(const Type& t) {
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
         case TypeKind::Enum:   return t.className;
-        case TypeKind::Reference: return "Ref<" + t.className + ">";
+        case TypeKind::Reference: return t.borrow ? "ref " + t.className : "Ref<" + t.className + ">";
         case TypeKind::TypedPtr: {
             Type elem = typedPtrElement(t);
             return "ptr<" + typeName(elem) + ">";
@@ -296,6 +304,10 @@ TypeKind typeKindFromName(const std::string& name) {
 
 Type decodeSynthesizedType(const Token& tok) {
     const std::string& s = tok.lexeme;
+
+    // Borrow: "ref:Class" — a non-owning reference (`ref Class`).
+    if (s.size() > 4 && s.compare(0, 4, "ref:") == 0)
+        return makeBorrowType(s.substr(4));
 
     // Reference: "Class&"
     if (!s.empty() && s.back() == '&')

@@ -43,6 +43,11 @@ struct ClassInfo {
         std::vector<bool> paramMut;           // per-parameter `mut` flag
         size_t           numDefaults = 0;     // count of trailing params with default values
         Token            decl;     // method name token
+        // Escape analysis (computed at collection): a reference parameter "escapes" if the body
+        // returns or stores it, so passing a stack value object there would dangle. `thisEscapes`
+        // is the same for the implicit receiver (a value-object method call would dangle).
+        std::vector<bool> paramEscapes{};
+        bool              thisEscapes = false;
     };
     // A static (class-level) field: shared storage, not part of the struct layout.
     struct StaticField {
@@ -67,6 +72,7 @@ struct FunctionOverload {
     size_t            numDefaults = 0;   // count of trailing params with default values
     bool              isExtern = false;
     Token             decl;
+    std::vector<bool> paramEscapes{};    // per-parameter escape bit (see ClassInfo::Method)
 };
 
 // One overload candidate for resolution: pointers into a registry entry + its return type.
@@ -76,6 +82,7 @@ struct OverloadCand {
     const std::vector<bool>* paramMut;
     Type                     returnType;
     size_t                   numDefaults = 0;
+    const std::vector<bool>* paramEscapes = nullptr;   // per-parameter escape bit (may be null)
 };
 
 // ---- EnumInfo: semantic information about a Java-style enum ----
@@ -216,6 +223,13 @@ private:
 
     // Pass 1: hoist top-level function signatures into the global scope
     void collectFunctions(const Program& program);
+
+    // Escape analysis (SemanticAnalyzer_Escape.cpp). Fills the per-parameter (and, for methods,
+    // `this`) escape bits used to reject passing a stack value object to a parameter that the
+    // callee returns or stores. `computeThis` requests the receiver bit (instance methods only).
+    void computeParamEscapes(const std::vector<ParamDecl>& params, const BlockStmt& body,
+                             bool computeThis, const std::unordered_set<std::string>& fieldNames,
+                             std::vector<bool>& paramEscapesOut, bool& thisEscapesOut);
 
     // Statement analysis
     void analyzeStmt(const Stmt& stmt);

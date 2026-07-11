@@ -1,7 +1,17 @@
 # Design note: Escape analysis (reject-on-escape) + threading readiness
 
-**Status:** design / not yet implemented. This is a spec to build against, not a description of
-current behaviour.
+**Status:** v1 **implemented** in `source/semantic/SemanticAnalyzer_Escape.cpp` (summaries computed
+at collection time; call-site check in `resolveOverload` / `analyzeMethodCall`; tests in
+`tests/escape_tests.cpp`). Scope below reflects what shipped; §6 (threading) and the interprocedural
+propagation in §4 remain future work.
+
+**v1 as shipped:** intraprocedural, optimistic on calls. A reference parameter escapes when the body
+**returns** it or **stores it into a reference field** (`this.f = q` / implicit `f = q`; value-object
+field stores are deep copies, not escapes). The call-site check fires only on an `Object` argument
+coerced to a `Reference` parameter. Not yet done: following a param forwarded into another call
+(interprocedural fixpoint), treating `a[i] = q` as an escape, and the threading extensions. Also
+note `thisEscapes` is currently unreachable — `this` is Object-typed and Object→Reference is already
+blocked in return/store positions — but the machinery is in place for a future where it isn't.
 
 ## 1. Problem
 

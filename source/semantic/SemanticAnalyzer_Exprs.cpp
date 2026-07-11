@@ -178,6 +178,16 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
         checkArgCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
         if (w.paramMut && k < w.paramMut->size() && (*w.paramMut)[k])
             warnConstToMut(at, *args[k], (*w.params)[k]);
+        // Escape analysis: borrowing a *stack value object* as a reference is safe only if the
+        // callee just borrows it. If the parameter escapes (the callee returns or stores it), the
+        // reference would outlive the stack object → reject.
+        if (argTypes[k].kind == TypeKind::Object && (*w.params)[k].kind == TypeKind::Reference
+            && w.paramEscapes && k < w.paramEscapes->size() && (*w.paramEscapes)[k])
+            error(at, "cannot pass the value object '" + argTypes[k].className + "' as argument "
+                  + std::to_string(k + 1) + " of " + what + ": that parameter escapes (the callee "
+                  "stores or returns it), but a stack value object has no owner to keep it alive past "
+                  "the call — allocate it with `new " + argTypes[k].className
+                  + "(...)` (a heap reference) instead");
     }
     return chosen;
 }
@@ -877,7 +887,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
         }
         const std::vector<ClassInfo::Method>& set = ctorIt->second;
         std::vector<OverloadCand> cands;
-        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
         int idx = resolveOverload(call.callee, "constructor '" + name + "'", cands, call.args);
         if (idx >= 0 && set.size() > 1)
             resolvedCallee[&call] = mangleOverload(name + "_" + name, set[idx].paramTypes, set[idx].returnType);
@@ -922,7 +932,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
             if (mit != info.methods.end() && !mit->second.empty()) {
                 std::vector<OverloadCand> cands;
                 for (const auto& m : mit->second)
-                    cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+                    cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
                 int idx = resolveOverload(call.callee, "call on '" + cn + "'", cands, call.args);
                 if (idx < 0) return Type{TypeKind::Error};
                 const ClassInfo::Method& m = mit->second[idx];
@@ -942,7 +952,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     if (fit != functionRegistry.end()) {
         const std::vector<FunctionOverload>& set = fit->second;
         std::vector<OverloadCand> cands;
-        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType, f.numDefaults});
+        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType, f.numDefaults, &f.paramEscapes});
         int idx = resolveOverload(call.callee, "function '" + name + "'", cands, call.args);
         if (idx < 0) return Type{TypeKind::Error};
         if (set.size() > 1 && !set[idx].isExtern)
@@ -953,7 +963,7 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     // Implicit `this`: a bare call may target a method of the enclosing class.
     if (const std::vector<ClassInfo::Method>* ms = currentClassMethods(name)) {
         std::vector<OverloadCand> cands;
-        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
         int idx = resolveOverload(call.callee, "method '" + name + "'", cands, call.args);
         if (idx < 0) return Type{TypeKind::Error};
         const ClassInfo::Method& m = (*ms)[idx];
@@ -1460,7 +1470,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
                 }
                 const std::vector<ClassInfo::Method>& set = mIt->second;
                 std::vector<OverloadCand> cands;
-                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
                 int idx = resolveOverload(methodCall.method,
                             "static method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
                 if (idx < 0) return Type{TypeKind::Error};
@@ -1520,11 +1530,20 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
 
     const std::vector<ClassInfo::Method>& set = methodIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
     int idx = resolveOverload(methodCall.method,
                 "method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
     if (idx < 0) return Type{TypeKind::Error};
     const ClassInfo::Method& method = set[idx];
+
+    // Escape analysis: calling a method that stores or returns `this` on a *stack value object*
+    // would let a reference to it outlive the object. Only value receivers are at risk — a heap
+    // reference owns its target.
+    if (objectType.kind == TypeKind::Object && method.thisEscapes)
+        error(methodCall.method, "cannot call '" + methodCall.method.lexeme
+              + "' on the stack value object '" + objectType.className + "': it stores or returns "
+              "'this', which would outlive the object — use a heap reference (`new "
+              + objectType.className + "(...)`)");
 
     // A `mut` method mutates its receiver, so the receiver must be a mutable place —
     // a `mut` binding, or `this` inside a `mut` method / ctor / dtor.
@@ -1647,7 +1666,7 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
 
     const std::vector<ClassInfo::Method>& set = ctorIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults});
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
     int idx = resolveOverload(newExpr.className, "constructor '" + className + "'", cands, newExpr.args);
     if (idx >= 0 && set.size() > 1)
         resolvedCallee[&newExpr] = mangleOverload(className + "_" + className,

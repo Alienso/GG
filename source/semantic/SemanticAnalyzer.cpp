@@ -111,6 +111,14 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         } else {
             fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
         }
+        // A `ref T` borrow may not be stored in a field — a borrow must not outlive its source, and
+        // a field could. Use an owning reference (`Class&`) or a value.
+        if (fieldType.kind == TypeKind::Reference && fieldType.borrow) {
+            error(fd.name, "a field cannot be a borrow ('ref " + fieldType.className
+                  + "'); use an owning reference '" + fieldType.className + "& " + fd.name.lexeme
+                  + "' or a value");
+            fieldType = Type{TypeKind::Error};
+        }
         // Static fields are class-level storage (a global), not part of the struct
         // layout — they get no struct index and live in a separate registry.
         // (allowDestructor is false only for enums, which don't support statics yet.)
@@ -134,6 +142,11 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         info.fields.emplace(fd.name.lexeme,
             ClassInfo::Field{fd.isPublic, fd.isMut, fieldType, fieldIndex++, fd.name});
     }
+    // REFERENCE field names — escape analysis treats `field = param` as an escape only for these
+    // (storing into a value-object field is a deep copy, not a reference escape).
+    std::unordered_set<std::string> refFieldNames;
+    for (const auto& [n, f] : info.fields)       if (f.type.kind == TypeKind::Reference) refFieldNames.insert(n);
+    for (const auto& [n, f] : info.staticFields) if (f.type.kind == TypeKind::Reference) refFieldNames.insert(n);
     for (const MethodDecl& md : methods) {
         if (md.isDestructor) {
             if (!allowDestructor) {
@@ -185,6 +198,10 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
                                         std::move(paramTypes), std::move(paramMut),
                                         countTrailingDefaults(md.params), md.name});
+        bool te = false;
+        computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
+                            set.back().paramEscapes, te);
+        set.back().thisEscapes = te;
     }
     return info;
 }
@@ -351,6 +368,9 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
         // Register impl methods as methods on the target class (with Self → the type).
         currentSelfType_ = type;
         ClassInfo& info = clsIt->second;
+        std::unordered_set<std::string> refFieldNames;
+        for (const auto& [n, f] : info.fields)       if (f.type.kind == TypeKind::Reference) refFieldNames.insert(n);
+        for (const auto& [n, f] : info.staticFields) if (f.type.kind == TypeKind::Reference) refFieldNames.insert(n);
         for (const MethodDecl& md : impl.methods) {
             Type ret = resolveTypeToken(md.returnType);
             std::vector<Type> paramTypes;
@@ -370,6 +390,10 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
             set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, ret,
                                             std::move(paramTypes), std::move(paramMut),
                                             countTrailingDefaults(md.params), md.name});
+            bool te = false;
+            computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
+                                set.back().paramEscapes, te);
+            set.back().thisEscapes = te;
         }
 
         implementedTraits[type].insert(trait);
@@ -558,10 +582,15 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                     if (e.paramTypes == paramTypes && e.returnType == returnType) { redef = true; break; }
                 if (redef)
                     error(function.name, "function '" + name + "' is already defined with the same signature");
-                else
+                else {
                     set.push_back(FunctionOverload{returnType, paramTypes, paramMut,
                                                    countTrailingDefaults(function.params),
                                                    /*isExtern=*/false, function.name});
+                    bool te = false;
+                    static const std::unordered_set<std::string> noFields;
+                    computeParamEscapes(function.params, function.body, /*computeThis=*/false,
+                                        noFields, set.back().paramEscapes, te);
+                }
             }
 
             // Symbol-table marker (first declaration wins) so a local can shadow the name

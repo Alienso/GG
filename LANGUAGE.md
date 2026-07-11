@@ -947,6 +947,32 @@ Point& s = r;    // s and r now share the same heap object; refcount → 2
 - When the refcount reaches zero, the destructor (if any) is called, then `free`.
 - There is **no cycle detection** — circular reference graphs will leak.
 
+### Non-owning borrows (`ref T` / `mut ref T`)
+```gg
+Point& owner = new Point(1, 2);   // owning reference (co-owns the heap object)
+ref Point b = owner;              // borrow: a view, takes no ownership, no refcount change
+mut ref Point m = owner;          // mutable borrow — may write through it
+m.x = 9;                          // mutates the same object `owner` points at
+
+fn shift(mut ref Point p, i32 dx) { p.x = p.x + dx; }   // borrow parameter
+fn sumOf(ref Point p) -> i32 { return p.x + p.y; }      // shared-borrow reader
+```
+
+A `ref T` is a **non-owning borrow** of a class value — like a `ClassName&` but without any
+ownership. It never touches the refcount (no retain on bind, no release at scope exit, no `+1`
+on return), so it is a zero-cost view. Use it for parameters that only look at / mutate an
+object, and for returning a borrow of something the caller already keeps alive (e.g. an element
+of a container).
+
+- Both an owning `ClassName&` and a stack value object coerce into a `ref T` automatically.
+- A borrow **cannot** be converted back into an owning `ClassName&` (it has no ownership to give).
+- A `ref` **cannot be a class field** — a field must own (`ClassName&`) or embed (a value); a
+  borrow field would have nothing keeping its target alive.
+- Returning a borrow is allowed, but passing a **stack value object** to a `ref` parameter that
+  returns or stores it is a compile error (the borrow would outlive the value) — pass a heap
+  `ClassName&` in that case. This is enforced by escape analysis.
+- `ref` borrows only a **class**; there is no `ref` of a primitive.
+
 ### Raw pointers (`ptr` / `ptr<T>`)
 ```gg
 ptr buf = malloc(64);    // opaque — GG tracks no lifetime
@@ -1367,7 +1393,7 @@ Attempting them will produce a compile error (or will simply not parse).
 | Cycle handling | Circular references (`A& → B&, B& → A&`) will **leak** |
 | Pointer arithmetic | `ptr` is opaque; use `ptr<T>` + `[]` for offset access |
 | Bounds checking on `ptr<T>` | Only fixed-size `T[N]` arrays are bounds-checked |
-| Weak references | No weak/unowned pointer type |
+| Weak references | `ref T` is a non-owning **borrow** (no liveness tracking); a liveness-checked `weak` reference does not yet exist |
 
 ### Other
 | Missing feature | Notes |

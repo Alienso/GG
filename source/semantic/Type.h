@@ -36,6 +36,9 @@ struct Type {
     TypeKind    kind        = TypeKind::Error;
     bool        isConst     = false;
     bool        isNullable  = false;
+    bool        borrow      = false;           // `ref T`: a non-owning borrow (only when kind ==
+                                               // Reference). Same IR as an owning `Class&` (a ptr),
+                                               // but never retained/released; `ref → Class&` forbidden.
     TypeKind    elementKind = TypeKind::Error;  // only valid when kind == Array
     size_t      arraySize   = 0;               // only valid when kind == Array
     std::string className;                     // only valid when kind == Object
@@ -81,6 +84,16 @@ inline Type makeReferenceType(const std::string& name) {
     Type t;
     t.kind      = TypeKind::Reference;
     t.className = name;
+    return t;
+}
+
+// A non-owning borrow `ref T`: a reference at the IR level (a ptr to the object body) that never
+// participates in reference counting and cannot be widened to an owning `Class&`.
+inline Type makeBorrowType(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::Reference;
+    t.className = name;
+    t.borrow    = true;
     return t;
 }
 

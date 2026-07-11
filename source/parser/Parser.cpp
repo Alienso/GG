@@ -391,6 +391,11 @@ bool Parser::tryCaptureImplTemplate() {
 
 size_t Parser::typeSpanAt(size_t from) const {
     if (from >= tokens.size()) return 0;
+    // Borrow: `ref <Type>` spans the `ref` plus the inner type's span.
+    if (tokens[from].type == TokenType::REF) {
+        size_t inner = typeSpanAt(from + 1);
+        return inner == 0 ? 0 : inner + 1;
+    }
     const Token& t = tokens[from];
     bool isType = isTypeKeyword(t.type)
                || (t.type == TokenType::IDENTIFIER
@@ -725,6 +730,8 @@ bool Parser::isTypeName() const {
             return true;
         case TokenType::SELF:
             return true;   // valid only inside trait/impl bodies; semantic enforces that
+        case TokenType::REF:
+            return true;   // `ref T` — a non-owning borrow; consumeType validates the inner type
         case TokenType::IDENTIFIER:
             return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
         default:
@@ -734,6 +741,19 @@ bool Parser::isTypeName() const {
 
 Token Parser::consumeType() {
     Token base = advance();  // caller has verified isTypeName()
+
+    // Borrow: `ref Class` → synthesized "ref:Class" (a non-owning reference). The inner type must be
+    // a class/Self (you can't borrow a primitive); a generic `ref T` reaches here only after
+    // monomorphization has substituted T with a concrete class token.
+    if (base.type == TokenType::REF) {
+        if (!(check(TokenType::IDENTIFIER) || check(TokenType::SELF)))
+            throw error(peek(), "expected a class name after 'ref' (you can only borrow a class, "
+                                "not a primitive)");
+        Token inner = advance();
+        std::string cls = inner.type == TokenType::SELF ? "Self" : inner.lexeme;
+        return Token{ TokenType::IDENTIFIER, "ref:" + cls, base.line };
+    }
+
     std::string lexeme = base.lexeme;
     int         line   = base.line;
     // `Self` (SELF) and class identifiers are the reference-capable ("class-like") types.

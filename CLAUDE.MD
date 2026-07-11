@@ -413,6 +413,26 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
 2. `collectFunctions` — hoist top-level function signatures into global scope.
 3. `analyzeStmt` over every declaration — full type checking.
 
+### Escape analysis (v1, `SemanticAnalyzer_Escape.cpp`)
+Rejects the "value-object → reference borrow" footgun: passing a **stack value object** where a
+`Class&` parameter is expected is a compile error **iff** the callee lets that reference escape.
+- **Summaries** computed at collection time (no fixpoint): `computeParamEscapes` scans each
+  function/method body and fills `paramEscapes` (per param) + `thisEscapes` on `ClassInfo::Method` /
+  `FunctionOverload`. A reference "escapes" when it is **returned** or **stored into a reference
+  field** (`this.f = q` or implicit `f = q`, where `f`'s type is `Reference` — a value-object field
+  store is a deep copy, *not* an escape; a **local shadowing a reference field** is a rebind, not a
+  store — declared-local names are excluded). Local rebinds are tracked as alias edges; escape is
+  reachability from the param to a return/ref-store site.
+- **Check** (in `resolveOverload`'s arg loop + `analyzeMethodCall`): gated on the argument being an
+  `Object` coerced to a `Reference` param whose `paramEscapes[k]` is set — so reference→reference
+  passing, value-field copies, and pure-borrow readers/operators are never touched (zero false
+  positives across the suite). `OverloadCand` carries a `paramEscapes` pointer alongside `paramMut`.
+- **v1 scope**: intraprocedural and *optimistic on calls* — a param forwarded into another call is
+  not followed into that callee, and `a[i] = q` isn't treated as an escape (element type unknown).
+  Catches the direct footguns (return / ref-field store). `thisEscapes` is currently unreachable
+  (`this` is Object-typed and Object→Reference is already blocked in return/store), kept for the
+  future. Interprocedural propagation is deferred — see `docs/escape-analysis.md`.
+
 ### Generics — monomorphization entirely in the Parser
 - `class Foo<T>` / `fn ReturnType bar<T>(...)` captured as raw token slices in `GenericRegistry::templates`.
   Generic functions use the **same declaration syntax as regular functions**, just with `<T>` after the name
@@ -506,10 +526,9 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   `canImplicitlyCast` (still `None` for Object→Reference)** so `Class& r = valueObj`, ref
   reassignment, and ref-`return` stay rejected — a stack object has no refcount header at
   body-8, so retaining/releasing/+1-returning one would corrupt memory. The borrow is thus
-  safe for pure-borrow callees (operators, readers); it is an unchecked footgun only if the
-  callee retains/stores/+1-returns the parameter (no lifetime tracking prevents that).
-  A planned fix — a reject-on-escape analysis (compile error instead of the footgun, plus a
-  threading-ready design) — is speced in `docs/escape-analysis.md` (not yet implemented).
+  safe for pure-borrow callees (operators, readers). **Escape analysis (v1) now rejects the unsafe
+  case**: see the escape-analysis invariant below. A borrow to a callee that returns/stores it into
+  a reference field is a compile error; only truly-escaping borrows are rejected.
 - **Refcount runtime** (emitted verbatim into IR when `new` is used, in `CodeGen_Emit.cpp`):
   - `gg_alloc(size)` — malloc with 8-byte header, initialises count to 1.
   - `gg_retain(ptr)` — null-safe refcount increment.
@@ -542,6 +561,35 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   extra `gg_retain`, and the alias is NOT in a dtor scope (not released in-function). *(Historical
   bug: it retained on return but was never released → returned a `+2` object → one-object leak
   per call. Fixed.)*
+
+### `ref T` — non-owning borrow
+`ref T` (prefix keyword, e.g. `ref Point`) is a **non-owning borrow** of a class value — a plain
+`ptr` with **no refcount traffic** (never retained/released, never in a dtor scope, no `+1` on
+return). `mut ref T` reuses the existing `mut` to make the borrow mutable. Owning `Class&` is
+unchanged; `ref` is the everyday borrow for zero-copy element/parameter access.
+- **Type representation**: reuses `TypeKind::Reference` + a `bool borrow` flag on `Type` (so
+  `ref Point` != `Point&` via defaulted `operator==`). `makeBorrowType(name)` builds one. Member
+  access / method dispatch / parameter passing all reuse the Reference path unchanged — only the
+  three refcount decision sites branch on `borrow`.
+- **Synthesized token**: `ref Point` → lexeme `"ref:Point"` (decoded by `decodeSynthesizedType`,
+  first check). `consumeType` (parser) synthesizes it after the `ref` keyword; the inner must be a
+  class name or `Self` (a primitive → parse error "expected a class name after 'ref'"). `typeName`
+  renders it `ref Point`. `typeSpanAt` recognizes a leading `ref` (span = 1 + inner span) so the
+  var-decl detector accepts `[mut] ref T name = …`.
+- **Coercions INTO a borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`ref`, value
+  `Object`→`ref`, `ref`→`ref` (same class). The reverse — a borrow → an owning `Class&` — is
+  **forbidden** (falls through to `None`), since a borrow carries no ownership to hand off.
+- **Not a field**: `buildClassInfo` rejects a `ref` field ("a field cannot be a borrow …") — a
+  class field must own (`Class&`) or embed (value), or nothing keeps the borrowee alive.
+- **Escape analysis still applies**: passing a *stack value object* to a `ref` parameter that
+  escapes (is returned or ref-field-stored) is rejected — only heap references may escape. So
+  `fn pick(ref Point a, ref Point b, …) -> ref Point` accepts owning-reference-backed args but
+  rejects a stack value whose borrow would dangle.
+- **Codegen** (`CodeGen_Exprs.cpp` / `CodeGen_Stmts.cpp`): borrow branches in `genVarDecl` (alloca
+  a `ptr`, store the coerced init with **no retain**) and `genAssign` (rebind = plain store, no
+  retain/release); `genReturn` guards the `+1` with `!currentReturnType.borrow`. Generic `ref T`
+  survives monomorphization (T→concrete substitutes on raw tokens before `consumeType`).
+- Tests: `tests/ref_tests.cpp` (`[ref]`), `e2e/ref_test.gg`.
 
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
@@ -649,7 +697,17 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**704 test cases / 1392 assertions** (as of generic impls — `impl<T> Trait for Class<T>` captured
+**739 test cases / 1437 assertions** (as of `ref T` non-owning borrows — prefix `ref`/`mut ref`,
+`TypeKind::Reference` + `borrow` flag, synthesized `"ref:Class"`, coercions into a borrow only,
+no refcount traffic, rejected as a field, escape-checked; a shared `ref` is read-only while
+`mut ref` may mutate; method dispatch and `ref`→`ref` passing work; `ref Self` resolves in an
+`impl`; `tests/ref_tests.cpp` `[ref]`, `e2e/ref_test.gg`). Prior baseline was
+**724 test cases / 1417 assertions** (as of escape analysis v1 — rejects passing a stack value
+object to a `Class&` parameter that returns/ref-field-stores it; gated on Object→Reference borrows
+so no false positives; `SemanticAnalyzer_Escape.cpp`, `tests/escape_tests.cpp` covers ctor stores via
+`new`/stack, local-alias escape, control-flow nesting, per-parameter granularity, and the
+local-shadows-field guard). Prior baseline was
+**704 / 1392** — generic impls — `impl<T> Trait for Class<T>` captured
 as an impl template and monomorphized alongside each `Class<args>` instantiation; `tests/trait_tests.cpp`
 `[generic][impl]`, `e2e/generic_impl_test.gg`). Prior baseline was **700 / 1386** — the stdlib `String` class + CRT-layout test update —
 `stdlib/string.gg` is now a heap-owned UTF-8 `String` (bytes + byte-length; `byteLength`/`length`

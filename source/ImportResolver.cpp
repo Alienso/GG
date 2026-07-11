@@ -34,7 +34,11 @@ Program ImportResolver::resolve(const std::string& rootFilePath) {
     std::unordered_set<std::string> classVisited;
     std::unordered_set<std::string> allClassNames = collectClassNames(rootFilePath, classVisited);
     Parser monoParser(std::move(allClassNames), &sharedGenerics_);
-    monoParser.monomorphize(program);
+    // A monomorphization error is reported at the use-site line (the line that requested the
+    // instantiation), which lives in the root file for the common case — label it accordingly.
+    std::error_code rootEc;
+    fs::path rootCanonical = fs::weakly_canonical(fs::path(rootFilePath), rootEc);
+    monoParser.monomorphize(program, rootEc ? rootFilePath : rootCanonical.string());
     return program;
 }
 

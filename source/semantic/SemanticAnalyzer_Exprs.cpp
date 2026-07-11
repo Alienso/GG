@@ -5,6 +5,17 @@
 static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
                               const std::vector<Type>& argTypes);
 
+// An addressable expression (has a storage location that can be borrowed): a name, an element
+// `a[i]`, a member `x.f`, or `this`. Temporaries (literals, arithmetic, calls returning a value)
+// are not addressable. Used to validate that a `ref <primitive>` borrows a real lvalue.
+static bool isLvalueExpr(const Expr& e) {
+    if (!e.node) return false;
+    return std::holds_alternative<IdentifierExpr>(*e.node)
+        || std::holds_alternative<IndexExpr>(*e.node)
+        || std::holds_alternative<MemberAccessExpr>(*e.node)
+        || std::holds_alternative<ThisExpr>(*e.node);
+}
+
 // ============================================================
 // Expression analysis
 // ============================================================
@@ -26,6 +37,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const MemberAccessExpr& ma)               { return analyzeMemberAccess(ma); },
         [&](const MemberAssignExpr& ma)               { return analyzeMemberAssign(ma); },
         [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
+        [&](const RefStoreExpr& refStore)             { return analyzeRefStore(refStore); },
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
@@ -178,6 +190,13 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
         checkArgCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
         if (w.paramMut && k < w.paramMut->size() && (*w.paramMut)[k])
             warnConstToMut(at, *args[k], (*w.params)[k]);
+        // Borrowing a primitive lvalue into a `ref <primitive>` parameter requires an addressable
+        // argument — a temporary (e.g. `a + b`) has no address to borrow.
+        if (isPrimitiveBorrow((*w.params)[k]) && !isBorrow(argTypes[k]) && !isLvalueExpr(*args[k]))
+            error(at, "argument " + std::to_string(k + 1) + " of " + what + " expects a 'ref "
+                  + typeName(borrowElementType((*w.params)[k]))
+                  + "' but got a temporary; a borrow needs an addressable value (a variable or an "
+                  "element like `a[i]`)");
         // Escape analysis: borrowing a *stack value object* as a reference is safe only if the
         // callee just borrows it. If the parameter escapes (the callee returns or stores it), the
         // reference would outlive the stack object → reject.
@@ -214,11 +233,20 @@ Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
         // Return the declared type anyway so downstream analysis uses the right type
         // and does not cascade into spurious "undeclared identifier" errors.
     }
-    return sym->type;
+    // Reading a `ref <primitive>` yields the primitive value (lvalue-to-rvalue deref). The symbol
+    // keeps its borrow type (so assignment writes through and the codegen loads correctly).
+    return decayPrimitiveBorrow(sym->type);
 }
 
 bool SemanticAnalyzer::incDecTargetOk(const Token& op, const std::string& name) {
     if (const Symbol* sym = symbolTable.lookup(name)) {
+        // '++'/'--' through a `ref <primitive>` is not supported yet (the write would need to go
+        // through the referent). Point at the explicit form.
+        if (isPrimitiveBorrow(sym->type)) {
+            error(op, "'" + op.lexeme + "' through a borrow ('" + typeName(sym->type)
+                  + "') is not supported; write it out, e.g. `" + name + " = " + name + " + 1`");
+            return false;
+        }
         if (sym->kind == Symbol::Kind::Variable && !sym->isMutable) {
             error(op, "cannot mutate immutable variable '" + name + "'; declare it 'mut' to allow mutation");
             return false;
@@ -241,7 +269,7 @@ bool SemanticAnalyzer::incDecTargetOk(const Token& op, const std::string& name) 
 }
 
 Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
-    Type operandType = analyzeExpr(*unary.operand);
+    Type operandType = decayPrimitiveBorrow(analyzeExpr(*unary.operand));
 
     switch (unary.operatorToken.type) {
         case TokenType::BANG:
@@ -396,8 +424,10 @@ Type SemanticAnalyzer::classifyEquality(const Type& leftType, const Type& rightT
 }
 
 Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
-    Type leftType  = analyzeExpr(*binary.left);
-    Type rightType = analyzeExpr(*binary.right);
+    // A `ref <primitive>` operand decays to its value (deref) before any numeric / operator rule —
+    // otherwise a borrow (kind == Reference) would be misrouted into class operator overloading.
+    Type leftType  = decayPrimitiveBorrow(analyzeExpr(*binary.left));
+    Type rightType = decayPrimitiveBorrow(analyzeExpr(*binary.right));
 
     if (isError(leftType) || isError(rightType)) return Type{TypeKind::Error};
 
@@ -726,6 +756,21 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return Type{TypeKind::Error};
     }
 
+    // Assigning to a `ref <primitive>` writes THROUGH the borrow (like C++ `int& r; r = 5;`); it
+    // does not rebind. Requires a mutable borrow (`mut ref`); the value must match the element.
+    if (isPrimitiveBorrow(sym->type)) {
+        if (!sym->isMutable) {
+            error(assign.name, "cannot write through a shared borrow '" + assign.name.lexeme
+                  + "'; declare it 'mut ref' to allow writing to the borrowed value");
+            analyzeExpr(*assign.value);
+            return borrowElementType(sym->type);
+        }
+        Type elem = borrowElementType(sym->type);
+        Type rhs  = analyzeWithExpected(*assign.value, elem);
+        checkCast(rhs, elem, assign.name, "write through borrow");
+        return elem;
+    }
+
     // Object/reference parameters may not be *rebound* (obj = ...), even when declared
     // `mut` — a reference parameter is a borrow, so rebinding it would corrupt refcounts.
     // (`mut` on such a parameter only unlocks writes to the object's mut fields.)
@@ -806,6 +851,15 @@ Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundA
     Type rhsType = analyzeExpr(*compoundAssign.value);
 
     if (isError(lhsType) || isError(rhsType)) return Type{TypeKind::Error};
+
+    // Compound assignment through a `ref <primitive>` is not supported yet (the write would need
+    // to go through the referent, not rebind). Point at the explicit form.
+    if (isPrimitiveBorrow(lhsType)) {
+        error(compoundAssign.operatorToken, "compound assignment through a borrow ('"
+              + typeName(lhsType) + "') is not supported; write it out, e.g. `"
+              + compoundAssign.name.lexeme + " = " + compoundAssign.name.lexeme + " + ...`");
+        return borrowElementType(lhsType);
+    }
 
     bool isArith =
         compoundAssign.operatorToken.type == TokenType::PLUS_EQUAL   ||
@@ -1048,6 +1102,13 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     if (varDecl.arraySize == 0 && varDecl.initializer) {
         Type initializerType = analyzeWithExpected(*varDecl.initializer, declaredType);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
+        // A `ref <primitive>` must borrow an addressable value. Binding from a fresh primitive
+        // (not itself a borrow being passed along) requires an lvalue — a temporary has no address.
+        if (isPrimitiveBorrow(declaredType) && !isBorrow(initializerType)
+            && !isLvalueExpr(*varDecl.initializer))
+            error(varDecl.name, "a 'ref " + typeName(borrowElementType(declaredType))
+                  + "' must borrow an addressable value (a variable or an element like `a[i]`), "
+                  "not a temporary");
         // Initialising a `mut` reference from a read-only reference is a const→mut coercion.
         if (varDecl.isMut)
             warnConstToMut(varDecl.name, *varDecl.initializer, declaredType);
@@ -1566,6 +1627,39 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
         resolvedCallee[&methodCall] = mangleOverload(
             objectType.className + "_" + methodCall.method.lexeme, method.paramTypes, method.returnType);
     return method.returnType;
+}
+
+// ============================================================
+// Store through a reference-valued expression: `<target> = value`
+// ============================================================
+
+Type SemanticAnalyzer::analyzeRefStore(const RefStoreExpr& refStore) {
+    Type targetType = analyzeExpr(*refStore.target);
+    if (isError(targetType)) { analyzeExpr(*refStore.value); return Type{TypeKind::Error}; }
+
+    // The target must evaluate to a reference/borrow — a storage location we can write through.
+    // (A plain value, e.g. `f() = x` where `f` returns `i32`, is not assignable.)
+    if (targetType.kind != TypeKind::Reference) {
+        error(refStore.op, "the left side of '=' is not assignable: this expression is not a "
+              "reference. Assign to a variable, an element `a[i]`, a field `x.f`, or a call that "
+              "returns a reference (`ref T`)");
+        analyzeExpr(*refStore.value);
+        return Type{TypeKind::Error};
+    }
+
+    // Primitive borrow (`ref i32`): store the value into the referent (like C++ `v.at(i) = x`).
+    if (isPrimitiveBorrow(targetType)) {
+        Type elem = borrowElementType(targetType);
+        Type rhs  = analyzeWithExpected(*refStore.value, elem);
+        checkCast(rhs, elem, refStore.op, "store through reference");
+        return elem;
+    }
+
+    // Storing a whole object through a class reference is not yet supported.
+    error(refStore.op, "storing through a class reference ('" + typeName(targetType)
+          + "') is not yet supported; assign the object's fields individually instead");
+    analyzeExpr(*refStore.value);
+    return Type{TypeKind::Error};
 }
 
 // ============================================================

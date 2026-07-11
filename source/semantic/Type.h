@@ -39,6 +39,11 @@ struct Type {
     bool        borrow      = false;           // `ref T`: a non-owning borrow (only when kind ==
                                                // Reference). Same IR as an owning `Class&` (a ptr),
                                                // but never retained/released; `ref → Class&` forbidden.
+                                               // A CLASS borrow sets className; a PRIMITIVE borrow
+                                               // (`ref i32`) leaves className empty and stores the
+                                               // element kind in elementKind (an lvalue ref, like
+                                               // C++'s `int&` — auto-derefs on read, stores through
+                                               // on write).
     TypeKind    elementKind = TypeKind::Error;  // only valid when kind == Array
     size_t      arraySize   = 0;               // only valid when kind == Array
     std::string className;                     // only valid when kind == Object
@@ -96,6 +101,27 @@ inline Type makeBorrowType(const std::string& name) {
     t.borrow    = true;
     return t;
 }
+
+// A non-owning borrow of a PRIMITIVE, `ref i32` (an lvalue reference like C++'s `int&`): a ptr to
+// the primitive that never participates in refcounting. className stays empty; elementKind holds
+// the borrowed primitive kind. Reads auto-deref (load); writes store through the pointer.
+inline Type makePrimitiveBorrow(TypeKind elementKind) {
+    Type t;
+    t.kind        = TypeKind::Reference;
+    t.borrow      = true;
+    t.elementKind = elementKind;
+    return t;
+}
+
+// True for any `ref T` (class or primitive).
+inline bool isBorrow(const Type& t) { return t.kind == TypeKind::Reference && t.borrow; }
+// True only for `ref <primitive>` (an lvalue reference to a primitive; className empty).
+inline bool isPrimitiveBorrow(const Type& t) { return isBorrow(t) && t.className.empty(); }
+// The borrowed primitive's value type (only meaningful when isPrimitiveBorrow(t)).
+inline Type borrowElementType(const Type& t) { return Type{t.elementKind}; }
+// Lvalue-to-rvalue decay: reading a `ref <primitive>` in a value context yields the primitive
+// (a load). Class borrows and everything else pass through unchanged.
+inline Type decayPrimitiveBorrow(const Type& t) { return isPrimitiveBorrow(t) ? borrowElementType(t) : t; }
 
 // Convenience constructor for typed pointers — ptr<T> (internal). The element is
 // described by elementKind (and className when the element is a class/reference).

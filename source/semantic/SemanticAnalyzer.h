@@ -312,6 +312,7 @@ private:
     [[nodiscard]] Type analyzeThis(const ThisExpr& thisExpr);
     [[nodiscard]] Type analyzeMemberAccess(const MemberAccessExpr& memberAccess);
     [[nodiscard]] Type analyzeMemberAssign(const MemberAssignExpr& memberAssign);
+    [[nodiscard]] Type analyzeRefStore(const RefStoreExpr& refStore);
     [[nodiscard]] Type analyzeMethodCall(const MethodCallExpr& methodCall);
     [[nodiscard]] Type analyzeCast(const CastExpr& castExpr);
     [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);

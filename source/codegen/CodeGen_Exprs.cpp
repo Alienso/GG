@@ -27,8 +27,18 @@ std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& ar
     auto emitArg = [&](const Expr& arg) {
         if (!first) argumentString += ", ";
         first = false;
-        Type        argType = exprType(arg);
-        std::string value   = genExpr(arg);
+        Type argType = exprType(arg);
+        // Borrowing a primitive lvalue into a `ref <primitive>` parameter: pass its ADDRESS, not
+        // the loaded value (like creating a `ref i32` binding). A borrow argument passed onward
+        // resolves through the same helper.
+        if (declaredParamTypes && paramIndex < declaredParamTypes->size()
+            && isPrimitiveBorrow((*declaredParamTypes)[paramIndex]) && !isBorrow(argType)) {
+            std::string addr = genBorrowSource(arg);
+            argumentString += "ptr " + addr;
+            ++paramIndex;
+            return;
+        }
+        std::string value = genExpr(arg);
         // Cast to the declared parameter type when the IR types differ.
         if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
             const Type& paramType = (*declaredParamTypes)[paramIndex];
@@ -78,6 +88,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const ThisExpr& thisExpr)                -> std::string { return genThis(thisExpr); },
         [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess); },
         [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
+        [&](const RefStoreExpr& refStore)            -> std::string { return genRefStore(refStore); },
         [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
@@ -239,6 +250,13 @@ std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
         return allocaIt->second;
     }
 
+    // `ref <primitive>` read: the alloca holds the referent pointer; load it, then load the value
+    // through it (lvalue-to-rvalue deref, like C++ using `int& r` as an `int`).
+    if (isPrimitiveBorrow(varType)) {
+        std::string referent = emitLoad("ptr", allocaIt->second);
+        return emitLoad(irTypeName(borrowElementType(varType)), referent);
+    }
+
     std::string irType  = irTypeName(varType);
     std::string ptrName = allocaIt->second;
     return emitLoad(irType, ptrName);
@@ -375,13 +393,16 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
         Type rt = exprType(*binary.right);
         std::string lval = genExpr(*binary.left);
         std::string rval = genExpr(*binary.right);
+        // A `ref <primitive>` operand decays to its value (load) before comparison.
+        if (isPrimitiveBorrow(lt)) { lval = emitLoad(irTypeName(borrowElementType(lt)), lval); lt = borrowElementType(lt); }
+        if (isPrimitiveBorrow(rt)) { rval = emitLoad(irTypeName(borrowElementType(rt)), rval); rt = borrowElementType(rt); }
         return emitEquality(&binary, lval, lt, rval, rt, operatorType);
     }
 
     // Operator overloading: a class-typed left operand desugars to a trait method call
     // (Add/Sub/Mul/Div/Rem/Ord — equality handled above).
     {
-        Type leftType = exprType(*binary.left);
+        Type leftType = decayPrimitiveBorrow(exprType(*binary.left));   // a primitive borrow is not a class operand
         const char* method = binaryOperatorMethod(operatorType);
         bool isAddrIdentity = addressIdentityCmp_ && addressIdentityCmp_->count(&binary);
         if (method && !isAddrIdentity
@@ -431,11 +452,14 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
                          operatorType == TokenType::LESS         || operatorType == TokenType::LESS_EQUAL  ||
                          operatorType == TokenType::GREATER      || operatorType == TokenType::GREATER_EQUAL);
 
-    Type leftType  = exprType(*binary.left);
-    Type rightType = exprType(*binary.right);
+    Type leftRaw   = exprType(*binary.left);
+    Type rightRaw  = exprType(*binary.right);
+    Type leftType  = decayPrimitiveBorrow(leftRaw);    // `ref <primitive>` operands decay to their value type
+    Type rightType = decayPrimitiveBorrow(rightRaw);
 
     // Identity comparison (==/!=) lowering to `icmp eq/ne ptr`: enum singletons, or two class
-    // references with no `Eq` impl (address identity — recorded by semantics).
+    // references with no `Eq` impl (address identity — recorded by semantics). Never a primitive
+    // borrow (decayed above), so the raw operands are safe to compare as pointers here.
     if (isComparison
         && (leftType.kind == TypeKind::Enum || rightType.kind == TypeKind::Enum
             || (addressIdentityCmp_ && addressIdentityCmp_->count(&binary)))) {
@@ -454,6 +478,10 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
 
     std::string leftValue  = genExpr(*binary.left);
     std::string rightValue = genExpr(*binary.right);
+
+    // Load through a `ref <primitive>` operand (deref) before the common-type cast.
+    if (isPrimitiveBorrow(leftRaw))  leftValue  = emitLoad(irTypeName(leftType),  leftValue);
+    if (isPrimitiveBorrow(rightRaw)) rightValue = emitLoad(irTypeName(rightType), rightValue);
 
     // Cast operands to the common type
     leftValue  = emitCast(leftValue,  leftType,  operandType);
@@ -494,11 +522,61 @@ bool CodeGen::resolveAssignTarget(const std::string& name, std::string& ptrOut, 
     return false;
 }
 
+std::string CodeGen::genRefStore(const RefStoreExpr& rs) {
+    // Store through a reference-valued expression (e.g. `v.at(i) = x`). Semantic analysis has
+    // verified the target is a primitive borrow; evaluate it to the referent pointer and store.
+    Type targetType = exprType(*rs.target);
+    std::string referent = genExpr(*rs.target);   // the referent pointer
+    Type elem = borrowElementType(targetType);
+    Type rhsType = exprType(*rs.value);
+    std::string val = genExpr(*rs.value);
+    val = emitCast(val, rhsType, elem);
+    emitStore(irTypeName(elem), val, referent);
+    return val;
+}
+
+std::string CodeGen::genBorrowSource(const Expr& source) {
+    // Already a borrow / reference value (a `ref`-returning call, or an expression the analyzer
+    // typed as a borrow): the produced value IS the referent pointer.
+    if (isBorrow(exprType(source))) return genExpr(source);
+
+    if (source.node) {
+        if (const auto* id = std::get_if<IdentifierExpr>(source.node.get())) {
+            // A `ref <primitive>` local holds the referent pointer — load it to pass it onward.
+            auto vt = varTypeMap.find(id->name.lexeme);
+            if (vt != varTypeMap.end() && isPrimitiveBorrow(vt->second)) {
+                auto a = allocaMap.find(id->name.lexeme);
+                if (a != allocaMap.end()) return emitLoad("ptr", a->second);
+            }
+            // Otherwise a plain addressable lvalue — its storage address.
+            std::string ptr; Type t;
+            if (resolveAssignTarget(id->name.lexeme, ptr, t)) return ptr;
+        }
+        if (const auto* idx = std::get_if<IndexExpr>(source.node.get())) {
+            std::string elemIr;
+            return genElementAddress(*idx->object, *idx->index, elemIr);
+        }
+    }
+    return "";  // not addressable (a temporary) — semantic analysis rejects this
+}
+
 std::string CodeGen::genAssign(const AssignExpr& assign) {
     Type        lhsType;
     std::string ptrName;
     if (!resolveAssignTarget(assign.name.lexeme, ptrName, lhsType)) return "0";
     std::string irType  = irTypeName(lhsType);
+
+    // Write THROUGH a `ref <primitive>` (like C++ `int& r; r = 5;`): load the referent pointer,
+    // store the value there. This is not a rebind — the borrow keeps pointing at the same slot.
+    if (isPrimitiveBorrow(lhsType)) {
+        Type        elem    = borrowElementType(lhsType);
+        Type        rhsType = exprType(*assign.value);
+        std::string val     = genExpr(*assign.value);
+        val = emitCast(val, rhsType, elem);
+        std::string referent = emitLoad("ptr", ptrName);
+        emitStore(irTypeName(elem), val, referent);
+        return val;
+    }
 
     // Borrow rebind (`ref` local): just re-point it — no retain/release (it doesn't own the target).
     if (lhsType.kind == TypeKind::Reference && lhsType.borrow) {
@@ -689,7 +767,7 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
             }
             std::string t = freshTemp();
             emit("%" + t + " = call " + returnIrType + " @" + mName + "(" + fullArgs + ")");
-            if (resolvedType.kind == TypeKind::Reference)
+            if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
                 pendingTemps_.push_back({ "%" + t, resolvedType.className });
             return "%" + t;
         }
@@ -709,7 +787,7 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     }
     std::string t = freshTemp();
     emit("%" + t + " = call " + returnIrType + " @" + fnName + "(" + argStr + ")");
-    if (resolvedType.kind == TypeKind::Reference)   // a reference-returning call hands back a +1
+    if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)   // owning ref-call hands back a +1 (a borrow owns nothing)
         pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
 }
@@ -832,10 +910,17 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             varTypeMap[name] = synth;
             if (debug_) dbgDeclare(ptrName, name, synth, varDecl.name.line, 0);
             if (varDecl.initializer) {
-                Type        initType = exprType(*varDecl.initializer);
-                std::string value    = genExpr(*varDecl.initializer);
-                value = emitCast(value, initType, synth);   // object/ref → borrow: address, no-op
-                emitStore("ptr", value, ptrName);            // borrow: no retain
+                if (isPrimitiveBorrow(synth)) {
+                    // `ref <primitive>`: store the referent pointer (address of the borrowed
+                    // lvalue, or the pointer produced by a `ref`-returning call). No load, no copy.
+                    std::string addr = genBorrowSource(*varDecl.initializer);
+                    emitStore("ptr", addr, ptrName);
+                } else {
+                    Type        initType = exprType(*varDecl.initializer);
+                    std::string value    = genExpr(*varDecl.initializer);
+                    value = emitCast(value, initType, synth);   // object/ref → borrow: address, no-op
+                    emitStore("ptr", value, ptrName);            // borrow: no retain
+                }
             } else {
                 emitStore("ptr", "null", ptrName);
             }

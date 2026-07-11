@@ -9,7 +9,7 @@ class Array<T> {
     Array() {
         this.size = 0;
         this.capacity = 8;
-        this.data = malloc(capacity);
+        this.data = malloc(capacity * sizeof(T));
     }
 
     ~Array(){
@@ -19,7 +19,7 @@ class Array<T> {
 }
 
 impl <T> Index for Array<T> {
-    fn get(i32 i) -> T {
+    fn get(i32 i) -> ref T {
         return data[i];
     }
     fn set(i32 i, T data) -> void {

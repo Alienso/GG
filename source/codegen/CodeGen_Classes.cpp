@@ -179,7 +179,7 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
     if (retIr == "void") { emit("call void @" + sym + "(" + argStr + ")"); return ""; }
     std::string t = freshTemp();
     emit("%" + t + " = call " + retIr + " @" + sym + "(" + argStr + ")");
-    if (ret.kind == TypeKind::Reference) pendingTemps_.push_back({ "%" + t, ret.className });
+    if (ret.kind == TypeKind::Reference && !ret.borrow) pendingTemps_.push_back({ "%" + t, ret.className });
     return "%" + t;
 }
 
@@ -254,7 +254,7 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
     }
     std::string t = freshTemp();
     emit("%" + t + " = call " + returnIrType + " @" + mangledName + "(" + fullArgs + ")");
-    if (resolvedType.kind == TypeKind::Reference)   // reference-returning method hands back a +1
+    if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)   // owning ref-return hands back a +1 (a borrow owns nothing)
         pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
 }
@@ -278,7 +278,7 @@ std::string CodeGen::genStaticCall(const std::string& className,
     }
     std::string t = freshTemp();
     emit("%" + t + " = call " + returnIrType + " @" + mangledName + "(" + fullArgs + ")");
-    if (resolvedType.kind == TypeKind::Reference)
+    if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
         pendingTemps_.push_back({ "%" + t, resolvedType.className });
     return "%" + t;
 }

@@ -174,7 +174,11 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
 
     // Evaluate return value first (before cleanup that could clobber temps).
     std::string retVal;
-    if (returnStmt.value.has_value()) {
+    if (returnStmt.value.has_value() && isPrimitiveBorrow(currentReturnType)) {
+        // `ref <primitive>` return: hand back the referent pointer (address of the borrowed
+        // lvalue / element). No load, no retain — a borrow owns nothing.
+        retVal = genBorrowSource(*returnStmt.value);
+    } else if (returnStmt.value.has_value()) {
         Type returnValueType = exprType(*returnStmt.value);
         retVal               = genExpr(*returnStmt.value);
         retVal               = emitCast(retVal, returnValueType, currentReturnType);
@@ -307,7 +311,7 @@ std::string CodeGen::genSwitchExpr(const SwitchExpr& switchExpr, const Type& res
     std::string result = emitLoad(resultIr, slot);
     // A reference result carries the +1 the winning arm transferred into the slot; hand it to the
     // consumer as a pending temp (claimed by a binding/return, else released at the boundary).
-    if (resolvedType.kind == TypeKind::Reference)
+    if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
         pendingTemps_.push_back({ result, resolvedType.className });
     return result;
 }

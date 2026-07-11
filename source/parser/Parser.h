@@ -81,7 +81,8 @@ public:
     // are recognised regardless of which file declares the template.
     void prescanTemplateNames(const std::vector<Token>& inputTokens);
     // Expand all pending instantiations, appending concrete declarations to `program`.
-    void monomorphize(Program& program);
+    // `filename` labels monomorphization parse errors (reported at the use-site line).
+    void monomorphize(Program& program, const std::string& filename = "");
 
 private:
     std::vector<Token>             tokens;

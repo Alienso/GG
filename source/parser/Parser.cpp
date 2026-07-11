@@ -66,7 +66,10 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
     }
 }
 
-void Parser::monomorphize(Program& program) { runMonomorphization(program); }
+void Parser::monomorphize(Program& program, const std::string& filenameStr) {
+    filename = filenameStr;   // label any monomorphization parse error with the source file
+    runMonomorphization(program);
+}
 
 Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& filenameStr,
                       bool runMono) {
@@ -742,16 +745,19 @@ bool Parser::isTypeName() const {
 Token Parser::consumeType() {
     Token base = advance();  // caller has verified isTypeName()
 
-    // Borrow: `ref Class` → synthesized "ref:Class" (a non-owning reference). The inner type must be
-    // a class/Self (you can't borrow a primitive); a generic `ref T` reaches here only after
-    // monomorphization has substituted T with a concrete class token.
+    // Borrow: `ref T` → synthesized "ref:T" (a non-owning reference). The inner type may be a
+    // class/Self (a class borrow) or a primitive value type (`ref i32`, an lvalue reference to the
+    // primitive — like C++'s `int&`). `ptr`/`void` are not borrowable. A generic `ref T` reaches
+    // here only after monomorphization has substituted T with a concrete type token.
     if (base.type == TokenType::REF) {
-        if (!(check(TokenType::IDENTIFIER) || check(TokenType::SELF)))
-            throw error(peek(), "expected a class name after 'ref' (you can only borrow a class, "
-                                "not a primitive)");
+        bool primitiveInner = isTypeKeyword(peek().type)
+                              && peek().type != TokenType::PTR && peek().type != TokenType::VOID;
+        if (!(check(TokenType::IDENTIFIER) || check(TokenType::SELF) || primitiveInner))
+            throw error(peek(), "expected a type after 'ref' (borrow a class, `Self`, or a "
+                                "primitive like `i32`; `ptr` and `void` cannot be borrowed)");
         Token inner = advance();
-        std::string cls = inner.type == TokenType::SELF ? "Self" : inner.lexeme;
-        return Token{ TokenType::IDENTIFIER, "ref:" + cls, base.line };
+        std::string name = inner.type == TokenType::SELF ? "Self" : inner.lexeme;
+        return Token{ TokenType::IDENTIFIER, "ref:" + name, base.line };
     }
 
     std::string lexeme = base.lexeme;
@@ -1596,6 +1602,15 @@ Expr Parser::parseAssignment() {
         });
     }
 
+    // Store through a reference-valued expression: `<expr> = value` where <expr> is not a plain
+    // name/index/member (e.g. a call returning `ref T` — `v.at(i) = x`). Semantic analysis verifies
+    // the target evaluates to a reference/borrow and stores the value into the referent.
+    if (expression.node && check(TokenType::EQUAL)) {
+        Token op = advance();  // consume =
+        Expr value = parseAssignment();  // right-associative
+        return makeExpr(RefStoreExpr{ box(std::move(expression)), op, box(std::move(value)) });
+    }
+
     return expression;
 }
 
@@ -1924,13 +1939,19 @@ Expr Parser::parsePrimary() {
         return inner;
     }
 
-    // A bare type keyword (i32, f64, ptr, …) where a value is expected is almost always a
-    // generic-type argument that leaked into an expression: if `Name` isn't a declared generic,
-    // `Name<i32>` parses as the comparison `Name < i32 > …` and the type keyword ends up here.
+    // A bare type keyword (i32, f64, ptr, …) where a value is expected means a type name has
+    // leaked into expression position. The two common causes: (1) a type was passed as a value —
+    // e.g. `sizeOf(i32)` (an ordinary call) instead of the `sizeof(i32)` keyword, or any
+    // `f(i32)` that passes a type as an argument; (2) `Name<i32>` where `Name` isn't a declared
+    // generic, so it parses as the comparison `Name < i32 > …` and the type keyword ends up here.
     if (isTypeName())
-        throw error(peek(), "expected an expression, but found the type '" + peek().lexeme
-            + "'. If you meant a generic type like `Name<" + peek().lexeme
-            + ">`, make sure `Name` is a declared generic (`class Name<T>`)");
+        throw error(peek(), "expected a value here, but found the type '" + peek().lexeme
+            + "'.\n  A type can't be used where a value is expected. Two common causes:\n"
+            "    (1) a type was passed as a value - e.g. a call `f(" + peek().lexeme
+            + ")`; if you meant its byte size, use the `sizeof(" + peek().lexeme
+            + ")` keyword (lowercase);\n"
+            "    (2) `Name<" + peek().lexeme
+            + ">` where `Name` is not a declared generic (`class Name<T>`).");
 
     throw error(peek(), "expected expression");
 }

@@ -562,33 +562,58 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   bug: it retained on return but was never released → returned a `+2` object → one-object leak
   per call. Fixed.)*
 
-### `ref T` — non-owning borrow
-`ref T` (prefix keyword, e.g. `ref Point`) is a **non-owning borrow** of a class value — a plain
-`ptr` with **no refcount traffic** (never retained/released, never in a dtor scope, no `+1` on
-return). `mut ref T` reuses the existing `mut` to make the borrow mutable. Owning `Class&` is
-unchanged; `ref` is the everyday borrow for zero-copy element/parameter access.
-- **Type representation**: reuses `TypeKind::Reference` + a `bool borrow` flag on `Type` (so
-  `ref Point` != `Point&` via defaulted `operator==`). `makeBorrowType(name)` builds one. Member
-  access / method dispatch / parameter passing all reuse the Reference path unchanged — only the
-  three refcount decision sites branch on `borrow`.
-- **Synthesized token**: `ref Point` → lexeme `"ref:Point"` (decoded by `decodeSynthesizedType`,
-  first check). `consumeType` (parser) synthesizes it after the `ref` keyword; the inner must be a
-  class name or `Self` (a primitive → parse error "expected a class name after 'ref'"). `typeName`
-  renders it `ref Point`. `typeSpanAt` recognizes a leading `ref` (span = 1 + inner span) so the
-  var-decl detector accepts `[mut] ref T name = …`.
-- **Coercions INTO a borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`ref`, value
-  `Object`→`ref`, `ref`→`ref` (same class). The reverse — a borrow → an owning `Class&` — is
-  **forbidden** (falls through to `None`), since a borrow carries no ownership to hand off.
-- **Not a field**: `buildClassInfo` rejects a `ref` field ("a field cannot be a borrow …") — a
-  class field must own (`Class&`) or embed (value), or nothing keeps the borrowee alive.
+### `ref T` — non-owning borrow (class **and** primitive)
+`ref T` (prefix keyword) is a **non-owning borrow** — a plain `ptr` with **no refcount traffic**
+(never retained/released, never in a dtor scope, no `+1` on return). `mut ref T` reuses `mut` to
+make the borrow mutable. Owning `Class&` is unchanged; `ref` is the everyday borrow for zero-copy
+element/parameter access. `T` may be a **class** (`ref Point`) or a **primitive** (`ref i32`, an
+lvalue reference like C++'s `int&`) — but not `ptr`/`void`.
+- **Type representation**: reuses `TypeKind::Reference` + a `bool borrow` flag on `Type`. A **class
+  borrow** sets `className`; a **primitive borrow** leaves `className` empty and stores the element
+  in `elementKind` (`makePrimitiveBorrow` / `isPrimitiveBorrow` / `borrowElementType` /
+  `decayPrimitiveBorrow` in `Type.h`). Class-borrow member access / method dispatch / passing reuse
+  the Reference path unchanged; only the refcount decision sites branch on `borrow`.
+- **Synthesized token**: `ref T` → lexeme `"ref:T"`. `decodeSynthesizedType` maps a primitive inner
+  (via `typeKindFromName`) to a primitive borrow, else a class borrow. `consumeType` accepts a class
+  name, `Self`, or a primitive keyword after `ref` (`ptr`/`void` → parse error "… cannot be
+  borrowed"). `typeName` renders `ref i32` / `ref Point`. `typeSpanAt` handles a leading `ref`.
+- **Primitive borrow = lvalue reference** (like C++ `int&`): reads **auto-deref** (load through the
+  pointer) and writes **store through** it — it does not rebind.
+  - *Read*: `analyzeIdentifier` returns `decayPrimitiveBorrow(sym->type)`; `analyzeBinary`/
+    `analyzeUnary` decay operands first (so a `ref i32` isn't misrouted into class operator
+    overloading). `canImplicitlyCast` allows `ref P → P` (deref) and `P → ref P` (borrow a matching
+    primitive lvalue). Codegen: `genIdentifier` loads the referent ptr then the value; `emitCast`
+    `ref P → P` emits a load.
+  - *Write*: `analyzeAssign` has a primitive-borrow branch — `x = v` writes through (requires
+    `mut ref`; a shared `ref` errors). Codegen `genAssign` loads the referent ptr and stores.
+  - *Create / return*: `genBorrowSource` produces the referent pointer for a borrow source — the
+    stored ptr for a borrow identifier, the address for a plain lvalue (`resolveAssignTarget` /
+    `genElementAddress`), or the value itself for a `ref`-returning call. Used by `genVarDecl`
+    (primitive-borrow init) and `genReturn` (primitive-borrow return). `analyzeVarDecl` requires the
+    source be an addressable lvalue (`isLvalueExpr`) — a temporary (`a+b`) is rejected.
+- **Coercions INTO a class borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`ref`, value
+  `Object`→`ref`, `ref`→`ref`. The reverse — a borrow → an owning `Class&` — is **forbidden**.
+- **Not a field**: `buildClassInfo` rejects a `ref` field.
+- **A borrow-returning call is NOT a refcount temp**: every ref-returning call site pushes its
+  result to `pendingTemps_` only when `!resolvedType.borrow` (a borrow owns nothing, so releasing
+  it would corrupt the real owner's count — this had been latently wrong for class borrows too).
 - **Escape analysis still applies**: passing a *stack value object* to a `ref` parameter that
-  escapes (is returned or ref-field-stored) is rejected — only heap references may escape. So
-  `fn pick(ref Point a, ref Point b, …) -> ref Point` accepts owning-reference-backed args but
-  rejects a stack value whose borrow would dangle.
-- **Codegen** (`CodeGen_Exprs.cpp` / `CodeGen_Stmts.cpp`): borrow branches in `genVarDecl` (alloca
-  a `ptr`, store the coerced init with **no retain**) and `genAssign` (rebind = plain store, no
-  retain/release); `genReturn` guards the `+1` with `!currentReturnType.borrow`. Generic `ref T`
-  survives monomorphization (T→concrete substitutes on raw tokens before `consumeType`).
+  escapes (returned / ref-field-stored) is rejected — only heap references may escape.
+- **Generics**: `ref T` survives monomorphization (T→concrete substitutes on raw tokens before
+  `consumeType`). `Array<i32>`'s `fn get(i) -> ref T` now instantiates to `ref i32`.
+- **Store through a returned reference** (`v.at(i) = x`): a new `RefStoreExpr{target, op, value}`
+  AST node. The parser (`parseAssignment`) builds it when the LHS of `=` is not a name/index/member
+  (those keep their dedicated nodes) — e.g. a call. `analyzeRefStore` requires the target to be a
+  reference; a **primitive borrow** target stores the value into the referent (`checkCast` against
+  the element), a class-reference target is rejected ("not yet supported"), a non-reference is
+  rejected ("not assignable"). `genRefStore` evaluates the target to the referent pointer and
+  `emitStore`s. So `v.at(i) = x` works for `ref <primitive>` returns; whole-object store-through is
+  still deferred.
+- **Primitive-borrow v1 limitations** (rejected with a clear message, never miscompiled): compound
+  assignment (`+=` …) and `++`/`--` **through** a primitive borrow — write `r = r + 1` instead (they'd
+  need referent write-through in the compound/postfix codegen); binding or passing a **temporary** to
+  a `ref <primitive>` — a borrow needs an addressable lvalue. Passing a primitive lvalue *argument* to
+  a `ref <primitive>` param takes its address in `buildArgString` (via `genBorrowSource`).
 - Tests: `tests/ref_tests.cpp` (`[ref]`), `e2e/ref_test.gg`.
 
 ### ptr<T> — typed raw pointer
@@ -697,6 +722,21 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**752 test cases / 1455 assertions** (as of primitive-borrow edge-case hardening — passing a
+primitive lvalue to a `ref <primitive>` **parameter** now takes its address in `buildArgString`
+(`genBorrowSource`); passing a **temporary** to such a parameter is rejected (lvalue check in
+`resolveOverload`); `+=`/`++`/`--` **through** a primitive borrow are rejected with a clear message
+(write `r = r + 1`) instead of miscompiling; `genBinary` decays primitive-borrow operands so a
+`ref i32`-returning call used in arithmetic isn't misrouted. Prior baseline was
+**745 test cases / 1445 assertions** (as of store-through-a-returned-reference — `v.at(i) = x`, a
+new `RefStoreExpr` node: the parser builds it when the `=` LHS is not a name/index/member,
+`analyzeRefStore`/`genRefStore` store a value into a primitive-borrow referent; class-reference and
+non-reference targets are rejected. Prior baseline was
+**743 test cases / 1442 assertions** (as of `ref T` borrows of **primitives** — `ref i32` is an
+lvalue reference like C++'s `int&`: `makePrimitiveBorrow` (Reference+borrow+elementKind), reads
+auto-deref / writes store-through / borrow-creation & ref-return take the address via
+`genBorrowSource`; a borrow-returning call is no longer a refcount temp; `Array<i32>::get -> ref T`
+now works. Prior baseline was
 **739 test cases / 1437 assertions** (as of `ref T` non-owning borrows — prefix `ref`/`mut ref`,
 `TypeKind::Reference` + `borrow` flag, synthesized `"ref:Class"`, coercions into a borrow only,
 no refcount traffic, rejected as a field, escape-checked; a shared `ref` is read-only while

@@ -958,20 +958,41 @@ fn shift(mut ref Point p, i32 dx) { p.x = p.x + dx; }   // borrow parameter
 fn sumOf(ref Point p) -> i32 { return p.x + p.y; }      // shared-borrow reader
 ```
 
-A `ref T` is a **non-owning borrow** of a class value — like a `ClassName&` but without any
-ownership. It never touches the refcount (no retain on bind, no release at scope exit, no `+1`
-on return), so it is a zero-cost view. Use it for parameters that only look at / mutate an
-object, and for returning a borrow of something the caller already keeps alive (e.g. an element
-of a container).
+A `ref T` is a **non-owning borrow** — like a `ClassName&` but without any ownership. It never
+touches the refcount (no retain on bind, no release at scope exit, no `+1` on return), so it is a
+zero-cost view. Use it for parameters that only look at / mutate a value, and for returning a
+borrow of something the caller already keeps alive (e.g. an element of a container).
 
-- Both an owning `ClassName&` and a stack value object coerce into a `ref T` automatically.
+`T` may be a **class** (`ref Point`) or a **primitive** (`ref i32`). A `ref i32` is an lvalue
+reference exactly like C++'s `int&`: reading it yields the value (a load through the borrow),
+and writing through a `mut ref` stores into the borrowed location:
+
+```gg
+mut i32 n = 5;
+mut ref i32 r = n;
+r = r + 10;          // reads through r (→ 5), writes through r → n is now 15
+
+class Vec {
+    ptr<i32> data;
+    fn at(i32 i) -> ref i32 { return data[i]; }   // borrow an element, like vector<int>::operator[]
+}
+mut ref i32 e = v.at(0);
+e = 42;              // writes into the buffer through the borrow
+```
+
+- Both an owning `ClassName&` and a stack value object coerce into a `ref` class borrow; a
+  primitive lvalue (a variable or an element `a[i]`) coerces into a `ref` primitive borrow.
 - A borrow **cannot** be converted back into an owning `ClassName&` (it has no ownership to give).
-- A `ref` **cannot be a class field** — a field must own (`ClassName&`) or embed (a value); a
-  borrow field would have nothing keeping its target alive.
+- A `ref` **cannot be a class field** — a field must own (`ClassName&`) or embed (a value).
+- A primitive borrow must bind an **addressable** value — `ref i32 x = a + b;` (a temporary) is a
+  compile error.
 - Returning a borrow is allowed, but passing a **stack value object** to a `ref` parameter that
   returns or stores it is a compile error (the borrow would outlive the value) — pass a heap
   `ClassName&` in that case. This is enforced by escape analysis.
-- `ref` borrows only a **class**; there is no `ref` of a primitive.
+- `ptr` and `void` cannot be borrowed.
+- You can assign directly to a returned primitive borrow — `v.at(i) = x;` stores through it, just
+  like C++'s `vector<int>::operator[]`. (Storing a whole object through a returned class reference
+  is not yet supported.)
 
 ### Raw pointers (`ptr` / `ptr<T>`)
 ```gg

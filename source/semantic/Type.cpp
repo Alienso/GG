@@ -79,8 +79,19 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     // borrow of the same class may all be borrowed into it (address-of, no retain/release). The
     // reverse — widening a borrow to an owning `Class&` — is NOT allowed (it doesn't own the target),
     // and falls through to None below.
-    if (t == TypeKind::Reference && to.borrow && from.className == to.className
+    if (t == TypeKind::Reference && to.borrow && !to.className.empty() && from.className == to.className
         && (f == TypeKind::Reference || f == TypeKind::Object))
+        return CastResult::Silent;
+
+    // Borrow of a PRIMITIVE (`ref i32`, an lvalue reference like C++'s `int&`):
+    //   • into it — a primitive lvalue of the same kind may be borrowed (address-of; the binding
+    //     site separately checks the source is addressable, since a temporary has no address);
+    //   • out of it — `ref P` used where `P` is expected is a load (lvalue-to-rvalue deref), so
+    //     `i32 y = arr.get(i)` and arithmetic on a borrowed element work transparently.
+    if (t == TypeKind::Reference && to.borrow && to.className.empty() && f == to.elementKind)
+        return CastResult::Silent;
+    if (f == TypeKind::Reference && from.borrow && from.className.empty()
+        && !to.borrow && from.elementKind == t)
         return CastResult::Silent;
 
     // Heap reference → value of the same class: permitted. In an assignment or
@@ -232,7 +243,9 @@ std::string typeName(const Type& t) {
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
         case TypeKind::Enum:   return t.className;
-        case TypeKind::Reference: return t.borrow ? "ref " + t.className : "Ref<" + t.className + ">";
+        case TypeKind::Reference:
+            if (t.borrow) return "ref " + (t.className.empty() ? typeName(Type{t.elementKind}) : t.className);
+            return "Ref<" + t.className + ">";
         case TypeKind::TypedPtr: {
             Type elem = typedPtrElement(t);
             return "ptr<" + typeName(elem) + ">";
@@ -305,9 +318,15 @@ TypeKind typeKindFromName(const std::string& name) {
 Type decodeSynthesizedType(const Token& tok) {
     const std::string& s = tok.lexeme;
 
-    // Borrow: "ref:Class" — a non-owning reference (`ref Class`).
-    if (s.size() > 4 && s.compare(0, 4, "ref:") == 0)
-        return makeBorrowType(s.substr(4));
+    // Borrow: "ref:T" — a non-owning reference (`ref T`). A primitive inner (`ref i32`) is an
+    // lvalue reference to that primitive; anything else is a class borrow.
+    if (s.size() > 4 && s.compare(0, 4, "ref:") == 0) {
+        std::string inner = s.substr(4);
+        TypeKind prim = typeKindFromName(inner);
+        if (prim != TypeKind::Error && prim != TypeKind::Ptr)
+            return makePrimitiveBorrow(prim);
+        return makeBorrowType(inner);
+    }
 
     // Reference: "Class&"
     if (!s.empty() && s.back() == '&')

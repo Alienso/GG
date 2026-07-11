@@ -245,6 +245,11 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
         && from.className == to.className)
         return value;
 
+    // A `ref <primitive>` used where its primitive value is expected: load through the borrow
+    // (lvalue-to-rvalue). `value` is the referent pointer.
+    if (isPrimitiveBorrow(from) && !to.borrow && from.elementKind == to.kind)
+        return emitLoad(irTypeName(to), value);
+
     // If both types map to the same LLVM IR type (e.g. string ↔ ptr, i32 ↔ u32,
     // char ↔ u32) no cast instruction is needed — bits are already identical.
     if (irTypeName(from) == irTypeName(to)) return value;

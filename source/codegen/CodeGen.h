@@ -264,8 +264,15 @@ private:
     // (allocaMap), a static field global, or an implicit-`this` instance field GEP.
     // Returns false when the name is none of these.
     bool resolveAssignTarget(const std::string& name, std::string& ptrOut, Type& typeOut);
+    // Produce a `ptr` to the referent of a borrow source: for a primitive-borrow identifier the
+    // stored pointer (load the alloca — the referent), for a plain lvalue (variable / element /
+    // field) its address, for an expression already typed as a borrow the pointer itself. Used to
+    // create a `ref <primitive>` binding, write through one, and return one. Returns "" if the
+    // operand is not addressable (a temporary).
+    std::string genBorrowSource(const Expr& source);
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
+    std::string genRefStore(const RefStoreExpr& refStore);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
     // If `init` is a call to a return-slot (sret) function/method, emit it writing the result
     // directly into `slotPtr` (no copy) and return true; otherwise return false (no emission).

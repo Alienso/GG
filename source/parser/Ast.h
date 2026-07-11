@@ -109,6 +109,16 @@ struct MethodCallExpr {
     std::vector<std::unique_ptr<Expr>> args;
 };
 
+// Store through a reference-valued expression: `<target> = <value>` where `target` is not a plain
+// name/index/member but an expression that evaluates to a reference/borrow (e.g. a call returning
+// `ref T` — `v.at(i) = x`). The value is stored into the referent. `op` is the '=' token (for
+// diagnostics / line info).
+struct RefStoreExpr {
+    std::unique_ptr<Expr> target;
+    Token                 op;
+    std::unique_ptr<Expr> value;
+};
+
 struct CastExpr {
     std::unique_ptr<Expr> operand;
     Token                 targetType;   // type keyword token (i32, f32, ptr, …)
@@ -167,6 +177,7 @@ struct Expr {
         MemberAccessExpr,
         MemberAssignExpr,
         MethodCallExpr,
+        RefStoreExpr,
         CastExpr,
         NewExpr,
         SizeofExpr,

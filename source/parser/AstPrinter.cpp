@@ -140,6 +140,14 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const RefStoreExpr& rs) {
+            out("RefStore (store through reference)");
+            indent++;
+            printExpr(*rs.target);
+            printExpr(*rs.value);
+            indent--;
+        },
+
         [&](const CastExpr& castExpr) {
             out("Cast as '" + castExpr.targetType.lexeme + "'");
             indent++;

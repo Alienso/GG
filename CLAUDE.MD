@@ -616,6 +616,32 @@ lvalue reference like C++'s `int&`) — but not `ptr`/`void`.
   a `ref <primitive>` param takes its address in `buildArgString` (via `genBorrowSource`).
 - Tests: `tests/ref_tests.cpp` (`[ref]`), `e2e/ref_test.gg`.
 
+### Brace construction — `Type{args}` (C++-style)
+Braces are an **alternate delimiter for a positional constructor call** — `Point{1, 2}` ≡
+`Point(1, 2)`, same overload resolution. No aggregate/field-fill, no named fields. Two forms:
+- **Typed** `Point{args}` (and `Point p{args}`, `new Point{args}`): the parser emits an ordinary
+  constructor `CallExpr`/`NewExpr` — **zero new semantic/codegen**. Handled in the var-decl path
+  (`(`/`{` both accepted), `parsePrimary` (a class-name identifier followed by `{`), and the `new`
+  parser.
+- **Untyped** `{args}` — the type is **deduced from the expected type** at the use site (a
+  constructor argument, a var initializer, or a return): the type-elided inner form, e.g. `{0,0}`
+  in `Line l{ {0,0}, {1,1} }`. A new `BraceInitExpr{args, brace}` AST node (parsed by `parsePrimary`
+  on a leading `{`). `analyzeBraceInit` reads `expectedType_` → the class, resolves its constructor
+  overload (like a `Class(args)` call), records the class in `SemanticResult::braceInitClass`
+  (+ `resolvedCallee` for the overload). `resolveOverload` injects the per-arg expected type for a
+  brace-init argument, but only when the **enclosing call** is unambiguous (a single candidate) — an
+  untyped `{...}` argument to an *overloaded* function/method can't know which param type to deduce
+  from, so it requires an explicit `Type{...}`. (The deduced class's *own* constructor may be freely
+  overloaded — that's resolved normally once the class is known.)
+  `genBraceInit` materializes a temp value object + runs the ctor + returns its address (same as the
+  constructor-rvalue path in `genCall`), so it borrows into a `Class&` param / initializes a value.
+- **Enums** are not brace-constructable (`Color{...}` rejected, like `Color(...)`). Untyped `{...}`
+  with no class context (a primitive/enum expected type, or none) → clear error.
+- **Default-construct with no constructor**: `C c{}` / `C c()` on a class with no ctor zero-initializes
+  (like `C c;`) — the var-decl object-init path guards the ctor call on `funcParamTypes` containing it
+  (previously it emitted a call to a non-existent `@C_C`). Fixed with the brace work.
+- Tests: `tests/brace_init_tests.cpp` (`[brace]`), `e2e/brace_init_test.gg`.
+
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
   lower to LLVM `ptr`. Intended for stdlib/CRT container internals. **No bounds check.**
@@ -722,6 +748,13 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**767 test cases / 1486 assertions** (as of C++-style brace construction — `Type{args}` is an
+alternate delimiter for a positional constructor call; typed `Point{...}`/`new Point{...}` reuse the
+constructor CallExpr/NewExpr path, untyped `{...}` is a new `BraceInitExpr` whose class is deduced
+from the expected type (constructor arg / var init / return), resolved via `resolveOverload`'s
+per-arg expected-type injection (unambiguous enclosing call only); enums non-constructable; a
+no-ctor `C c{}`/`C c()` zero-inits instead of calling a missing ctor; `tests/brace_init_tests.cpp`
+`[brace]`, `e2e/brace_init_test.gg`). Prior baseline was
 **752 test cases / 1455 assertions** (as of primitive-borrow edge-case hardening — passing a
 primitive lvalue to a `ref <primitive>` **parameter** now takes its address in `buildArgString`
 (`genBorrowSource`); passing a **temporary** to such a parameter is rejected (lvalue check in

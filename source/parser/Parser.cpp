@@ -1533,15 +1533,19 @@ Expr Parser::parseExpression() {
         std::unique_ptr<Expr> initializer = nullptr;
         if (match({ TokenType::EQUAL })) {
             initializer = box(parseExpression());
-        } else if (check(TokenType::LEFT_PAREN)
+        } else if ((check(TokenType::LEFT_PAREN) || check(TokenType::LEFT_BRACE))
                    && classNames.count(typeName.lexeme) > 0) {
-            // Constructor call syntax: ClassName varName(args)
-            advance();  // consume '('
+            // Constructor call syntax: ClassName varName(args)  or  ClassName varName{args}.
+            // Braces are an alternate delimiter for the same positional constructor call.
+            bool      brace = check(TokenType::LEFT_BRACE);
+            TokenType close = brace ? TokenType::RIGHT_BRACE : TokenType::RIGHT_PAREN;
+            advance();  // consume '(' or '{'
             std::vector<std::unique_ptr<Expr>> args;
-            if (!check(TokenType::RIGHT_PAREN)) {
+            if (!check(close)) {
                 do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
             }
-            consume(TokenType::RIGHT_PAREN, "expected ')' after constructor arguments");
+            consume(close, brace ? "expected '}' after constructor arguments"
+                                 : "expected ')' after constructor arguments");
             // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
             initializer = box(makeExpr(CallExpr{ typeName, std::move(args) }));
         }
@@ -1804,12 +1808,17 @@ Expr Parser::parsePrimary() {
             throw error(rawName, "expected class name after 'new'");
         }
         Token className = Token{ TokenType::IDENTIFIER, clsLex, rawName.line };  // construct, not assign
-        consume(TokenType::LEFT_PAREN, "expected '(' after class name in 'new' expression");
+        // `new Point(args)` or `new Point{args}` — braces are an alternate delimiter.
+        bool      brace = check(TokenType::LEFT_BRACE);
+        if (!brace) consume(TokenType::LEFT_PAREN, "expected '(' or '{' after class name in 'new' expression");
+        else        advance();  // consume '{'
+        TokenType close = brace ? TokenType::RIGHT_BRACE : TokenType::RIGHT_PAREN;
         std::vector<std::unique_ptr<Expr>> args;
-        if (!check(TokenType::RIGHT_PAREN)) {
+        if (!check(close)) {
             do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
         }
-        consume(TokenType::RIGHT_PAREN, "expected ')' after constructor arguments");
+        consume(close, brace ? "expected '}' after constructor arguments"
+                             : "expected ')' after constructor arguments");
         return makeExpr(NewExpr{ keyword, className, std::move(args) });
     }
 
@@ -1851,6 +1860,20 @@ Expr Parser::parsePrimary() {
             }
             consume(TokenType::RIGHT_PAREN, "expected ')' after arguments");
             return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line }, std::move(genArgs) });
+        }
+
+        // Constructor call via braces: ClassName{ args } — an alternate delimiter for
+        // ClassName(args). Gated on a known class name (a bare `x {` is otherwise not an
+        // expression form in GG).
+        if (check(TokenType::LEFT_BRACE)
+            && (classNames.count(name.lexeme) || gen_->classNames.count(name.lexeme))) {
+            advance();  // consume '{'
+            std::vector<std::unique_ptr<Expr>> args;
+            if (!check(TokenType::RIGHT_BRACE)) {
+                do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+            }
+            consume(TokenType::RIGHT_BRACE, "expected '}' after constructor arguments");
+            return makeExpr(CallExpr{ name, std::move(args) });
         }
 
         // Function call: IDENTIFIER ( args )
@@ -1937,6 +1960,19 @@ Expr Parser::parsePrimary() {
         Expr inner = parseExpression();
         consume(TokenType::RIGHT_PAREN, "expected ')' after expression");
         return inner;
+    }
+
+    // Untyped brace initializer `{ args }` — the class is deduced from the expected type at the use
+    // site (e.g. the inner `{0,0}` in `Line l{ {0,0}, {1,1} }`). Typed `Point{args}` is handled
+    // above as a constructor call.
+    if (check(TokenType::LEFT_BRACE)) {
+        Token brace = advance();  // consume '{'
+        std::vector<std::unique_ptr<Expr>> args;
+        if (!check(TokenType::RIGHT_BRACE)) {
+            do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
+        }
+        consume(TokenType::RIGHT_BRACE, "expected '}' after brace-initializer arguments");
+        return makeExpr(BraceInitExpr{ std::move(args), brace });
     }
 
     // A bare type keyword (i32, f64, ptr, …) where a value is expected means a type name has

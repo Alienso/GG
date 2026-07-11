@@ -115,6 +115,10 @@ struct SemanticResult {
     // `obj(args)` callable-object invocations: CallExpr node → the callee's class name. Codegen
     // emits `@Class_call(recv, args)` with the callee variable as the receiver.
     std::unordered_map<const void*, std::string> callableCalls;
+    // Untyped brace initializer (`{...}`) → the class deduced from the expected type. Codegen
+    // constructs that class (like a `Class{...}` constructor rvalue). The chosen ctor overload,
+    // if any, is in resolvedCallee under the same node.
+    std::unordered_map<const void*, std::string> braceInitClass;
 };
 
 class SemanticAnalyzer {
@@ -158,6 +162,8 @@ private:
     std::unordered_set<const void*> structuralValueCmp_;
     // `obj(args)` callable-object invocation nodes → class name (copied to SemanticResult).
     std::unordered_map<const void*, std::string> callableCalls_;
+    // Untyped brace-init nodes → deduced class name (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> braceInitClass_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
@@ -313,6 +319,7 @@ private:
     [[nodiscard]] Type analyzeMemberAccess(const MemberAccessExpr& memberAccess);
     [[nodiscard]] Type analyzeMemberAssign(const MemberAssignExpr& memberAssign);
     [[nodiscard]] Type analyzeRefStore(const RefStoreExpr& refStore);
+    [[nodiscard]] Type analyzeBraceInit(const BraceInitExpr& braceInit);
     [[nodiscard]] Type analyzeMethodCall(const MethodCallExpr& methodCall);
     [[nodiscard]] Type analyzeCast(const CastExpr& castExpr);
     [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);

@@ -109,6 +109,15 @@ struct MethodCallExpr {
     std::vector<std::unique_ptr<Expr>> args;
 };
 
+// An untyped brace initializer `{ args }` whose class is deduced from the expected type at the use
+// site (a constructor argument, a var initializer, or a return). `Point{args}` (typed) is parsed
+// as an ordinary constructor CallExpr instead — this node is only the type-elided form, e.g. the
+// inner `{0,0}` in `Line l{ {0,0}, {1,1} }`.
+struct BraceInitExpr {
+    std::vector<std::unique_ptr<Expr>> args;
+    Token                              brace;   // the '{' token, for diagnostics
+};
+
 // Store through a reference-valued expression: `<target> = <value>` where `target` is not a plain
 // name/index/member but an expression that evaluates to a reference/borrow (e.g. a call returning
 // `ref T` — `v.at(i) = x`). The value is stored into the referent. `op` is the '=' token (for
@@ -178,6 +187,7 @@ struct Expr {
         MemberAssignExpr,
         MethodCallExpr,
         RefStoreExpr,
+        BraceInitExpr,
         CastExpr,
         NewExpr,
         SizeofExpr,

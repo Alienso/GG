@@ -67,7 +67,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
                           std::move(structuralValueCmp_), std::move(eqImpls),
-                          std::move(callableCalls_) };
+                          std::move(callableCalls_), std::move(braceInitClass_) };
 }
 
 // ============================================================

@@ -56,6 +56,7 @@ static int exprLine(const Expr& e) {
     if (auto* p = std::get_if<MemberAssignExpr>(&v))  return p->object ? exprLine(*p->object) : p->field.line;
     if (auto* p = std::get_if<MethodCallExpr>(&v))    return p->object ? exprLine(*p->object) : p->method.line;
     if (auto* p = std::get_if<RefStoreExpr>(&v))      return p->target ? exprLine(*p->target) : p->op.line;
+    if (auto* p = std::get_if<BraceInitExpr>(&v))     return p->brace.line;
     if (auto* p = std::get_if<CastExpr>(&v))          return p->operand ? exprLine(*p->operand) : p->targetType.line;
     if (auto* p = std::get_if<NewExpr>(&v))           return p->keyword.line;
     if (auto* p = std::get_if<SizeofExpr>(&v))        return p->keyword.line;

@@ -89,6 +89,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess); },
         [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
         [&](const RefStoreExpr& refStore)            -> std::string { return genRefStore(refStore); },
+        [&](const BraceInitExpr& braceInit)          -> std::string { return genBraceInit(braceInit); },
         [&](const MethodCallExpr& methodCall)        -> std::string { return genMethodCall(methodCall, resolvedType); },
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
@@ -520,6 +521,30 @@ bool CodeGen::resolveAssignTarget(const std::string& name, std::string& ptrOut, 
     std::string gep = genImplicitFieldPtr(name, ft);
     if (!gep.empty()) { typeOut = ft; ptrOut = gep; return true; }
     return false;
+}
+
+std::string CodeGen::genBraceInit(const BraceInitExpr& braceInit) {
+    // Untyped `{args}` — the class was deduced by semantics. Construct it as a temp value object
+    // (like a `Class{args}` constructor rvalue) and return its address, so it borrows correctly
+    // into a `Class&` parameter / value initializer.
+    if (!braceInitClass_) return "0";
+    auto it = braceInitClass_->find(&braceInit);
+    if (it == braceInitClass_->end()) return "0";
+    const std::string& cn = it->second;
+
+    std::string tmp = freshAllocaName("objtmp");
+    emitAlloca(tmp, "%" + cn);
+    emit("store %" + cn + " zeroinitializer, ptr " + tmp);
+    auto cgIt = cgClasses_.find(cn);
+    if (cgIt != cgClasses_.end() && cgIt->second.needsDtor && !dtorScopes_.empty())
+        dtorScopes_.back().push_back({ tmp, cn, /*isReference=*/false });
+    std::string mangledCtor = calleeName(&braceInit, cn + "_" + cn);
+    auto ctorIt = funcParamTypes.find(mangledCtor);
+    if (ctorIt != funcParamTypes.end()) {
+        std::string argStr = buildArgString(braceInit.args, &ctorIt->second, defaultsFor(mangledCtor));
+        emit("call void @" + mangledCtor + "(ptr " + tmp + (argStr.empty() ? "" : ", " + argStr) + ")");
+    }
+    return tmp;
 }
 
 std::string CodeGen::genRefStore(const RefStoreExpr& rs) {
@@ -1046,11 +1071,13 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
                 const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
                 std::string mangledCtor = calleeName(&ctorCall, className + "_" + className);
                 auto funcIt = funcParamTypes.find(mangledCtor);
-                const std::vector<Type>* ctorParams =
-                    funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
-                std::string argStr = buildArgString(ctorCall.args, ctorParams, defaultsFor(mangledCtor));
-                emit("call void @" + mangledCtor + "(ptr " + ptrName
-                     + (argStr.empty() ? "" : ", " + argStr) + ")");
+                // No constructor exists (e.g. `C c{}` / `C c()` on a class with no ctor): the
+                // storage is already zero-initialized above, so default-construction is a no-op.
+                if (funcIt != funcParamTypes.end()) {
+                    std::string argStr = buildArgString(ctorCall.args, &funcIt->second, defaultsFor(mangledCtor));
+                    emit("call void @" + mangledCtor + "(ptr " + ptrName
+                         + (argStr.empty() ? "" : ", " + argStr) + ")");
+                }
             } else {
                 // Copy initialisation: Point p = <value/ref of same class> — deep copy.
                 std::string src = genExpr(*varDecl.initializer);

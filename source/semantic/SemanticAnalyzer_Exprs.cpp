@@ -38,6 +38,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const MemberAssignExpr& ma)               { return analyzeMemberAssign(ma); },
         [&](const MethodCallExpr& mc)                 { return analyzeMethodCall(mc); },
         [&](const RefStoreExpr& refStore)             { return analyzeRefStore(refStore); },
+        [&](const BraceInitExpr& braceInit)           { return analyzeBraceInit(braceInit); },
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
@@ -110,11 +111,20 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
     std::vector<Type> argTypes;
     argTypes.reserve(args.size());
     bool anyArgError = false;
-    for (const auto& a : args) {
-        Type t = analyzeExpr(*a);
+    for (size_t k = 0; k < args.size(); ++k) {
+        // An untyped brace-init argument (`{...}`) deduces its class from the parameter type.
+        // Supported when the callee is unambiguous at this position (a single candidate); with
+        // overloads the type must be spelled out (analyzeBraceInit reports that).
+        if (args[k]->node && std::holds_alternative<BraceInitExpr>(*args[k]->node)
+            && cands.size() == 1 && k < cands[0].params->size())
+            expectedType_ = (*cands[0].params)[k];
+        else
+            expectedType_ = std::nullopt;
+        Type t = analyzeExpr(*args[k]);
         if (isError(t)) anyArgError = true;
         argTypes.push_back(t);
     }
+    expectedType_ = std::nullopt;
     if (anyArgError) return -1;   // a bad argument already reported an error; avoid cascades
 
     struct Viable { int idx; int cost; };
@@ -1660,6 +1670,54 @@ Type SemanticAnalyzer::analyzeRefStore(const RefStoreExpr& refStore) {
           + "') is not yet supported; assign the object's fields individually instead");
     analyzeExpr(*refStore.value);
     return Type{TypeKind::Error};
+}
+
+// ============================================================
+// Untyped brace initializer: `{ args }` — class deduced from the expected type
+// ============================================================
+
+Type SemanticAnalyzer::analyzeBraceInit(const BraceInitExpr& braceInit) {
+    auto fail = [&](const std::string& msg) {
+        error(braceInit.brace, msg);
+        for (const auto& a : braceInit.args) analyzeExpr(*a);
+        return Type{TypeKind::Error};
+    };
+
+    // The class comes from the expected type at the use site (a constructor argument, a var
+    // initializer, or a return). A borrow/reference/value of a class all name the same class.
+    std::optional<Type> expected = expectedType_;
+    if (expected && expected->kind == TypeKind::Enum)
+        return fail("cannot construct enum '" + expected->className + "' with `{...}`; enums are "
+                    "created only through their variants");
+    if (!expected || expected->className.empty()
+        || (expected->kind != TypeKind::Object && expected->kind != TypeKind::Reference))
+        return fail("cannot infer the type of `{...}` here; name the class explicitly, e.g. `Point{...}`");
+
+    const std::string cls = expected->className;
+    if (enumRegistry.count(cls))
+        return fail("cannot construct enum '" + cls + "' with `{...}`");
+    auto clsIt = classRegistry.find(cls);
+    if (clsIt == classRegistry.end())
+        return fail("unknown class '" + cls + "' for brace initializer");
+
+    braceInitClass_[&braceInit] = cls;
+
+    // Resolve the constructor overload exactly like a `Class(args)` call.
+    auto ctorIt = clsIt->second.methods.find(cls);
+    if (ctorIt == clsIt->second.methods.end() || ctorIt->second.empty()) {
+        if (!braceInit.args.empty())
+            return fail("class '" + cls + "' has no constructor but `{...}` has arguments");
+        return makeObjectType(cls);
+    }
+    const std::vector<ClassInfo::Method>& set = ctorIt->second;
+    std::vector<OverloadCand> cands;
+    for (const auto& m : set)
+        cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
+    expectedType_ = std::nullopt;   // the class was consumed; don't leak it into ctor args
+    int idx = resolveOverload(braceInit.brace, "constructor '" + cls + "'", cands, braceInit.args);
+    if (idx >= 0 && set.size() > 1)
+        resolvedCallee[&braceInit] = mangleOverload(cls + "_" + cls, set[idx].paramTypes, set[idx].returnType);
+    return makeObjectType(cls);
 }
 
 // ============================================================

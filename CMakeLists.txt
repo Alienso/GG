@@ -121,6 +121,7 @@ add_executable(GG_tests
         tests/debug_tests.cpp
         tests/escape_tests.cpp
         tests/ref_tests.cpp
+        tests/brace_init_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

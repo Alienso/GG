@@ -23,6 +23,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const MemberAssignExpr& ma)            const { return exprFirstToken(*ma.object); }
         const Token& operator()(const MethodCallExpr& mc)              const { return exprFirstToken(*mc.object); }
         const Token& operator()(const RefStoreExpr& rs)                const { return exprFirstToken(*rs.target); }
+        const Token& operator()(const BraceInitExpr& bi)               const { return bi.brace; }
         const Token& operator()(const CastExpr& castExpr)              const { return exprFirstToken(*castExpr.operand); }
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }

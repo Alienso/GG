@@ -1,0 +1,36 @@
+// End-to-end coverage for C++-style brace construction `Type{args}`.
+// Returns 0 on success; each failed check shifts the exit code so a failure is visible.
+
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+class Line  { mut Point start; mut Point end; Line(Point& a, Point& b) { start = a; end = b; } }
+
+fn sumPoint(Point& p) -> i32 { return p.x + p.y; }
+
+fn main() -> i32 {
+    mut i32 errors = 0;
+
+    // 1. typed value-object local
+    Point a{3, 4};
+    if (a.x + a.y != 7) { errors = errors + 1; }
+
+    // 2. typed heap construction
+    Point& h = new Point{10, 20};
+    if (h.x + h.y != 30) { errors = errors + 10; }
+
+    // 3. typed brace as an argument
+    if (sumPoint(Point{1, 6}) != 7) { errors = errors + 100; }
+
+    // 4. untyped brace argument (deduced from the parameter type)
+    if (sumPoint({2, 5}) != 7) { errors = errors + 1000; }
+
+    // 5. untyped nested braces (deduced from the constructor's parameter types)
+    Line l{ {1, 2}, {10, 20} };
+    if (l.start.x != 1) { errors = errors + 10000; }
+    if (l.end.y != 20) { errors = errors + 100000; }
+
+    // 6. untyped brace in a var initializer (deduced from the declared type)
+    Point p = {8, 9};
+    if (p.x + p.y != 17) { errors = errors + 1000000; }
+
+    return errors;
+}

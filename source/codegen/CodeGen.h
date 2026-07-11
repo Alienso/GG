@@ -111,6 +111,8 @@ private:
     const std::unordered_set<std::string>* eqImplementors_ = nullptr;
     // `obj(args)` callable-object invocations: CallExpr node → class name; emit `@Class_call(recv,…)`.
     const std::unordered_map<const void*, std::string>* callableCalls_ = nullptr;
+    // Untyped brace-init nodes → deduced class name; genBraceInit constructs that class.
+    const std::unordered_map<const void*, std::string>* braceInitClass_ = nullptr;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
     // overloaded, otherwise `plainBase`.
     std::string calleeName(const void* node, const std::string& plainBase) const;
@@ -273,6 +275,7 @@ private:
     std::string genMemberAccess(const MemberAccessExpr& memberAccess);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genRefStore(const RefStoreExpr& refStore);
+    std::string genBraceInit(const BraceInitExpr& braceInit);
     std::string genMethodCall(const MethodCallExpr& methodCall, const Type& resolvedType);
     // If `init` is a call to a return-slot (sret) function/method, emit it writing the result
     // directly into `slotPtr` (no copy) and return true; otherwise return false (no emission).

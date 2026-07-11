@@ -117,12 +117,14 @@ Point p;
 
 // Object — stack-allocated, constructor called
 Point p(1.0, 2.0);
+Point p{1.0, 2.0};       // braces: an alternate delimiter for the same constructor call
 
 // Object — initialised from another value (deep copy via clone helper)
 Point q = p;
 
 // Heap reference — `new` allocates and runs the constructor
 Point& r = new Point(1.0, 2.0);
+Point& r = new Point{1.0, 2.0};   // braces work here too
 
 // Fixed-size array — stack-allocated, zero-initialised
 i32[8] arr;
@@ -654,6 +656,7 @@ Point zero;
 
 // Stack value — constructor called
 Point p(3.0, 4.0);
+Point q{3.0, 4.0};        // brace form — identical to the line above
 
 // Field access (read / write)
 f32 len = p.x * p.x + p.y * p.y;
@@ -688,6 +691,25 @@ Point& heap = new Point(p);   // heap is an independent heap copy of p
 // Heap member access
 r.x = 99.0;     // mutates the heap object through a reference
 ```
+
+### Brace construction (`Type{args}`)
+Braces are an alternate delimiter for a **positional constructor call** — `Point{1, 2}` is exactly
+`Point(1, 2)` (same overload resolution). They work for stack values, `new`, and constructor
+arguments:
+```gg
+Point p{1, 2};                     // ≡ Point p(1, 2)
+Point& r = new Point{1, 2};        // ≡ new Point(1, 2)
+f32 d = dist(Point{0, 0});         // as an argument
+```
+For nested construction, the inner type can be **omitted** — it is deduced from the constructor's
+parameter type (like C++'s `Line l{ {0,0}, {1,1} }`):
+```gg
+class Line { Point start; Point end; Line(Point& a, Point& b) { start = a; end = b; } }
+Line l{ {1, 2}, {10, 20} };        // each {…} builds a Point (deduced from the parameter type)
+Point p = {7, 8};                  // untyped braces also deduce from the declared/return type
+```
+This is *not* field-fill: it always runs a constructor, positional only (no named fields), and the
+type must be inferable (untyped `{…}` with no class context, or a brace on an enum, is an error).
 
 ### Access control
 - Members are **public by default** — accessible from anywhere.

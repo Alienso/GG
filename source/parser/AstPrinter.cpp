@@ -148,6 +148,14 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const BraceInitExpr& bi) {
+            out("BraceInit (type deduced from context)");
+            indent++;
+            for (const auto& a : bi.args) printExpr(*a);
+            if (bi.args.empty()) out("(no args)");
+            indent--;
+        },
+
         [&](const CastExpr& castExpr) {
             out("Cast as '" + castExpr.targetType.lexeme + "'");
             indent++;

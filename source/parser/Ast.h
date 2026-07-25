@@ -66,6 +66,10 @@ struct PostfixExpr {
 struct CallExpr {
     Token callee;
     std::vector<std::unique_ptr<Expr>> args;
+    // Parallel to `args`: the parameter name for a named argument (`f(x: 1)`), or an empty-lexeme
+    // token for a positional one. Empty vector ⇒ all positional (the common case). Named args must
+    // follow positional ones. Reordered to parameter order in the semantic pass.
+    std::vector<Token> argNames;
 };
 
 struct VarDeclExpr {
@@ -107,6 +111,7 @@ struct MethodCallExpr {
     std::unique_ptr<Expr>              object;
     Token                              method;
     std::vector<std::unique_ptr<Expr>> args;
+    std::vector<Token>                 argNames;   // parallel to args; see CallExpr::argNames
 };
 
 // An untyped brace initializer `{ args }` whose class is deduced from the expected type at the use
@@ -140,6 +145,7 @@ struct NewExpr {
     Token                              keyword;    // the 'new' token
     Token                              className;  // class being allocated
     std::vector<std::unique_ptr<Expr>> args;       // constructor arguments
+    std::vector<Token>                 argNames;   // parallel to args; see CallExpr::argNames
 };
 
 // `sizeof(T)` — the size in bytes of a type. Evaluates to u64.
@@ -273,6 +279,12 @@ struct FunctionDeclStmt {
     // `returnType` holds the object type and `returnSlotName` the slot binding name.
     bool        hasReturnSlot = false;
     std::string returnSlotName;
+    // `fn private name(...)` — public by default. A private free function is file-local:
+    // calling it from a different source file is a warning (not an error), like a private
+    // field accessed outside its class. `sourceFile` is the canonical path of the declaring
+    // file, used to detect the cross-file boundary during analysis.
+    bool        isPublic = true;
+    std::string sourceFile;
 };
 
 struct ExternFuncDeclStmt {

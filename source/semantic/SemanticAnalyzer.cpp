@@ -7,13 +7,33 @@
 #include <functional>
 
 namespace {
-    // Count trailing parameters that carry a default value. The parser guarantees defaults form a
-    // contiguous trailing run, so this equals the number of arguments that may be omitted at a call.
+    // Length of the trailing run of defaulted parameters — the number of arguments a purely
+    // POSITIONAL call may omit (positional binding is left-to-right, so only a trailing run of
+    // defaults is droppable). Defaults may now sit anywhere; a named call can skip a defaulted
+    // middle param, but a positional one still can't. Used for the friendly arity message and the
+    // legacy numDefaults field.
     template <typename Params>
     size_t countTrailingDefaults(const Params& params) {
         size_t n = 0;
-        for (const ParamDecl& p : params) if (p.defaultValue) ++n;
+        for (auto it = params.rbegin(); it != params.rend(); ++it) {
+            if (it->defaultValue) ++n;
+            else break;
+        }
         return n;
+    }
+    // Parameter names, in declaration order (for named-argument matching).
+    template <typename Params>
+    std::vector<std::string> paramNamesOf(const Params& params) {
+        std::vector<std::string> names;
+        for (const ParamDecl& p : params) names.push_back(p.name.lexeme);
+        return names;
+    }
+    // Per-parameter "has a default value" flags, in declaration order.
+    template <typename Params>
+    std::vector<bool> paramHasDefaultOf(const Params& params) {
+        std::vector<bool> flags;
+        for (const ParamDecl& p : params) flags.push_back(p.defaultValue != nullptr);
+        return flags;
     }
 }
 
@@ -41,6 +61,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     currentSelfType_ = "";
     currentReturnSlotName_ = "";
     resolvedCallee.clear();
+    callArgOrder_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
 
@@ -67,7 +88,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
                           std::move(structuralValueCmp_), std::move(eqImpls),
-                          std::move(callableCalls_), std::move(braceInitClass_) };
+                          std::move(callableCalls_), std::move(braceInitClass_),
+                          std::move(callArgOrder_) };
 }
 
 // ============================================================
@@ -198,6 +220,8 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, returnType,
                                         std::move(paramTypes), std::move(paramMut),
                                         countTrailingDefaults(md.params), md.name});
+        set.back().paramNames = paramNamesOf(md.params);
+        set.back().paramHasDefault = paramHasDefaultOf(md.params);
         bool te = false;
         computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
                             set.back().paramEscapes, te);
@@ -390,6 +414,8 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
             set.push_back(ClassInfo::Method{md.isPublic, md.isStatic, md.isMut, ret,
                                             std::move(paramTypes), std::move(paramMut),
                                             countTrailingDefaults(md.params), md.name});
+            set.back().paramNames = paramNamesOf(md.params);
+            set.back().paramHasDefault = paramHasDefaultOf(md.params);
             bool te = false;
             computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
                                 set.back().paramEscapes, te);
@@ -586,6 +612,10 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                     set.push_back(FunctionOverload{returnType, paramTypes, paramMut,
                                                    countTrailingDefaults(function.params),
                                                    /*isExtern=*/false, function.name});
+                    set.back().isPublic   = function.isPublic;
+                    set.back().sourceFile = function.sourceFile;
+                    set.back().paramNames = paramNamesOf(function.params);
+                    set.back().paramHasDefault = paramHasDefaultOf(function.params);
                     bool te = false;
                     static const std::unordered_set<std::string> noFields;
                     computeParamEscapes(function.params, function.body, /*computeThis=*/false,

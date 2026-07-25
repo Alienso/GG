@@ -321,8 +321,10 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     int                 savedLoopDepth  = loopDepth;
     std::string         savedSlot       = currentReturnSlotName_;
     bool                savedAliasRef   = currentReturnAliasIsRef_;
+    std::string         savedFile       = currentFile_;
     currentReturnType = resolveTypeToken(functionDecl.returnType);
     loopDepth         = 0;  // loops in the outer scope do not extend into this function
+    currentFile_      = functionDecl.sourceFile;  // for the cross-file private-call warning
 
     // Gate raw pointer types behind --unsafe-ptr.
     checkRawPtrAllowed(functionDecl.returnType, functionDecl.name);
@@ -378,6 +380,7 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     loopDepth                = savedLoopDepth;
     currentReturnSlotName_   = savedSlot;
     currentReturnAliasIsRef_ = savedAliasRef;
+    currentFile_             = savedFile;
 }
 
 void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl) {

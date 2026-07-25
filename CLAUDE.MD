@@ -79,13 +79,15 @@ m.emplace("key", Token{...});                // emplace avoids assignment
 The AST stores types as single `Token` objects. The parser synthesizes special tokens
 for compound types that don't map to a single keyword:
 
-| Lexeme              | Meaning                                   |
-|---------------------|-------------------------------------------|
-| `"Class&"`          | Heap reference (`Reference` kind)         |
-| `"ptr<i32>"`        | Typed raw pointer, primitive element      |
-| `"ptr<Class>"`      | Typed raw pointer, object element         |
-| `"ptr<Class.ref>"`  | Typed raw pointer, reference element      |
-| `"ptr<void>"`       | Alias for opaque `ptr` (`TypeKind::Ptr`)  |
+| Lexeme              | Meaning                                        | Source syntax   |
+|---------------------|------------------------------------------------|-----------------|
+| `"Class&"`          | Owning heap reference (`Reference`, no borrow) | `Class&`        |
+| `"ref:Class"`       | Non-owning class borrow (`Reference`, borrow)  | `Class*`        |
+| `"ref:i32"`         | Non-owning primitive borrow (lvalue ref)       | `i32*`          |
+| `"ptr<i32>"`        | Typed raw pointer, primitive element           | `ptr<i32>`      |
+| `"ptr<Class>"`      | Typed raw pointer, object element              | `ptr<Class>`    |
+| `"ptr<Class.ref>"`  | Typed raw pointer, reference element           | `ptr<Class&>`   |
+| `"ptr<void>"`       | Alias for opaque `ptr` (`TypeKind::Ptr`)       | `ptr` / `ptr<void>` |
 
 Decoded by `decodeSynthesizedType(const Token&)` in `Type.cpp`.
 Both the semantic resolver (`resolveTypeToken`) and codegen resolvers
@@ -178,25 +180,43 @@ primitives/references; when present, only `return;`/`return <alias>;` are allowe
   snapshot machinery). Codegen returns it with the +1 retain convention.
 - Void + alias → error; object return with no alias → "requires a return alias".
 
-### Default parameter values (C++-style)
+### Default parameter values + named arguments
 A parameter may declare `= expr` (`ParamDecl::defaultValue`, a `unique_ptr<Expr>` — `ParamDecl` is
-thus move-only). Omitted **trailing** arguments are filled from the callee's stored default exprs,
-evaluated per-call **at the call site**.
-- **Contiguous-trailing rule** (parser, `parseParamList(bool allowDefaults)`): once a param has a
-  default, every later param must too — else "must have a default value because an earlier
-  parameter has one". `extern` rejects defaults (`allowDefaults=false`). Applies to free functions,
-  methods, **and** constructors (all route through `parseParamList`).
-- **Semantic** (`analyzeParamDefaults`, called from `analyzeFunctionDecl` + the `analyzeClassDecl`
-  method loop): each default is analyzed in the **enclosing scope** with `currentClassName` cleared
-  and **before params are declared**, so a default may not reference the function's own params /
-  `this` / fields; `checkCast` against the param type ("default value of parameter 'x'").
-- **Overload resolution with arity ranges** (`resolveOverload`): `numDefaults` (trailing-default
-  count) on `ClassInfo::Method` / `FunctionOverload` / `OverloadCand`; a candidate is viable when
-  `args.size()` ∈ `[total - numDefaults, total]`. Arity error reads "expects R to N argument(s)".
-- **Codegen** (`funcDefaults_`: emitted-callee-name → `vector<const Expr*>`, keyed like
-  `funcParamTypes`): `buildArgString(..., defaultsFor(name))` genExprs the stored defaults for
-  positions the caller omitted. Threaded through every call site (free/method/static/ctor/new/sret/
-  enum-ctor). Works for object-value (sret) returns and object defaults.
+thus move-only). A call may pass arguments **positionally**, **by name** (`f(x: 1, y: 2)`), or
+**mixed** (positional prefix, then named). Defaults are filled per-call **at the call site**.
+- **Defaults may sit on ANY parameter** (the old contiguous-trailing rule was removed once named
+  args landed). `parseParamList(bool allowDefaults)` only still rejects defaults on `extern`. A
+  purely **positional** call can only omit a *trailing* run of defaults (left-to-right binding); a
+  **named** call can skip a defaulted middle param. `countTrailingDefaults` = the trailing run (for
+  the friendly arity message + the legacy `numDefaults`); per-slot presence is `paramHasDefault`.
+- **Parser**: named args parsed by `parseCallArgs(names, close, allowNames)` — the shared arg-list
+  helper used by every user call site (free/method/static/ctor/`new`). `IDENTIFIER ':'` (unambiguous
+  — no expression begins that way) marks a name; a positional arg after a named one errors. Each
+  arg-carrying node (`CallExpr`/`MethodCallExpr`/`NewExpr`) gained a parallel `std::vector<Token>
+  argNames` (empty ⇒ all positional). Braces (`Point{...}`, `new Point{...}`) stay **positional**.
+- **Semantic** (`analyzeParamDefaults`): each default is analyzed in the **enclosing scope** with
+  `currentClassName` cleared and **before params are declared** (so it can't reference the
+  function's own params / `this` / fields); `checkCast` against the param type.
+- **Overload resolution** (`resolveOverload`, now taking `argNames` + a `nodeKey`): a per-candidate
+  slot map binds the positional prefix to slots `0..k-1`, then each named arg to its slot **by name
+  in that candidate** — so **names participate in selection** (an unknown/duplicate/positionally-
+  taken name, or an unfilled slot with no default, makes the candidate non-viable). Viable
+  candidates rank by the existing conversion cost over their mapped slots; ties break on the
+  contextual return type. `ClassInfo::Method` / `FunctionOverload` / `OverloadCand` gained
+  `paramNames` + `paramHasDefault`. Errors: "unknown parameter name 'x'", "…given more than once",
+  "no argument for required parameter 'x'".
+- **Semantic→codegen handoff**: for a **named** call, the winner's per-slot permutation (slot →
+  written-arg index, `-1` = default) is recorded in `SemanticResult::callArgOrder` keyed by the call
+  node. A purely positional call records nothing (codegen keeps its identity-order path unchanged).
+- **Codegen** (`funcDefaults_`: emitted-callee-name → **full-length** `vector<const Expr*>`, nullptr
+  where no default): `buildArgString(args, params, defaults, order)` — when `order` is present it
+  evaluates written args in **source order** (side effects), then assembles the call in **parameter
+  order**, filling `-1` slots from `defaults[slot]`. Threaded through every call site (free/method/
+  static/ctor/`new`/sret) via `orderFor(node)`. Positional calls take the unchanged path.
+- **v1 limitation**: named args are **rejected on the callable-object sugar** `obj(args)` (it lowers
+  through `genTraitMethodCall`, which doesn't reorder) — call `obj.call(args)` explicitly, which is a
+  normal method call and does reorder. Braces stay positional. Everything else (free/method/static/
+  ctor/`new`/generic/sret) supports named args and reorders correctly.
 
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
@@ -562,45 +582,53 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   bug: it retained on return but was never released → returned a `+2` object → one-object leak
   per call. Fixed.)*
 
-### `ref T` — non-owning borrow (class **and** primitive)
-`ref T` (prefix keyword) is a **non-owning borrow** — a plain `ptr` with **no refcount traffic**
-(never retained/released, never in a dtor scope, no `+1` on return). `mut ref T` reuses `mut` to
-make the borrow mutable. Owning `Class&` is unchanged; `ref` is the everyday borrow for zero-copy
-element/parameter access. `T` may be a **class** (`ref Point`) or a **primitive** (`ref i32`, an
-lvalue reference like C++'s `int&`) — but not `ptr`/`void`.
+### `T*` — non-owning borrow (class **and** primitive)
+`T*` (postfix sigil, mirroring the owning `T&`) is a **non-owning borrow** — a plain `ptr` with
+**no refcount traffic** (never retained/released, never in a dtor scope, no `+1` on return).
+`mut T*` reuses `mut` to make the borrow mutable. Owning `Class&` is unchanged; `T*` is the everyday
+borrow for zero-copy element/parameter access. `T` may be a **class** (`Point*`) or a **primitive**
+(`i32*`, an lvalue reference like C++'s `int&`) — but not `ptr`/`void`. **There is no `ref` keyword**
+— the two user-facing reference forms are `&` (owning) and `*` (borrow); `ptr`/`ptr<T>` stays an
+internal `--unsafe-ptr` escape hatch. *(The internal representation still uses the synthesized
+`"ref:T"` token spelling — only the surface syntax is `*`.)*
 - **Type representation**: reuses `TypeKind::Reference` + a `bool borrow` flag on `Type`. A **class
   borrow** sets `className`; a **primitive borrow** leaves `className` empty and stores the element
   in `elementKind` (`makePrimitiveBorrow` / `isPrimitiveBorrow` / `borrowElementType` /
   `decayPrimitiveBorrow` in `Type.h`). Class-borrow member access / method dispatch / passing reuse
   the Reference path unchanged; only the refcount decision sites branch on `borrow`.
-- **Synthesized token**: `ref T` → lexeme `"ref:T"`. `decodeSynthesizedType` maps a primitive inner
-  (via `typeKindFromName`) to a primitive borrow, else a class borrow. `consumeType` accepts a class
-  name, `Self`, or a primitive keyword after `ref` (`ptr`/`void` → parse error "… cannot be
-  borrowed"). `typeName` renders `ref i32` / `ref Point`. `typeSpanAt` handles a leading `ref`.
+- **Surface syntax → synthesized token**: `T*` → lexeme `"ref:T"` (unchanged internal spelling, so
+  Type.cpp / semantic / codegen are untouched). The parser reads a **postfix `*`** in `consumeType`
+  (mirroring the `&` branch) and `typeSpanAt` (consumes a trailing `AMPERSAND` **or** `STAR`); the
+  `*` is accepted after a class name, `Self`, or a primitive keyword (`ptr`/`void` → parse error
+  "… cannot be borrowed"). `decodeSynthesizedType` maps a primitive inner (via `typeKindFromName`)
+  to a primitive borrow, else a class borrow. `typeName` renders a borrow as `i32*` / `Point*` and an
+  owning reference as `Point&`. **Disambiguation from multiply** is identical to `&`: a postfix `*`
+  is only read as a borrow when the head token is a known class/primitive type in a type position
+  (declaration detection via `typeSpanAt`); `a * b` on a non-type head stays multiplication.
 - **Primitive borrow = lvalue reference** (like C++ `int&`): reads **auto-deref** (load through the
   pointer) and writes **store through** it — it does not rebind.
   - *Read*: `analyzeIdentifier` returns `decayPrimitiveBorrow(sym->type)`; `analyzeBinary`/
-    `analyzeUnary` decay operands first (so a `ref i32` isn't misrouted into class operator
-    overloading). `canImplicitlyCast` allows `ref P → P` (deref) and `P → ref P` (borrow a matching
+    `analyzeUnary` decay operands first (so an `i32*` isn't misrouted into class operator
+    overloading). `canImplicitlyCast` allows `P* → P` (deref) and `P → P*` (borrow a matching
     primitive lvalue). Codegen: `genIdentifier` loads the referent ptr then the value; `emitCast`
-    `ref P → P` emits a load.
+    `P* → P` emits a load.
   - *Write*: `analyzeAssign` has a primitive-borrow branch — `x = v` writes through (requires
-    `mut ref`; a shared `ref` errors). Codegen `genAssign` loads the referent ptr and stores.
+    `mut T*`; a shared `T*` errors). Codegen `genAssign` loads the referent ptr and stores.
   - *Create / return*: `genBorrowSource` produces the referent pointer for a borrow source — the
     stored ptr for a borrow identifier, the address for a plain lvalue (`resolveAssignTarget` /
-    `genElementAddress`), or the value itself for a `ref`-returning call. Used by `genVarDecl`
+    `genElementAddress`), or the value itself for a borrow-returning call. Used by `genVarDecl`
     (primitive-borrow init) and `genReturn` (primitive-borrow return). `analyzeVarDecl` requires the
     source be an addressable lvalue (`isLvalueExpr`) — a temporary (`a+b`) is rejected.
-- **Coercions INTO a class borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`ref`, value
-  `Object`→`ref`, `ref`→`ref`. The reverse — a borrow → an owning `Class&` — is **forbidden**.
-- **Not a field**: `buildClassInfo` rejects a `ref` field.
-- **A borrow-returning call is NOT a refcount temp**: every ref-returning call site pushes its
+- **Coercions INTO a class borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`Class*`, value
+  `Object`→`Class*`, `Class*`→`Class*`. The reverse — a borrow → an owning `Class&` — is **forbidden**.
+- **Not a field**: `buildClassInfo` rejects a borrow field.
+- **A borrow-returning call is NOT a refcount temp**: every borrow-returning call site pushes its
   result to `pendingTemps_` only when `!resolvedType.borrow` (a borrow owns nothing, so releasing
-  it would corrupt the real owner's count — this had been latently wrong for class borrows too).
-- **Escape analysis still applies**: passing a *stack value object* to a `ref` parameter that
+  it would corrupt the real owner's count).
+- **Escape analysis still applies**: passing a *stack value object* to a `T*` parameter that
   escapes (returned / ref-field-stored) is rejected — only heap references may escape.
-- **Generics**: `ref T` survives monomorphization (T→concrete substitutes on raw tokens before
-  `consumeType`). `Array<i32>`'s `fn get(i) -> ref T` now instantiates to `ref i32`.
+- **Generics**: `T*` survives monomorphization (T→concrete substitutes on raw tokens before
+  `consumeType`). `Array<i32>`'s `fn get(i) -> T*` instantiates to `i32*`.
 - **Store through a returned reference** (`v.at(i) = x`): a new `RefStoreExpr{target, op, value}`
   AST node. The parser (`parseAssignment`) builds it when the LHS of `=` is not a name/index/member
   (those keep their dedicated nodes) — e.g. a call. `analyzeRefStore` requires the target to be a
@@ -697,6 +725,22 @@ call as a nested sub-expression argument is deferred.
   fields/methods/ctor, plus a parallel `enumRegistry`/`EnumInfo` (semantic) and
   `cgEnumNames_` set (codegen). `EnumDeclStmt::variants`/`methods` are `std::deque`.
 
+### `private` on free functions (file-local, warning-level)
+A free function may be declared `fn private name(...)` — public by default. `private` makes it
+**file-local**: calling it from a **different source file** emits a **warning** (never an error),
+mirroring private fields/methods. Same-file calls are silent.
+- **Parser** (`parseFnDeclaration`): an optional `private` after `fn` (before the name) sets
+  `FunctionDeclStmt::isPublic=false`; `FunctionDeclStmt::sourceFile` is stamped from the parser's
+  canonical `filename`. Generic free functions (`fn name<T>`) are name-first in the capture path, so
+  `private` on a **generic** free function is not supported in v1 (non-generic only).
+- **Semantic**: `FunctionOverload` carries `isPublic` + `sourceFile` (filled in `collectFunctions`).
+  `currentFile_` is set to the declaring file at the top of `analyzeFunctionDecl` (save/restored) and
+  is **empty inside class/enum/impl bodies**. The free-function call site in `analyzeCall` warns iff
+  `!chosen.isPublic && both files known (non-empty) && they differ` — so same-file calls and
+  unknown-origin contexts (method bodies) never warn (zero false positives; conservative v1).
+- **Codegen**: unaffected — access control is purely a semantic warning (no name mangling / linkage
+  change; `private` functions keep their plain `@name`). Tests: `[private]` in `tests/semantic_tests.cpp`.
+
 ### Static members (class-level)
 Roadmap: (1) **static fields** ✅ done, (2) **static methods** ✅ done, (3) **static local
 variables** (C-style) ✅ done, (4) polish (const statics, access enforcement, file-scope
@@ -748,6 +792,36 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**809 test cases / 1565 assertions** (as of **named & mixed arguments** — `f(x: 1, y: 2)` / a
+positional prefix then named; names participate in overload selection; **defaults may now sit on
+any parameter** (contiguous-trailing rule removed) and a named call can skip a defaulted middle
+param; args evaluate in source order then reorder into parameter order; a semantic→codegen
+permutation handoff (`SemanticResult::callArgOrder`) keeps codegen positional calls unchanged. See
+the "Default parameter values + named arguments" invariant. `tests/named_args_tests.cpp` `[named]`,
+`e2e/named_args_test.gg`.) Prior baseline was **779 test cases / 1516 assertions** (the **borrow
+syntax migrated from the `ref` keyword to a postfix `*`** — `ref T`/`mut ref T` are now `T*`/`mut T*`,
+mirroring the owning `T&`; the `ref` keyword is removed. Semantics are identical (same
+`TypeKind::Reference` + `borrow`, same internal `"ref:T"` token); only the parser front-end and
+user-facing spelling changed. See the "`T*` — non-owning borrow" invariant. All `.gg`/test sources
+migrated; `[ref]` group still green.) The count previously reached this figure with `private` on
+free functions — `fn private name(...)` is file-local, warning-level: a cross-file call warns, a
+same-file call is silent, and method/impl bodies never warn; `tests/semantic_tests.cpp` `[private]`.
+Prior baseline was **774 test cases / 1501 assertions** (as of pinning the
+const/deferred-init definite-assignment edge cases — a const assigned by BOTH branches of an if/else is thereafter initialized so a later
+write is a reassignment error; a one-branch assignment leaves it re-definable; a loop-body
+assignment never establishes post-loop initialization; nested if/else assigning on every path
+initializes; definite-assignment applies to `mut` too. Behavioural docs unchanged; see
+`tests/const_tests.cpp` `[const]` + the existing `[uninit]` cases in `tests/semantic_tests.cpp`.)
+Prior baseline was **769 test cases / 1493 assertions** (as of the stdlib `String` revision + growable `Array<T>` —
+`String` now has a Java-like interface (`length`/`byteLength`/`isEmpty`/`isBlank`/`charAt`/`byteAt`/
+`equals`/`compareTo`/`startsWith`/`endsWith`/`contains`/`indexOf` + `Eq`/`Ord` impls), with the
+`ptr` buffer + `size` fields and the `cStr()`/`byteIndexOf()` helpers marked `private` so no `ptr`
+appears in the public API (the literal constructor `String(ptr)` is the one necessary exception);
+`stdlib/array.gg` is a `std::vector`-like `Array<T>` (heap buffer, geometric growth, `push`/`pop`/
+`size`/`capacity`/`reserve`/`clear`, `[]` via the `Index` trait, `get(i) -> ref T`), primitive
+elements only in v1 (object elements need per-element clone/dtor or retain/release — deferred, and
+`Array<SomeClass>` fails cleanly at the `push(T)` object-value-param check); `e2e/string_test.gg`,
+`e2e/array_test.gg`, `tests/stdlib_tests.cpp` `[stdlib]`). Prior baseline was
 **767 test cases / 1486 assertions** (as of C++-style brace construction — `Type{args}` is an
 alternate delimiter for a positional constructor call; typed `Point{...}`/`new Point{...}` reuse the
 constructor CallExpr/NewExpr path, untyped `{...}` is a new `BraceInitExpr` whose class is deduced

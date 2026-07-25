@@ -244,8 +244,10 @@ std::string typeName(const Type& t) {
         case TypeKind::Object: return t.className;
         case TypeKind::Enum:   return t.className;
         case TypeKind::Reference:
-            if (t.borrow) return "ref " + (t.className.empty() ? typeName(Type{t.elementKind}) : t.className);
-            return "Ref<" + t.className + ">";
+            // Non-owning borrow renders with a postfix `*` (`i32*`, `Point*`); owning heap
+            // reference renders with a postfix `&` (`Point&`).
+            if (t.borrow) return (t.className.empty() ? typeName(Type{t.elementKind}) : t.className) + "*";
+            return t.className + "&";
         case TypeKind::TypedPtr: {
             Type elem = typedPtrElement(t);
             return "ptr<" + typeName(elem) + ">";

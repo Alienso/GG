@@ -260,6 +260,14 @@ private:
     [[nodiscard]] Expr parseUnary();
     [[nodiscard]] Expr parsePostfix();
     [[nodiscard]] Expr parsePrimary();
+
+    // Parse a call's argument list body (the opening delimiter is already consumed) up to and
+    // including `close`. Fills `names` parallel to the returned exprs: a name with a non-empty
+    // lexeme marks a named argument (`f(x: 1)`), an empty-lexeme token a positional one. When
+    // `allowNames` is false (e.g. brace-form constructor calls), `name:` is not recognised.
+    // Enforces that a positional argument may not follow a named one.
+    [[nodiscard]] std::vector<std::unique_ptr<Expr>> parseCallArgs(
+        std::vector<Token>& names, TokenType close, bool allowNames);
 };
 
 #endif //GG_PARSER_H

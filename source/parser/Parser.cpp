@@ -394,11 +394,6 @@ bool Parser::tryCaptureImplTemplate() {
 
 size_t Parser::typeSpanAt(size_t from) const {
     if (from >= tokens.size()) return 0;
-    // Borrow: `ref <Type>` spans the `ref` plus the inner type's span.
-    if (tokens[from].type == TokenType::REF) {
-        size_t inner = typeSpanAt(from + 1);
-        return inner == 0 ? 0 : inner + 1;
-    }
     const Token& t = tokens[from];
     bool isType = isTypeKeyword(t.type)
                || (t.type == TokenType::IDENTIFIER
@@ -418,8 +413,9 @@ size_t Parser::typeSpanAt(size_t from) const {
             ++i;
         }
     }
-    // reference suffix
-    if (i < tokens.size() && tokens[i].type == TokenType::AMPERSAND) ++i;
+    // reference suffix: `&` (owning heap reference) or `*` (non-owning borrow)
+    if (i < tokens.size()
+        && (tokens[i].type == TokenType::AMPERSAND || tokens[i].type == TokenType::STAR)) ++i;
     return i - from;
 }
 
@@ -733,8 +729,6 @@ bool Parser::isTypeName() const {
             return true;
         case TokenType::SELF:
             return true;   // valid only inside trait/impl bodies; semantic enforces that
-        case TokenType::REF:
-            return true;   // `ref T` — a non-owning borrow; consumeType validates the inner type
         case TokenType::IDENTIFIER:
             return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
         default:
@@ -744,21 +738,6 @@ bool Parser::isTypeName() const {
 
 Token Parser::consumeType() {
     Token base = advance();  // caller has verified isTypeName()
-
-    // Borrow: `ref T` → synthesized "ref:T" (a non-owning reference). The inner type may be a
-    // class/Self (a class borrow) or a primitive value type (`ref i32`, an lvalue reference to the
-    // primitive — like C++'s `int&`). `ptr`/`void` are not borrowable. A generic `ref T` reaches
-    // here only after monomorphization has substituted T with a concrete type token.
-    if (base.type == TokenType::REF) {
-        bool primitiveInner = isTypeKeyword(peek().type)
-                              && peek().type != TokenType::PTR && peek().type != TokenType::VOID;
-        if (!(check(TokenType::IDENTIFIER) || check(TokenType::SELF) || primitiveInner))
-            throw error(peek(), "expected a type after 'ref' (borrow a class, `Self`, or a "
-                                "primitive like `i32`; `ptr` and `void` cannot be borrowed)");
-        Token inner = advance();
-        std::string name = inner.type == TokenType::SELF ? "Self" : inner.lexeme;
-        return Token{ TokenType::IDENTIFIER, "ref:" + name, base.line };
-    }
 
     std::string lexeme = base.lexeme;
     int         line   = base.line;
@@ -790,6 +769,22 @@ Token Parser::consumeType() {
         advance();  // consume '&'
         // Synthesize a single reference-type token; resolvers decode the trailing '&'.
         return Token{ TokenType::IDENTIFIER, lexeme + "&", line };
+    }
+
+    // Borrow: `T*` → synthesized "ref:T" (a non-owning reference). The inner type may be a
+    // class/`Self` (a class borrow) or a primitive value type (`i32*`, an lvalue reference to the
+    // primitive — like C++'s `int&`). `ptr`/`void` cannot be borrowed. A generic `T*` reaches here
+    // only after monomorphization has substituted T with a concrete type token (which may itself
+    // be a mangled generic instantiation, e.g. `Vec$i32*`).
+    if (check(TokenType::STAR)) {
+        bool primitiveInner = isTypeKeyword(base.type)
+                              && base.type != TokenType::PTR && base.type != TokenType::VOID;
+        if (!(classLike || primitiveInner))
+            throw error(peek(), "'*' borrow is only allowed on class types, `Self`, or a primitive "
+                                "like `i32`; `ptr` and `void` cannot be borrowed");
+        advance();  // consume '*'
+        std::string inner = base.type == TokenType::SELF ? "Self" : lexeme;
+        return Token{ TokenType::IDENTIFIER, "ref:" + inner, line };
     }
 
     if (lexeme != base.lexeme)  // a generic instantiation was mangled
@@ -836,9 +831,12 @@ Stmt Parser::parseDeclaration() {
     return parseStatement();
 }
 
-// After the `fn` keyword: a free function `name(params) [-> RetType [alias]] { body }`.
+// After the `fn` keyword: a free function `[private] name(params) [-> RetType [alias]] { body }`.
 // No arrow ⇒ void return. An alias names the result (required for object-value returns).
+// `private` (optional, before the name) makes the function file-local — a warning, not an
+// error, if called cross-file, mirroring private fields/methods.
 Stmt Parser::parseFnDeclaration() {
+    bool isPublic = !match({ TokenType::PRIVATE });
     Token name = consume(TokenType::IDENTIFIER, "expected function name after 'fn'");
     std::vector<ParamDecl> params = parseParamList();
     bool        hasAlias = false;
@@ -850,7 +848,7 @@ Stmt Parser::parseFnDeclaration() {
     BlockStmt body = parseBlockBody();
     insideFunction = saved;
     return makeStmt(FunctionDeclStmt{ retType, name, std::move(params), std::move(body),
-                                      hasAlias, alias });
+                                      hasAlias, alias, isPublic, filename });
 }
 
 Stmt Parser::parseExternFuncDecl(const Token& keyword) {
@@ -873,18 +871,13 @@ std::vector<ParamDecl> Parser::parseParamList(bool allowDefaults) {
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
 
-    // A default value must be a contiguous *trailing* run: once a parameter has a default, every
-    // parameter after it must have one too (like C++). And `extern` takes no defaults.
-    bool sawDefault = false;
-    for (const ParamDecl& p : params) {
-        bool has = (p.defaultValue != nullptr);
-        if (has && !allowDefaults)
-            throw error(p.name, "default parameter values are not allowed on 'extern' declarations");
-        if (has) sawDefault = true;
-        else if (sawDefault)
-            throw error(p.name, "parameter '" + p.name.lexeme
-                        + "' must have a default value because an earlier parameter has one");
-    }
+    // A default may sit on ANY parameter, in any position — named arguments can fill the later
+    // ones while a defaulted earlier param falls back (a purely positional call still only omits
+    // trailing defaults, since positional binding is left-to-right). `extern` takes no defaults.
+    if (!allowDefaults)
+        for (const ParamDecl& p : params)
+            if (p.defaultValue != nullptr)
+                throw error(p.name, "default parameter values are not allowed on 'extern' declarations");
 
     // Seed the next block scope (the function/lambda body) with these params, for capture analysis.
     // Cleared first so a stale seed from a bodyless trait signature can't leak into a later body.
@@ -895,6 +888,32 @@ std::vector<ParamDecl> Parser::parseParamList(bool allowDefaults) {
 
 void Parser::recordLocal(const Token& typeToken, const Token& name) {
     if (!scopes_.empty()) scopes_.back().emplace(name.lexeme, typeToken);
+}
+
+// See the header note. Recognises `name: expr` named arguments (unambiguous — no expression form
+// begins with `IDENTIFIER :`), enforcing that positional args precede all named ones.
+std::vector<std::unique_ptr<Expr>> Parser::parseCallArgs(std::vector<Token>& names,
+                                                         TokenType close, bool allowNames) {
+    std::vector<std::unique_ptr<Expr>> args;
+    if (!check(close)) {
+        bool sawNamed = false;
+        do {
+            if (allowNames && check(TokenType::IDENTIFIER) && peekNext().type == TokenType::COLON) {
+                Token n = advance();            // the parameter name
+                advance();                      // consume ':'
+                sawNamed = true;
+                names.push_back(n);
+            } else {
+                if (sawNamed)
+                    throw error(peek(), "a positional argument cannot follow a named argument");
+                names.push_back(Token{ TokenType::IDENTIFIER, "", peek().line });  // positional
+            }
+            args.push_back(box(parseExpression()));
+        } while (match({ TokenType::COMMA }));
+    }
+    consume(close, close == TokenType::RIGHT_BRACE ? "expected '}' after arguments"
+                                                   : "expected ')' after arguments");
+    return args;
 }
 
 // Optional `-> RetType [alias]`. Returns the return type token — a synthesized `void`
@@ -1540,14 +1559,11 @@ Expr Parser::parseExpression() {
             bool      brace = check(TokenType::LEFT_BRACE);
             TokenType close = brace ? TokenType::RIGHT_BRACE : TokenType::RIGHT_PAREN;
             advance();  // consume '(' or '{'
-            std::vector<std::unique_ptr<Expr>> args;
-            if (!check(close)) {
-                do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
-            }
-            consume(close, brace ? "expected '}' after constructor arguments"
-                                 : "expected ')' after constructor arguments");
+            // Braces stay positional; `ClassName v(...)` accepts named arguments.
+            std::vector<Token> argNames;
+            std::vector<std::unique_ptr<Expr>> args = parseCallArgs(argNames, close, /*allowNames=*/!brace);
             // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
-            initializer = box(makeExpr(CallExpr{ typeName, std::move(args) }));
+            initializer = box(makeExpr(CallExpr{ typeName, std::move(args), std::move(argNames) }));
         }
         recordLocal(typeName, name);
         return makeExpr(VarDeclExpr{ typeName, name, std::move(initializer), /*arraySize=*/0, isStatic, isMut });
@@ -1754,15 +1770,11 @@ Expr Parser::parsePostfix() {
             Token member = consume(TokenType::IDENTIFIER, "expected member name after '.'");
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('
-                std::vector<std::unique_ptr<Expr>> args;
-                if (!check(TokenType::RIGHT_PAREN)) {
-                    do {
-                        args.push_back(box(parseExpression()));
-                    } while (match({ TokenType::COMMA }));
-                }
-                consume(TokenType::RIGHT_PAREN, "expected ')' after method arguments");
+                std::vector<Token> argNames;
+                std::vector<std::unique_ptr<Expr>> args =
+                    parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
                 expression = makeExpr(MethodCallExpr{
-                    box(std::move(expression)), member, std::move(args)
+                    box(std::move(expression)), member, std::move(args), std::move(argNames)
                 });
             } else {
                 expression = makeExpr(MemberAccessExpr{
@@ -1813,13 +1825,10 @@ Expr Parser::parsePrimary() {
         if (!brace) consume(TokenType::LEFT_PAREN, "expected '(' or '{' after class name in 'new' expression");
         else        advance();  // consume '{'
         TokenType close = brace ? TokenType::RIGHT_BRACE : TokenType::RIGHT_PAREN;
-        std::vector<std::unique_ptr<Expr>> args;
-        if (!check(close)) {
-            do { args.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
-        }
-        consume(close, brace ? "expected '}' after constructor arguments"
-                             : "expected ')' after constructor arguments");
-        return makeExpr(NewExpr{ keyword, className, std::move(args) });
+        // Braces stay positional; parenthesised `new Point(...)` accepts named arguments.
+        std::vector<Token> argNames;
+        std::vector<std::unique_ptr<Expr>> args = parseCallArgs(argNames, close, /*allowNames=*/!brace);
+        return makeExpr(NewExpr{ keyword, className, std::move(args), std::move(argNames) });
     }
 
     if (match({ TokenType::TRUE, TokenType::FALSE,
@@ -1854,12 +1863,11 @@ Expr Parser::parsePrimary() {
             std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
             recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
             consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
-            std::vector<std::unique_ptr<Expr>> genArgs;
-            if (!check(TokenType::RIGHT_PAREN)) {
-                do { genArgs.push_back(box(parseExpression())); } while (match({ TokenType::COMMA }));
-            }
-            consume(TokenType::RIGHT_PAREN, "expected ')' after arguments");
-            return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line }, std::move(genArgs) });
+            std::vector<Token> genNames;
+            std::vector<std::unique_ptr<Expr>> genArgs =
+                parseCallArgs(genNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
+            return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
+                                      std::move(genArgs), std::move(genNames) });
         }
 
         // Constructor call via braces: ClassName{ args } — an alternate delimiter for
@@ -1893,13 +1901,9 @@ Expr Parser::parsePrimary() {
                     }
                 }
             }
-            std::vector<std::unique_ptr<Expr>> args;
-            if (!check(TokenType::RIGHT_PAREN)) {
-                do {
-                    args.push_back(box(parseExpression()));
-                } while (match({ TokenType::COMMA }));
-            }
-            consume(TokenType::RIGHT_PAREN, "expected ')' after arguments");
+            std::vector<Token> argNames;
+            std::vector<std::unique_ptr<Expr>> args =
+                parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
             expectedLambdaSig_ = savedSig;   // restore (handles nested calls)
 
             // Lambda-literal inference: a generic function with exactly one `Call`-bounded type
@@ -1922,11 +1926,12 @@ Expr Parser::parsePrimary() {
                         std::vector<std::vector<Token>> typeArgs = { { Token{ TokenType::IDENTIFIER, lam, name.line } } };
                         std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
                         recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
-                        return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line }, std::move(args) });
+                        return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
+                                                  std::move(args), std::move(argNames) });
                     }
                 }
             }
-            return makeExpr(CallExpr{ name, std::move(args) });
+            return makeExpr(CallExpr{ name, std::move(args), std::move(argNames) });
         }
 
         // Lambda capture: a bare name inside a lambda body that resolves to an enclosing

@@ -106,11 +106,31 @@ TEST_CASE("stdlib/string.gg - IR defines the UTF-8 accessor methods", "[stdlib][
     REQUIRE(ir.find("@String_eq(")         != std::string::npos);   // the Eq impl
 }
 
+TEST_CASE("stdlib/string.gg - IR defines the Java-like query methods", "[stdlib][string]") {
+    std::string ir = stdlibIR("String.gg");
+    REQUIRE(ir.find("@String_startsWith(") != std::string::npos);
+    REQUIRE(ir.find("@String_endsWith(")   != std::string::npos);
+    REQUIRE(ir.find("@String_contains(")   != std::string::npos);
+    REQUIRE(ir.find("@String_indexOf(")    != std::string::npos);
+    REQUIRE(ir.find("@String_compareTo(")  != std::string::npos);
+    REQUIRE(ir.find("@String_cmp(")        != std::string::npos);   // the Ord impl
+}
+
 TEST_CASE("stdlib/string.gg - transitively declares the C string/memory bindings", "[stdlib][string]") {
     std::string ir = stdlibIR("String.gg");
     REQUIRE(ir.find("declare i64 @strlen(ptr)")  != std::string::npos);
     REQUIRE(ir.find("declare i32 @strcmp(ptr, ptr)") != std::string::npos);
     REQUIRE(ir.find("declare ptr @malloc(i64)")  != std::string::npos);
+}
+
+// ============================================================
+// stdlib/array.gg — the growable Array<T> (std::vector-like). It is a generic template,
+// so nothing is emitted until it is instantiated; here we only check the template file
+// is well-formed. Behavioural coverage (push/pop/[]/grow/…) lives in e2e/array_test.gg.
+// ============================================================
+
+TEST_CASE("stdlib/array.gg - semantic analysis passes", "[stdlib][array]") {
+    REQUIRE_FALSE(analyzeStdlib("array.gg").hadError);
 }
 
 // ============================================================

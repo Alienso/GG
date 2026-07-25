@@ -99,10 +99,10 @@ TEST_CASE("BraceInit - untyped brace in a return (object alias) deduces the retu
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("BraceInit - untyped brace deduces a `ref` (borrow) parameter type", "[brace][semantic]") {
+TEST_CASE("BraceInit - untyped brace deduces a `P*` (borrow) parameter type", "[brace][semantic]") {
     auto r = analyzeString(R"(
         class P { mut i32 x; P(i32 a) { x = a; } }
-        fn peek(ref P p) -> i32 { return p.x; }
+        fn peek(P* p) -> i32 { return p.x; }
         fn main() -> i32 { return peek({99}); }
     )");
     REQUIRE_FALSE(r.hadError);

@@ -499,14 +499,34 @@ make();        // a = 0, b = 0
 make(5);       // a = 5, b = 0
 make(5, 6);    // both explicit
 ```
-- Defaults must form a **contiguous trailing run** (as in C++): once a parameter has a default,
-  every parameter after it must too. `fn f(i32 a = 0, i32 b, i32 c = 0)` is an error — for `a` to
-  default, `b` must default as well.
+- A default may sit on **any** parameter, in any position — `fn f(i32 a = 0, i32 b, i32 c = 0)` is
+  fine. A purely **positional** call can only omit a *trailing* run of defaults (binding is
+  left-to-right), but a **named** call (below) can skip a defaulted middle parameter.
 - Available on **functions, methods, and constructors** (not `extern`).
 - A default is **any expression valid in the enclosing scope**, evaluated per-call at the call
   site; it may **not** reference the function's own parameters (or `this`).
-- Omitting more arguments than there are defaults is an arity error
-  (`expects 1 to 2 argument(s), got 0`).
+- Omitting a required (non-defaulted) parameter is an error.
+
+### Named arguments
+Arguments may be passed **by parameter name**, in any order, and mixed with positional ones (the
+positional arguments must come first):
+```gg
+fn span(i32 lo, i32 step = 10, i32 hi) -> i32 { return (hi - lo) * step; }
+
+span(1, 2, 3);            // positional: lo=1, step=2, hi=3
+span(hi: 3, lo: 1);       // named, reordered — step defaults to 10
+span(1, hi: 3);           // mixed: lo=1 positional, hi=3 named, step defaults
+```
+- **Names participate in overload resolution** — an argument naming a parameter a candidate doesn't
+  have makes that candidate non-viable, so names can select between overloads.
+- A **positional argument may not follow a named one** (`f(a: 1, 2)` is an error).
+- Errors: naming an **unknown parameter**, naming one **twice** (or once positionally + once by
+  name), or leaving a **required** parameter unfilled.
+- Arguments are **evaluated in the order written**, then reordered into parameter order — so side
+  effects happen left-to-right as they appear at the call site.
+- Works on functions, methods, static methods, and `new`. Brace construction (`Point{...}`) is
+  positional only, and the callable-object sugar `obj(...)` is positional only — call `obj.call(...)`
+  to pass its arguments by name.
 
 ### Calling conventions
 - Primitive types pass by value.
@@ -715,6 +735,7 @@ type must be inferable (untyped `{…}` with no class context, or a brace on an 
 - Members are **public by default** — accessible from anywhere.
 - Prefix a member with `private` to restrict it to the class's own methods.
 - Accessing a `private` member from outside the class emits a **compile-time warning** but is not an error — the code still compiles and runs.
+- **Free functions** may also be `private`: `fn private helper(...) { … }`. This makes the function **file-local** — calling it from a **different source file** (i.e. through an `import`) emits the same **advisory warning**, while calls within the declaring file are silent. As with members, it is warning-level, not enforced. (Not supported on generic free functions in v1.)
 
 ### Field mutability — `const` by default, `mut` to opt in
 Instance fields are **immutable by default**, just like local variables. A const field may
@@ -969,46 +990,49 @@ Point& s = r;    // s and r now share the same heap object; refcount → 2
 - When the refcount reaches zero, the destructor (if any) is called, then `free`.
 - There is **no cycle detection** — circular reference graphs will leak.
 
-### Non-owning borrows (`ref T` / `mut ref T`)
+### Non-owning borrows (`T*` / `mut T*`)
 ```gg
-Point& owner = new Point(1, 2);   // owning reference (co-owns the heap object)
-ref Point b = owner;              // borrow: a view, takes no ownership, no refcount change
-mut ref Point m = owner;          // mutable borrow — may write through it
+Point& owner = new Point(1, 2);   // owning reference (co-owns the heap object) — postfix `&`
+Point* b = owner;                 // borrow: a view, takes no ownership, no refcount change
+mut Point* m = owner;             // mutable borrow — may write through it
 m.x = 9;                          // mutates the same object `owner` points at
 
-fn shift(mut ref Point p, i32 dx) { p.x = p.x + dx; }   // borrow parameter
-fn sumOf(ref Point p) -> i32 { return p.x + p.y; }      // shared-borrow reader
+fn shift(mut Point* p, i32 dx) { p.x = p.x + dx; }   // borrow parameter
+fn sumOf(Point* p) -> i32 { return p.x + p.y; }      // shared-borrow reader
 ```
 
-A `ref T` is a **non-owning borrow** — like a `ClassName&` but without any ownership. It never
-touches the refcount (no retain on bind, no release at scope exit, no `+1` on return), so it is a
-zero-cost view. Use it for parameters that only look at / mutate a value, and for returning a
-borrow of something the caller already keeps alive (e.g. an element of a container).
+A `T*` is a **non-owning borrow** — like a `ClassName&` but without any ownership. The two
+reference sigils are symmetric and both **postfix**: `T&` **owns** (co-owns the heap object,
+refcounted), `T*` **borrows** (a zero-cost view). A borrow never touches the refcount (no retain on
+bind, no release at scope exit, no `+1` on return). Use it for parameters that only look at / mutate
+a value, and for returning a borrow of something the caller already keeps alive (e.g. an element of
+a container). *(There is no `ref` keyword; and the unsafe raw `ptr` is a separate, internal-only
+type — see below.)*
 
-`T` may be a **class** (`ref Point`) or a **primitive** (`ref i32`). A `ref i32` is an lvalue
-reference exactly like C++'s `int&`: reading it yields the value (a load through the borrow),
-and writing through a `mut ref` stores into the borrowed location:
+`T` may be a **class** (`Point*`) or a **primitive** (`i32*`). An `i32*` is an lvalue reference
+exactly like C++'s `int&`: reading it yields the value (a load through the borrow), and writing
+through a `mut i32*` stores into the borrowed location:
 
 ```gg
 mut i32 n = 5;
-mut ref i32 r = n;
+mut i32* r = n;
 r = r + 10;          // reads through r (→ 5), writes through r → n is now 15
 
 class Vec {
     ptr<i32> data;
-    fn at(i32 i) -> ref i32 { return data[i]; }   // borrow an element, like vector<int>::operator[]
+    fn at(i32 i) -> i32* { return data[i]; }   // borrow an element, like vector<int>::operator[]
 }
-mut ref i32 e = v.at(0);
+mut i32* e = v.at(0);
 e = 42;              // writes into the buffer through the borrow
 ```
 
-- Both an owning `ClassName&` and a stack value object coerce into a `ref` class borrow; a
-  primitive lvalue (a variable or an element `a[i]`) coerces into a `ref` primitive borrow.
+- Both an owning `ClassName&` and a stack value object coerce into a `ClassName*` class borrow; a
+  primitive lvalue (a variable or an element `a[i]`) coerces into a primitive borrow.
 - A borrow **cannot** be converted back into an owning `ClassName&` (it has no ownership to give).
-- A `ref` **cannot be a class field** — a field must own (`ClassName&`) or embed (a value).
-- A primitive borrow must bind an **addressable** value — `ref i32 x = a + b;` (a temporary) is a
+- A borrow **cannot be a class field** — a field must own (`ClassName&`) or embed (a value).
+- A primitive borrow must bind an **addressable** value — `i32* x = a + b;` (a temporary) is a
   compile error.
-- Returning a borrow is allowed, but passing a **stack value object** to a `ref` parameter that
+- Returning a borrow is allowed, but passing a **stack value object** to a `T*` parameter that
   returns or stores it is a compile error (the borrow would outlive the value) — pass a heap
   `ClassName&` in that case. This is enforced by escape analysis.
 - `ptr` and `void` cannot be borrowed.
@@ -1405,7 +1429,6 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Functions & methods
 | Missing feature | Notes |
 |-----------------|-------|
-| Named parameters | Positional only |
 | Variadic functions | No `...` — use `extern` to call C variadics |
 | Escaping / stored lambdas | Lambdas (§14) exist but are non-escaping value objects usable only as a literal argument to a `Call`-bounded generic; no `dyn Call` for heterogeneous storage |
 | Multiple return values | Return a class instance instead |
@@ -1436,7 +1459,7 @@ Attempting them will produce a compile error (or will simply not parse).
 | Cycle handling | Circular references (`A& → B&, B& → A&`) will **leak** |
 | Pointer arithmetic | `ptr` is opaque; use `ptr<T>` + `[]` for offset access |
 | Bounds checking on `ptr<T>` | Only fixed-size `T[N]` arrays are bounds-checked |
-| Weak references | `ref T` is a non-owning **borrow** (no liveness tracking); a liveness-checked `weak` reference does not yet exist |
+| Weak references | `T*` is a non-owning **borrow** (no liveness tracking); a liveness-checked `weak` reference does not yet exist |
 
 ### Other
 | Missing feature | Notes |

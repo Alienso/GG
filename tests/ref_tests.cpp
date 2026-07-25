@@ -2,14 +2,14 @@
 #include "helpers.h"
 
 // ============================================================
-// `ref T` — non-owning borrow reference.
-//   - `ref T` / `mut ref T` are shared / mutable borrows of a class value.
+// `T*` — non-owning borrow reference.
+//   - `T*` / `mut T*` are shared / mutable borrows of a class value.
 //   - Non-owning: no refcount traffic (never retained/released, never `+1` on return,
 //     never in a dtor scope). Lowers to a plain LLVM `ptr`.
-//   - Coercions INTO a borrow are allowed: owning `Class&` → `ref`, value object → `ref`,
-//     `ref` → `ref`. The reverse (a borrow → an owning `Class&`) is forbidden.
-//   - A `ref` may not be a class field (nothing keeps the borrowee alive).
-//   - Escape analysis still applies: passing a *stack value object* to a `ref` parameter
+//   - Coercions INTO a borrow are allowed: owning `Class&` → `Class*`, value object → `Class*`,
+//     `Class*` → `Class*`. The reverse (a borrow → an owning `Class&`) is forbidden.
+//   - A borrow may not be a class field (nothing keeps the borrowee alive).
+//   - Escape analysis still applies: passing a *stack value object* to a `T*` parameter
 //     that escapes (returned / stored) is rejected — only heap references may escape.
 // ============================================================
 
@@ -20,7 +20,7 @@ TEST_CASE("Ref - borrow a heap reference and mutate through it", "[ref][semantic
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         fn main() -> i32 {
             Point& owner = new Point(5);
-            mut ref Point b = owner;
+            mut Point* b = owner;
             b.x = 9;
             return owner.x;
         }
@@ -33,7 +33,7 @@ TEST_CASE("Ref - borrow a stack value object", "[ref][semantic]") {
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         fn main() -> i32 {
             mut Point v(20);
-            mut ref Point b = v;
+            mut Point* b = v;
             b.x = 9;
             return v.x;
         }
@@ -41,10 +41,10 @@ TEST_CASE("Ref - borrow a stack value object", "[ref][semantic]") {
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - a ref parameter borrows both owning refs and value objects", "[ref][semantic]") {
+TEST_CASE("Ref - a borrow parameter borrows both owning refs and value objects", "[ref][semantic]") {
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn bump(mut ref Point p) { p.x = p.x + 1; }
+        fn bump(mut Point* p) { p.x = p.x + 1; }
         fn main() -> i32 {
             Point& owner = new Point(10);
             bump(owner);
@@ -59,27 +59,27 @@ TEST_CASE("Ref - a ref parameter borrows both owning refs and value objects", "[
 TEST_CASE("Ref - a function may return a borrow of an owning-reference argument", "[ref][semantic]") {
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn pick(ref Point a, ref Point b, bool first) -> ref Point {
+        fn pick(Point* a, Point* b, bool first) -> Point* {
             if (first) { return a; }
             return b;
         }
         fn main() -> i32 {
             Point& p = new Point(3);
             Point& q = new Point(4);
-            ref Point c = pick(p, q, false);
+            Point* c = pick(p, q, false);
             return c.x;
         }
     )");
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - generic `ref T` survives monomorphization", "[ref][generic][semantic]") {
+TEST_CASE("Ref - a generic borrow `T*` survives monomorphization", "[ref][generic][semantic]") {
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn borrow<T>(ref T item) -> ref T { return item; }
+        fn borrow<T>(T* item) -> T* { return item; }
         fn main() -> i32 {
             Point& p = new Point(42);
-            ref Point b = borrow<Point>(p);
+            Point* b = borrow<Point>(p);
             return b.x;
         }
     )");
@@ -91,34 +91,34 @@ TEST_CASE("Ref - a method dispatches through a borrow", "[ref][semantic]") {
         class Point { mut i32 x; Point(i32 v) { x = v; } fn getX() -> i32 { return x; } }
         fn main() -> i32 {
             Point& owner = new Point(7);
-            ref Point b = owner;
+            Point* b = owner;
             return b.getX();
         }
     )");
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - a borrow may be passed where a ref parameter is expected", "[ref][semantic]") {
+TEST_CASE("Ref - a borrow may be passed where a borrow parameter is expected", "[ref][semantic]") {
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn read(ref Point p) -> i32 { return p.x; }
+        fn read(Point* p) -> i32 { return p.x; }
         fn main() -> i32 {
             Point& owner = new Point(4);
-            ref Point b = owner;
+            Point* b = owner;
             return read(b);
         }
     )");
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - `ref Self` in an impl block resolves to the implementing type", "[ref][semantic]") {
+TEST_CASE("Ref - `Self*` in an impl block resolves to the implementing type", "[ref][semantic]") {
     auto r = analyzeString(R"(
-        trait Identity { fn me() -> ref Self; }
+        trait Identity { fn me() -> Self*; }
         class Node { mut i32 v; Node(i32 x) { v = x; } }
-        impl Identity for Node { fn me() -> ref Self { return this; } }
+        impl Identity for Node { fn me() -> Self* { return this; } }
         fn main() -> i32 {
             Node& n = new Node(11);
-            ref Node r = n.me();
+            Node* r = n.me();
             return r.v;
         }
     )");
@@ -128,13 +128,13 @@ TEST_CASE("Ref - `ref Self` in an impl block resolves to the implementing type",
 // ---- rejected ----
 
 TEST_CASE("Ref - a shared (non-mut) borrow cannot mutate through a field", "[ref][semantic]") {
-    // The core distinction from `mut ref`: a plain `ref` is a read-only view.
+    // The core distinction from `mut Point*`: a plain `Point*` is a read-only view.
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         fn main() -> i32 {
             Point& owner = new Point(5);
-            ref Point b = owner;
+            Point* b = owner;
             b.x = 9;
             return 0;
         }
@@ -150,7 +150,7 @@ TEST_CASE("Ref - a non-mut borrow cannot be rebound", "[ref][semantic]") {
         fn main() -> i32 {
             Point& a = new Point(1);
             Point& b = new Point(2);
-            ref Point r = a;
+            Point* r = a;
             r = b;
             return 0;
         }
@@ -165,7 +165,7 @@ TEST_CASE("Ref - a borrow cannot be converted to an owning reference", "[ref][se
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         fn main() -> i32 {
             Point& owner = new Point(5);
-            ref Point b = owner;
+            Point* b = owner;
             Point& back = b;
             return back.x;
         }
@@ -178,7 +178,7 @@ TEST_CASE("Ref - a class field cannot be a borrow", "[ref][semantic]") {
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 v) { x = v; } }
-        class Holder { ref Point r; }
+        class Holder { Point* r; }
         fn main() -> i32 { return 0; }
     )");
     REQUIRE(r.hadError);
@@ -186,12 +186,12 @@ TEST_CASE("Ref - a class field cannot be a borrow", "[ref][semantic]") {
 }
 
 TEST_CASE("Ref - a primitive borrow reads and writes through the referent", "[ref][semantic]") {
-    // `ref i32` is an lvalue reference to a primitive (like C++ `int&`): reads deref, writes
-    // store through, and a `mut ref` may mutate the borrowed variable.
+    // `i32*` is an lvalue reference to a primitive (like C++ `int&`): reads deref, writes
+    // store through, and a `mut i32*` may mutate the borrowed variable.
     auto r = analyzeString(R"(
         fn main() -> i32 {
             mut i32 n = 5;
-            mut ref i32 b = n;
+            mut i32* b = n;
             b = b + 10;
             return n;
         }
@@ -199,14 +199,14 @@ TEST_CASE("Ref - a primitive borrow reads and writes through the referent", "[re
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - `ref` of ptr/void is a parse error", "[ref][parser]") {
+TEST_CASE("Ref - a borrow of ptr/void is a parse error", "[ref][parser]") {
     // A parse error is caught by parseString and printed to stderr (Program comes back empty),
     // so assert on the captured message rather than the semantic hadError flag.
     StderrCapture cap;
     parseString(R"(
         fn main() -> i32 {
             ptr p = 0;
-            ref void b = p;
+            void* b = p;
             return 0;
         }
     )");
@@ -218,7 +218,7 @@ TEST_CASE("Ref - a shared primitive borrow cannot be written through", "[ref][se
     auto r = analyzeString(R"(
         fn main() -> i32 {
             mut i32 n = 5;
-            ref i32 b = n;
+            i32* b = n;
             b = 9;
             return n;
         }
@@ -232,7 +232,7 @@ TEST_CASE("Ref - a primitive borrow cannot bind a temporary", "[ref][semantic]")
         fn main() -> i32 {
             i32 a = 1;
             i32 b = 2;
-            ref i32 x = a + b;
+            i32* x = a + b;
             return 0;
         }
     )");
@@ -245,7 +245,7 @@ TEST_CASE("Ref - assign directly to a returned primitive borrow (v.at(i) = x)", 
         class Counter {
             mut i32 n;
             Counter(i32 v) { n = v; }
-            fn slot() -> ref i32 { return n; }
+            fn slot() -> i32* { return n; }
         }
         fn main() -> i32 {
             mut Counter c(0);
@@ -271,7 +271,7 @@ TEST_CASE("Ref - assigning to a non-reference call result is rejected", "[ref][s
 
 TEST_CASE("Ref - a primitive borrow parameter can be written through", "[ref][semantic]") {
     auto r = analyzeString(R"(
-        fn bump(mut ref i32 p) { p = p + 1; }
+        fn bump(mut i32* p) { p = p + 1; }
         fn main() -> i32 { mut i32 n = 41; bump(n); return n; }
     )");
     REQUIRE_FALSE(r.hadError);
@@ -279,16 +279,16 @@ TEST_CASE("Ref - a primitive borrow parameter can be written through", "[ref][se
 
 TEST_CASE("Ref - a primitive borrow parameter reads through as a value", "[ref][semantic]") {
     auto r = analyzeString(R"(
-        fn get(ref i32 x) -> i32 { return x; }
+        fn get(i32* x) -> i32 { return x; }
         fn main() -> i32 { mut i32 n = 7; return get(n); }
     )");
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - generic `ref T` passthrough works for a primitive", "[ref][generic][semantic]") {
+TEST_CASE("Ref - a generic borrow `T*` passthrough works for a primitive", "[ref][generic][semantic]") {
     auto r = analyzeString(R"(
-        fn borrow<T>(ref T item) -> ref T { return item; }
-        fn main() -> i32 { mut i32 n = 9; ref i32 r = borrow<i32>(n); return r; }
+        fn borrow<T>(T* item) -> T* { return item; }
+        fn main() -> i32 { mut i32 n = 9; i32* r = borrow<i32>(n); return r; }
     )");
     REQUIRE_FALSE(r.hadError);
 }
@@ -296,11 +296,11 @@ TEST_CASE("Ref - generic `ref T` passthrough works for a primitive", "[ref][gene
 TEST_CASE("Ref - a primitive borrow works for f64 and bool", "[ref][semantic]") {
     auto r = analyzeString(R"(
         class C { mut f64 x; mut bool b; C() { x = 1.5; b = false; }
-                  fn fx() -> ref f64 { return x; } fn fb() -> ref bool { return b; } }
+                  fn fx() -> f64* { return x; } fn fb() -> bool* { return b; } }
         fn main() -> i32 {
             mut C c;
-            mut ref f64 rx = c.fx(); rx = 3.5;
-            mut ref bool rb = c.fb(); rb = true;
+            mut f64* rx = c.fx(); rx = 3.5;
+            mut bool* rb = c.fb(); rb = true;
             return 0;
         }
     )");
@@ -310,7 +310,7 @@ TEST_CASE("Ref - a primitive borrow works for f64 and bool", "[ref][semantic]") 
 TEST_CASE("Ref - passing a temporary to a primitive borrow parameter is rejected", "[ref][semantic]") {
     StderrCapture cap;
     auto r = analyzeString(R"(
-        fn bump(mut ref i32 p) { p = p + 1; }
+        fn bump(mut i32* p) { p = p + 1; }
         fn main() -> i32 { mut i32 a = 1; mut i32 b = 2; bump(a + b); return 0; }
     )");
     REQUIRE(r.hadError);
@@ -320,8 +320,8 @@ TEST_CASE("Ref - passing a temporary to a primitive borrow parameter is rejected
 TEST_CASE("Ref - compound assignment through a primitive borrow is rejected", "[ref][semantic]") {
     StderrCapture cap;
     auto r = analyzeString(R"(
-        class C { mut i32 n; C(i32 v) { n = v; } fn slot() -> ref i32 { return n; } }
-        fn main() -> i32 { mut C c(10); mut ref i32 r = c.slot(); r += 5; return c.n; }
+        class C { mut i32 n; C(i32 v) { n = v; } fn slot() -> i32* { return n; } }
+        fn main() -> i32 { mut C c(10); mut i32* r = c.slot(); r += 5; return c.n; }
     )");
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("through a borrow"));
@@ -330,8 +330,8 @@ TEST_CASE("Ref - compound assignment through a primitive borrow is rejected", "[
 TEST_CASE("Ref - `++` through a primitive borrow is rejected", "[ref][semantic]") {
     StderrCapture cap;
     auto r = analyzeString(R"(
-        class C { mut i32 n; C(i32 v) { n = v; } fn slot() -> ref i32 { return n; } }
-        fn main() -> i32 { mut C c(10); mut ref i32 r = c.slot(); r++; return c.n; }
+        class C { mut i32 n; C(i32 v) { n = v; } fn slot() -> i32* { return n; } }
+        fn main() -> i32 { mut C c(10); mut i32* r = c.slot(); r++; return c.n; }
     )");
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("through a borrow"));
@@ -342,11 +342,11 @@ TEST_CASE("Ref - a method may return a primitive borrow of a field", "[ref][sema
         class Counter {
             mut i32 n;
             Counter(i32 v) { n = v; }
-            fn slot() -> ref i32 { return n; }
+            fn slot() -> i32* { return n; }
         }
         fn main() -> i32 {
             mut Counter c(10);
-            mut ref i32 s = c.slot();
+            mut i32* s = c.slot();
             s = s + 5;
             return c.n;
         }
@@ -354,15 +354,15 @@ TEST_CASE("Ref - a method may return a primitive borrow of a field", "[ref][sema
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Ref - passing a stack value object to an escaping ref param is rejected", "[ref][escape][semantic]") {
+TEST_CASE("Ref - passing a stack value object to an escaping borrow param is rejected", "[ref][escape][semantic]") {
     // The borrow is returned, so it would outlive the stack value object.
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn keep(ref Point a) -> ref Point { return a; }
+        fn keep(Point* a) -> Point* { return a; }
         fn main() -> i32 {
             Point v(3);
-            ref Point b = keep(v);
+            Point* b = keep(v);
             return 0;
         }
     )");
@@ -375,7 +375,7 @@ TEST_CASE("Ref - passing a stack value object to an escaping ref param is reject
 TEST_CASE("Ref - borrow lowers to a plain ptr with no retain/release", "[ref][codegen]") {
     std::string ir = codegenString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        fn borrow(ref Point item) -> ref Point { return item; }
+        fn borrow(Point* item) -> Point* { return item; }
     )");
     // The borrow function body: load the arg, return it — no refcount calls of its own.
     auto pos = ir.find("@borrow");

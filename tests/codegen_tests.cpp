@@ -947,11 +947,11 @@ TEST_CASE("CodeGen - ptr returned from extern can be stored and passed", "[codeg
 // Reference type representation (Phase 0 — Ref<T> foundation)
 // ============================================================
 
-TEST_CASE("Reference type - typeName renders as Ref<Class>", "[type][reference]") {
+TEST_CASE("Reference type - typeName renders an owning reference as Class&", "[type][reference]") {
     Type r = makeReferenceType("Point");
     REQUIRE(r.kind == TypeKind::Reference);
     REQUIRE(r.className == "Point");
-    REQUIRE(typeName(r) == "Ref<Point>");
+    REQUIRE(typeName(r) == "Point&");   // owning heap reference; a borrow renders as `Point*`
 }
 
 TEST_CASE("Reference type - lowers to an opaque ptr in IR", "[type][reference]") {

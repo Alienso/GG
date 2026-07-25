@@ -320,7 +320,8 @@ void AstPrinter::printStmt(const Stmt& stmt) {
                 first = false;
                 params += param.typeName.lexeme + " " + param.name.lexeme;
             }
-            out("FunctionDecl " + functionDecl.returnType.lexeme + " '" + functionDecl.name.lexeme + "' (" + params + ")");
+            out(std::string(functionDecl.isPublic ? "" : "private ")
+                + "FunctionDecl " + functionDecl.returnType.lexeme + " '" + functionDecl.name.lexeme + "' (" + params + ")");
             indent++;
             printBlock(functionDecl.body);
             indent--;

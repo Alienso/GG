@@ -30,6 +30,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->eqImplementors_ = &semanticResult.eqImplementors;
     this->callableCalls_ = &semanticResult.callableCalls;
     this->braceInitClass_ = &semanticResult.braceInitClass;
+    this->callArgOrder_ = &semanticResult.callArgOrder;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;

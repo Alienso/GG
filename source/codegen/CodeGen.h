@@ -113,6 +113,8 @@ private:
     const std::unordered_map<const void*, std::string>* callableCalls_ = nullptr;
     // Untyped brace-init nodes → deduced class name; genBraceInit constructs that class.
     const std::unordered_map<const void*, std::string>* braceInitClass_ = nullptr;
+    // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
+    const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
     // overloaded, otherwise `plainBase`.
     std::string calleeName(const void* node, const std::string& plainBase) const;
@@ -282,7 +284,8 @@ private:
     bool emitSlotCall(const Expr& init, const std::string& slotPtr);
     // Emit `call void @fn(ptr slot[, ptr recv], args...)`. `recvPtr` empty ⇒ no receiver.
     void emitSretCall(const std::string& fn, const std::vector<std::unique_ptr<Expr>>& args,
-                      const std::string& slotPtr, const std::string& recvPtr);
+                      const std::string& slotPtr, const std::string& recvPtr,
+                      const std::vector<int>* order = nullptr);
     // Allocate + zero-init a temp object slot for a slot-call result used as a value (not a
     // variable initializer); registers it for scope-exit destruction. Returns the temp ptr.
     std::string materializeSlotTemp(const std::string& className);
@@ -331,11 +334,19 @@ private:
     // Build a comma-separated LLVM argument string for a call, casting each arg to
     // the declared param type when provided. Any omitted trailing parameters are filled by
     // emitting their default-value expressions (`defaults`, keyed positionally; may be null).
+    // When `order` is non-null (a named-argument call), it maps each parameter SLOT to the written
+    // argument index that fills it (or -1 = use that slot's default). Written args are evaluated in
+    // source order and then assembled in parameter order. When `order` is null the call is purely
+    // positional: args are emitted in order, then any omitted trailing params are default-filled.
     std::string buildArgString(const std::vector<std::unique_ptr<Expr>>& args,
                                const std::vector<Type>* declaredParamTypes,
-                               const std::vector<const Expr*>* defaults = nullptr);
+                               const std::vector<const Expr*>* defaults = nullptr,
+                               const std::vector<int>* order = nullptr);
     // Per-parameter default expressions for an emitted callee name, or nullptr if it has none.
     const std::vector<const Expr*>* defaultsFor(const std::string& emittedName) const;
+    // Per-parameter-slot argument permutation recorded by the semantic pass for a named-argument
+    // call/new node, or nullptr for a purely positional call.
+    const std::vector<int>* orderFor(const void* node) const;
 
     // Emit a GEP for field `fieldName` on `objPtr` of class `className`.
     // Returns {gepRegister, fieldType}; returns {"0", Error} on lookup failure.

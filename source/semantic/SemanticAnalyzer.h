@@ -48,6 +48,9 @@ struct ClassInfo {
         // is the same for the implicit receiver (a value-object method call would dangle).
         std::vector<bool> paramEscapes{};
         bool              thisEscapes = false;
+        // For named arguments (set post-construction, like paramEscapes).
+        std::vector<std::string> paramNames{};   // parameter names
+        std::vector<bool>        paramHasDefault{};  // per-parameter: has a default value?
     };
     // A static (class-level) field: shared storage, not part of the struct layout.
     struct StaticField {
@@ -73,6 +76,12 @@ struct FunctionOverload {
     bool              isExtern = false;
     Token             decl;
     std::vector<bool> paramEscapes{};    // per-parameter escape bit (see ClassInfo::Method)
+    std::vector<std::string> paramNames; // parameter names (for named arguments)
+    std::vector<bool> paramHasDefault;   // per-parameter: does it have a default value?
+    // `fn private` — file-local. A cross-file call warns (not errors). `sourceFile` is the
+    // declaring file's canonical path; empty for extern (always public).
+    bool              isPublic = true;
+    std::string       sourceFile;
 };
 
 // One overload candidate for resolution: pointers into a registry entry + its return type.
@@ -83,6 +92,10 @@ struct OverloadCand {
     Type                     returnType;
     size_t                   numDefaults = 0;
     const std::vector<bool>* paramEscapes = nullptr;   // per-parameter escape bit (may be null)
+    // For named-argument resolution: the parameter names and a per-slot "has a default value" flag.
+    // Both may be null for candidates that don't support named args (defaults to positional).
+    const std::vector<std::string>* paramNames = nullptr;
+    const std::vector<bool>*        paramHasDefault = nullptr;
 };
 
 // ---- EnumInfo: semantic information about a Java-style enum ----
@@ -119,6 +132,10 @@ struct SemanticResult {
     // constructs that class (like a `Class{...}` constructor rvalue). The chosen ctor overload,
     // if any, is in resolvedCallee under the same node.
     std::unordered_map<const void*, std::string> braceInitClass;
+    // Named/reordered calls: call/new node → per-parameter-slot written-argument index (or -1 =
+    // fill from that slot's default). Present only when the call used named arguments; a purely
+    // positional call is absent (codegen keeps its identity-order + trailing-default path).
+    std::unordered_map<const void*, std::vector<int>> callArgOrder;
 };
 
 class SemanticAnalyzer {
@@ -135,6 +152,9 @@ private:
     std::optional<Type> currentReturnType; // nullopt = top-level (not inside a function)
     int                 loopDepth         = 0;  // > 0 while inside a while/for loop
     std::string         currentClassName;       // set while analysing a class body
+    std::string         currentFile_;           // declaring file of the free function being analysed
+                                                 // (empty inside class/enum/impl bodies) — drives the
+                                                 // cross-file private-function-call warning
     bool                currentClassIsEnum = false; // true while analysing an enum body
     bool                currentMethodIsStatic = false; // true while analysing a static method body
     bool                inEnumConstructor  = false; // true while analysing an enum's constructor body
@@ -164,6 +184,8 @@ private:
     std::unordered_map<const void*, std::string> callableCalls_;
     // Untyped brace-init nodes → deduced class name (copied to SemanticResult).
     std::unordered_map<const void*, std::string> braceInitClass_;
+    // Named/reordered call nodes → per-slot written-arg index (copied to SemanticResult).
+    std::unordered_map<const void*, std::vector<int>> callArgOrder_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
@@ -295,7 +317,9 @@ private:
     // the winning candidate index — or -1 (having reported no-match/ambiguity).
     int resolveOverload(const Token& at, const std::string& what,
                         const std::vector<OverloadCand>& cands,
-                        const std::vector<std::unique_ptr<Expr>>& args);
+                        const std::vector<std::unique_ptr<Expr>>& args,
+                        const std::vector<Token>& argNames = {},
+                        const void* nodeKey = nullptr);
     // Analyze `e` with a contextual expected type set (for return-type overload
     // disambiguation), restoring the previous expected type afterward.
     Type analyzeWithExpected(const Expr& e, const Type& expected);

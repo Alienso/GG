@@ -102,61 +102,117 @@ Type SemanticAnalyzer::analyzeWithExpected(const Expr& e, const Type& expected) 
 // Best-match overload resolution — see the header for the algorithm.
 int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
                                       const std::vector<OverloadCand>& cands,
-                                      const std::vector<std::unique_ptr<Expr>>& args) {
+                                      const std::vector<std::unique_ptr<Expr>>& args,
+                                      const std::vector<Token>& argNames,
+                                      const void* nodeKey) {
     // The expected type applies to THIS call's return, not to its arguments — snapshot and
     // clear it so it doesn't leak into argument sub-expression resolution.
     std::optional<Type> expected = expectedType_;
     expectedType_ = std::nullopt;
 
-    std::vector<Type> argTypes;
-    argTypes.reserve(args.size());
+    // Number of leading POSITIONAL arguments (all named args follow them — the parser enforces
+    // this). Empty argNames ⇒ every argument is positional (the common, fast path).
+    auto positionalCount = [&]() -> size_t {
+        for (size_t k = 0; k < argNames.size(); ++k)
+            if (!argNames[k].lexeme.empty()) return k;
+        return args.size();
+    };
+    const size_t positional = positionalCount();
+    const bool   hasNames    = positional < args.size();
+
+    auto slotHasDefault = [](const OverloadCand& c, size_t i, size_t total) -> bool {
+        if (c.paramHasDefault && i < c.paramHasDefault->size()) return (*c.paramHasDefault)[i];
+        return i >= total - std::min(c.numDefaults, total);   // fallback: trailing run
+    };
+    auto nameSlot = [](const OverloadCand& c, const std::string& n) -> int {
+        if (!c.paramNames) return -1;
+        for (size_t i = 0; i < c.paramNames->size(); ++i) if ((*c.paramNames)[i] == n) return int(i);
+        return -1;
+    };
+    // Map a call's args onto a candidate's parameter slots → per-slot written-arg index (or -1 =
+    // use that slot's default). Returns false with a reason on failure.
+    auto mapSlots = [&](const OverloadCand& c, std::vector<int>& order, std::string& reason) -> bool {
+        const size_t total = c.params->size();
+        order.assign(total, -1);
+        if (positional > total) { reason = "too many arguments"; return false; }
+        for (size_t k = 0; k < positional; ++k) order[k] = int(k);
+        for (size_t k = positional; k < args.size(); ++k) {
+            int slot = nameSlot(c, argNames[k].lexeme);
+            if (slot < 0) { reason = "unknown parameter name '" + argNames[k].lexeme + "'"; return false; }
+            if (order[slot] >= 0) {
+                reason = "parameter '" + argNames[k].lexeme + "' " +
+                         (size_t(slot) < positional ? "already given positionally" : "given more than once");
+                return false;
+            }
+            order[slot] = int(k);
+        }
+        for (size_t i = 0; i < total; ++i)
+            if (order[i] < 0 && !slotHasDefault(c, i, total)) {
+                reason = "no argument for required parameter" +
+                         (c.paramNames && i < c.paramNames->size() ? " '" + (*c.paramNames)[i] + "'" : "");
+                return false;
+            }
+        return true;
+    };
+
+    // Analyse the written arguments once, in source order. For a single candidate an untyped
+    // brace-init argument (`{...}`) deduces its class from the parameter type it maps to.
+    std::vector<int> soleOrder;
+    std::string soleReason;
+    bool haveSole = (cands.size() == 1) && mapSlots(cands[0], soleOrder, soleReason);
+    auto slotOfWritten = [&](size_t k) -> int {         // where written arg k lands in the sole cand
+        if (k < positional) return int(k);
+        return haveSole ? nameSlot(cands[0], argNames[k].lexeme) : -1;
+    };
+    std::vector<Type> argTypes(args.size());
     bool anyArgError = false;
     for (size_t k = 0; k < args.size(); ++k) {
-        // An untyped brace-init argument (`{...}`) deduces its class from the parameter type.
-        // Supported when the callee is unambiguous at this position (a single candidate); with
-        // overloads the type must be spelled out (analyzeBraceInit reports that).
+        int slot = slotOfWritten(k);
         if (args[k]->node && std::holds_alternative<BraceInitExpr>(*args[k]->node)
-            && cands.size() == 1 && k < cands[0].params->size())
-            expectedType_ = (*cands[0].params)[k];
+            && cands.size() == 1 && slot >= 0 && size_t(slot) < cands[0].params->size())
+            expectedType_ = (*cands[0].params)[slot];
         else
             expectedType_ = std::nullopt;
         Type t = analyzeExpr(*args[k]);
         if (isError(t)) anyArgError = true;
-        argTypes.push_back(t);
+        argTypes[k] = t;
     }
     expectedType_ = std::nullopt;
     if (anyArgError) return -1;   // a bad argument already reported an error; avoid cascades
 
-    struct Viable { int idx; int cost; };
+    struct Viable { int idx; int cost; std::vector<int> order; };
     std::vector<Viable> viable;
+    std::string lastReason;
     for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
         const OverloadCand& c = cands[i];
-        // Arity is a range: omitted trailing args are filled from defaults, so the call is viable
-        // when it supplies between (total - numDefaults) and total arguments.
-        size_t total    = c.params->size();
-        size_t required = total - std::min(c.numDefaults, total);
-        if (args.size() < required || args.size() > total) continue;
+        std::vector<int> order;
+        if (!mapSlots(c, order, lastReason)) continue;
         bool ok = true;
         int  cost = 0;
-        for (size_t k = 0; k < args.size(); ++k) {   // only the supplied (leftmost) args
-            const Type& pt = (*c.params)[k];
-            if (argTypes[k] == pt) continue;                       // exact: cost 0
-            CastResult cr = canPassArgument(argTypes[k], pt);      // incl. value-object borrow
+        for (size_t s = 0; s < order.size() && ok; ++s) {
+            if (order[s] < 0) continue;                            // filled from a default
+            const Type& pt = (*c.params)[s];
+            const Type& at2 = argTypes[order[s]];
+            if (at2 == pt) continue;                               // exact: cost 0
+            CastResult cr = canPassArgument(at2, pt);              // incl. value-object borrow
             if (cr == CastResult::None) { ok = false; break; }
             cost += (cr == CastResult::Warn) ? 2 : 1;              // narrowing worse than widening
         }
-        if (ok) viable.push_back({i, cost});
+        if (ok) viable.push_back({i, cost, std::move(order)});
     }
 
     if (viable.empty()) {
-        // Non-overloaded case: keep the precise arity diagnostic.
+        // Single non-overloaded candidate with a positional-only call → keep the precise arity
+        // diagnostic; otherwise surface the mapping reason (unknown name, missing required, …).
         size_t total    = cands.empty() ? 0 : cands[0].params->size();
         size_t required = cands.empty() ? 0 : total - std::min(cands[0].numDefaults, total);
-        if (cands.size() == 1 && (args.size() < required || args.size() > total)) {
+        if (cands.size() == 1 && !hasNames && (args.size() < required || args.size() > total)) {
             std::string want = (required == total)
                 ? std::to_string(total)
                 : std::to_string(required) + " to " + std::to_string(total);
             error(at, what + " expects " + want + " argument(s), got " + std::to_string(args.size()));
+        } else if (cands.size() == 1 && !lastReason.empty()) {
+            error(at, "no matching call to " + what + ": " + lastReason);
         } else {
             error(at, "no matching overload for " + what + " with the given argument types");
         }
@@ -166,16 +222,16 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
     int minCost = viable.front().cost;
     for (const Viable& v : viable) if (v.cost < minCost) minCost = v.cost;
     std::vector<int> best;
-    for (const Viable& v : viable) if (v.cost == minCost) best.push_back(v.idx);
+    for (size_t vi = 0; vi < viable.size(); ++vi) if (viable[vi].cost == minCost) best.push_back(int(vi));
 
-    int chosen = -1;
+    int chosenVi = -1;
     if (best.size() == 1) {
-        chosen = best[0];
+        chosenVi = best[0];
     } else if (expected) {
         // Tie on argument cost → disambiguate on return type via the contextual expected type.
         int rtBest = -1, rtCost = -1, rtTies = 0;
-        for (int i : best) {
-            const Type& rt = cands[i].returnType;
+        for (int vi : best) {
+            const Type& rt = cands[viable[vi].idx].returnType;
             int c;
             if (rt == *expected) c = 0;
             else {
@@ -183,41 +239,42 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
                 if (cr == CastResult::None) continue;
                 c = (cr == CastResult::Warn) ? 2 : 1;
             }
-            if (rtBest < 0 || c < rtCost) { rtBest = i; rtCost = c; rtTies = 1; }
+            if (rtBest < 0 || c < rtCost) { rtBest = vi; rtCost = c; rtTies = 1; }
             else if (c == rtCost) rtTies++;
         }
-        if (rtBest >= 0 && rtTies == 1) chosen = rtBest;
+        if (rtBest >= 0 && rtTies == 1) chosenVi = rtBest;
     }
-    if (chosen < 0) {
+    if (chosenVi < 0) {
         error(at, "ambiguous call to overloaded " + what
               + "; add an explicit cast to select an overload");
         return -1;
     }
 
-    // Emit the normal per-argument cast / mut diagnostics on the chosen overload only.
+    const int chosen = viable[chosenVi].idx;
+    const std::vector<int>& order = viable[chosenVi].order;
     const OverloadCand& w = cands[chosen];
-    for (size_t k = 0; k < args.size(); ++k) {
-        checkArgCast(argTypes[k], (*w.params)[k], at, "argument " + std::to_string(k + 1) + " of " + what);
-        if (w.paramMut && k < w.paramMut->size() && (*w.paramMut)[k])
-            warnConstToMut(at, *args[k], (*w.params)[k]);
-        // Borrowing a primitive lvalue into a `ref <primitive>` parameter requires an addressable
-        // argument — a temporary (e.g. `a + b`) has no address to borrow.
-        if (isPrimitiveBorrow((*w.params)[k]) && !isBorrow(argTypes[k]) && !isLvalueExpr(*args[k]))
-            error(at, "argument " + std::to_string(k + 1) + " of " + what + " expects a 'ref "
-                  + typeName(borrowElementType((*w.params)[k]))
+    // Emit the per-argument cast / mut diagnostics on the chosen overload, per filled slot.
+    for (size_t s = 0; s < order.size(); ++s) {
+        if (order[s] < 0) continue;                       // default-filled: nothing to diagnose here
+        size_t k = size_t(order[s]);
+        std::string argLabel = "argument " + std::to_string(k + 1) + " of " + what;
+        checkArgCast(argTypes[k], (*w.params)[s], at, argLabel);
+        if (w.paramMut && s < w.paramMut->size() && (*w.paramMut)[s])
+            warnConstToMut(at, *args[k], (*w.params)[s]);
+        if (isPrimitiveBorrow((*w.params)[s]) && !isBorrow(argTypes[k]) && !isLvalueExpr(*args[k]))
+            error(at, argLabel + " expects a '" + typeName((*w.params)[s])
                   + "' but got a temporary; a borrow needs an addressable value (a variable or an "
                   "element like `a[i]`)");
-        // Escape analysis: borrowing a *stack value object* as a reference is safe only if the
-        // callee just borrows it. If the parameter escapes (the callee returns or stores it), the
-        // reference would outlive the stack object → reject.
-        if (argTypes[k].kind == TypeKind::Object && (*w.params)[k].kind == TypeKind::Reference
-            && w.paramEscapes && k < w.paramEscapes->size() && (*w.paramEscapes)[k])
-            error(at, "cannot pass the value object '" + argTypes[k].className + "' as argument "
-                  + std::to_string(k + 1) + " of " + what + ": that parameter escapes (the callee "
-                  "stores or returns it), but a stack value object has no owner to keep it alive past "
-                  "the call — allocate it with `new " + argTypes[k].className
-                  + "(...)` (a heap reference) instead");
+        if (argTypes[k].kind == TypeKind::Object && (*w.params)[s].kind == TypeKind::Reference
+            && w.paramEscapes && s < w.paramEscapes->size() && (*w.paramEscapes)[s])
+            error(at, "cannot pass the value object '" + argTypes[k].className + "' as " + argLabel
+                  + ": that parameter escapes (the callee stores or returns it), but a stack value "
+                  "object has no owner to keep it alive past the call — allocate it with `new "
+                  + argTypes[k].className + "(...)` (a heap reference) instead");
     }
+    // Record the argument permutation for codegen when the call used named arguments (a purely
+    // positional call keeps codegen's identity-order + trailing-default path).
+    if (hasNames && nodeKey) callArgOrder_[nodeKey] = order;
     return chosen;
 }
 
@@ -766,12 +823,12 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return Type{TypeKind::Error};
     }
 
-    // Assigning to a `ref <primitive>` writes THROUGH the borrow (like C++ `int& r; r = 5;`); it
-    // does not rebind. Requires a mutable borrow (`mut ref`); the value must match the element.
+    // Assigning to a primitive borrow (`i32*`) writes THROUGH the borrow (like C++ `int& r; r = 5;`);
+    // it does not rebind. Requires a mutable borrow (`mut i32*`); the value must match the element.
     if (isPrimitiveBorrow(sym->type)) {
         if (!sym->isMutable) {
             error(assign.name, "cannot write through a shared borrow '" + assign.name.lexeme
-                  + "'; declare it 'mut ref' to allow writing to the borrowed value");
+                  + "'; declare it 'mut " + typeName(sym->type) + "' to allow writing to the borrowed value");
             analyzeExpr(*assign.value);
             return borrowElementType(sym->type);
         }
@@ -951,8 +1008,9 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
         }
         const std::vector<ClassInfo::Method>& set = ctorIt->second;
         std::vector<OverloadCand> cands;
-        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
-        int idx = resolveOverload(call.callee, "constructor '" + name + "'", cands, call.args);
+        for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
+        int idx = resolveOverload(call.callee, "constructor '" + name + "'", cands, call.args,
+                                  call.argNames, &call);
         if (idx >= 0 && set.size() > 1)
             resolvedCallee[&call] = mangleOverload(name + "_" + name, set[idx].paramTypes, set[idx].returnType);
         return makeObjectType(name);
@@ -991,13 +1049,23 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
             for (const std::string& tr : implIt->second)
                 if (tr.rfind("Call", 0) == 0) { callable = true; break; }
         if (callable) {
+            // Named arguments are not supported on the callable-object sugar `obj(...)` (it lowers
+            // through the trait-method call path, which doesn't reorder). Use `obj.call(...)`.
+            for (const Token& n : call.argNames)
+                if (!n.lexeme.empty()) {
+                    error(call.callee, "named arguments are not supported on a callable-object call '"
+                          + call.callee.lexeme + "(...)'; call '" + call.callee.lexeme
+                          + ".call(...)' explicitly to pass arguments by name");
+                    return Type{TypeKind::Error};
+                }
             ClassInfo& info = classRegistry.at(cn);
             auto mit = info.methods.find("call");
             if (mit != info.methods.end() && !mit->second.empty()) {
                 std::vector<OverloadCand> cands;
                 for (const auto& m : mit->second)
-                    cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
-                int idx = resolveOverload(call.callee, "call on '" + cn + "'", cands, call.args);
+                    cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
+                int idx = resolveOverload(call.callee, "call on '" + cn + "'", cands, call.args,
+                                          call.argNames, &call);
                 if (idx < 0) return Type{TypeKind::Error};
                 const ClassInfo::Method& m = mit->second[idx];
                 callableCalls_[&call] = cn;
@@ -1016,9 +1084,19 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     if (fit != functionRegistry.end()) {
         const std::vector<FunctionOverload>& set = fit->second;
         std::vector<OverloadCand> cands;
-        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType, f.numDefaults, &f.paramEscapes});
-        int idx = resolveOverload(call.callee, "function '" + name + "'", cands, call.args);
+        for (const auto& f : set) cands.push_back({&f.paramTypes, &f.paramMut, f.returnType, f.numDefaults, &f.paramEscapes, &f.paramNames, &f.paramHasDefault});
+        int idx = resolveOverload(call.callee, "function '" + name + "'", cands, call.args,
+                                  call.argNames, &call);
         if (idx < 0) return Type{TypeKind::Error};
+        // Access control: a `private` free function is file-local. Calling it from a
+        // different source file is a warning (not an error), like a private field accessed
+        // outside its class. Only fires when both files are known and differ, so same-file
+        // calls and unknown-origin contexts (class/enum/impl bodies) never warn.
+        const FunctionOverload& chosen = set[idx];
+        if (!chosen.isPublic && !chosen.sourceFile.empty()
+            && !currentFile_.empty() && chosen.sourceFile != currentFile_) {
+            warn(call.callee, "function '" + name + "' is private to its source file");
+        }
         if (set.size() > 1 && !set[idx].isExtern)
             resolvedCallee[&call] = mangleOverload(name, set[idx].paramTypes, set[idx].returnType);
         return set[idx].returnType;
@@ -1027,8 +1105,9 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     // Implicit `this`: a bare call may target a method of the enclosing class.
     if (const std::vector<ClassInfo::Method>* ms = currentClassMethods(name)) {
         std::vector<OverloadCand> cands;
-        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
-        int idx = resolveOverload(call.callee, "method '" + name + "'", cands, call.args);
+        for (const auto& m : *ms) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
+        int idx = resolveOverload(call.callee, "method '" + name + "'", cands, call.args,
+                                  call.argNames, &call);
         if (idx < 0) return Type{TypeKind::Error};
         const ClassInfo::Method& m = (*ms)[idx];
         if (!m.isStatic && currentMethodIsStatic) {
@@ -1112,11 +1191,12 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     if (varDecl.arraySize == 0 && varDecl.initializer) {
         Type initializerType = analyzeWithExpected(*varDecl.initializer, declaredType);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
-        // A `ref <primitive>` must borrow an addressable value. Binding from a fresh primitive
-        // (not itself a borrow being passed along) requires an lvalue — a temporary has no address.
+        // A primitive borrow (`i32*`) must borrow an addressable value. Binding from a fresh
+        // primitive (not itself a borrow being passed along) requires an lvalue — a temporary
+        // has no address.
         if (isPrimitiveBorrow(declaredType) && !isBorrow(initializerType)
             && !isLvalueExpr(*varDecl.initializer))
-            error(varDecl.name, "a 'ref " + typeName(borrowElementType(declaredType))
+            error(varDecl.name, "a '" + typeName(declaredType)
                   + "' must borrow an addressable value (a variable or an element like `a[i]`), "
                   "not a temporary");
         // Initialising a `mut` reference from a read-only reference is a const→mut coercion.
@@ -1541,9 +1621,10 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
                 }
                 const std::vector<ClassInfo::Method>& set = mIt->second;
                 std::vector<OverloadCand> cands;
-                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
+                for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
                 int idx = resolveOverload(methodCall.method,
-                            "static method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
+                            "static method '" + methodCall.method.lexeme + "'", cands, methodCall.args,
+                            methodCall.argNames, &methodCall);
                 if (idx < 0) return Type{TypeKind::Error};
                 const ClassInfo::Method& sm = set[idx];
                 if (!sm.isStatic) {
@@ -1601,9 +1682,10 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
 
     const std::vector<ClassInfo::Method>& set = methodIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
     int idx = resolveOverload(methodCall.method,
-                "method '" + methodCall.method.lexeme + "'", cands, methodCall.args);
+                "method '" + methodCall.method.lexeme + "'", cands, methodCall.args,
+                methodCall.argNames, &methodCall);
     if (idx < 0) return Type{TypeKind::Error};
     const ClassInfo::Method& method = set[idx];
 
@@ -1652,7 +1734,7 @@ Type SemanticAnalyzer::analyzeRefStore(const RefStoreExpr& refStore) {
     if (targetType.kind != TypeKind::Reference) {
         error(refStore.op, "the left side of '=' is not assignable: this expression is not a "
               "reference. Assign to a variable, an element `a[i]`, a field `x.f`, or a call that "
-              "returns a reference (`ref T`)");
+              "returns a borrow (`T*`)");
         analyzeExpr(*refStore.value);
         return Type{TypeKind::Error};
     }
@@ -1712,7 +1794,7 @@ Type SemanticAnalyzer::analyzeBraceInit(const BraceInitExpr& braceInit) {
     const std::vector<ClassInfo::Method>& set = ctorIt->second;
     std::vector<OverloadCand> cands;
     for (const auto& m : set)
-        cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
+        cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
     expectedType_ = std::nullopt;   // the class was consumed; don't leak it into ctor args
     int idx = resolveOverload(braceInit.brace, "constructor '" + cls + "'", cands, braceInit.args);
     if (idx >= 0 && set.size() > 1)
@@ -1818,8 +1900,9 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
 
     const std::vector<ClassInfo::Method>& set = ctorIt->second;
     std::vector<OverloadCand> cands;
-    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes});
-    int idx = resolveOverload(newExpr.className, "constructor '" + className + "'", cands, newExpr.args);
+    for (const auto& m : set) cands.push_back({&m.paramTypes, &m.paramMut, m.returnType, m.numDefaults, &m.paramEscapes, &m.paramNames, &m.paramHasDefault});
+    int idx = resolveOverload(newExpr.className, "constructor '" + className + "'", cands, newExpr.args,
+                              newExpr.argNames, &newExpr);
     if (idx >= 0 && set.size() > 1)
         resolvedCallee[&newExpr] = mangleOverload(className + "_" + className,
                                                   set[idx].paramTypes, set[idx].returnType);

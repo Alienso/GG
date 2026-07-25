@@ -19,10 +19,18 @@ TEST_CASE("Default - a trailing default parses", "[default][parser]") {
     REQUIRE(fn.params[1].defaultValue != nullptr);
 }
 
-TEST_CASE("Default - a non-trailing default is rejected", "[default][parser]") {
+TEST_CASE("Default - a non-trailing default is now allowed (named args can fill later params)", "[default][parser]") {
+    // Since named arguments exist, a default may sit on any parameter — a non-contiguous default
+    // is no longer a parse error (a positional call still can't skip the later required param, but
+    // a named call can).
     StderrCapture cap;
     auto prog = parseString("fn f(i32 a = 0, i32 b, i32 c = 0) -> i32 { return a; }");
-    REQUIRE(cap.contains("must have a default value because an earlier parameter has one"));
+    REQUIRE_FALSE(cap.contains("must have a default value"));
+    REQUIRE(prog.declarations.size() == 1);
+    const auto& fn = asStmt<FunctionDeclStmt>(prog.declarations[0]);
+    REQUIRE(fn.params[0].defaultValue != nullptr);
+    REQUIRE(fn.params[1].defaultValue == nullptr);
+    REQUIRE(fn.params[2].defaultValue != nullptr);
 }
 
 TEST_CASE("Default - defaults are rejected on extern", "[default][parser]") {
@@ -31,11 +39,11 @@ TEST_CASE("Default - defaults are rejected on extern", "[default][parser]") {
     REQUIRE(cap.contains("not allowed on 'extern'"));
 }
 
-TEST_CASE("Default - the contiguous rule fires on a constructor too", "[default][parser]") {
-    // Constructors route through the same parseParamList, so the trailing-run rule must apply.
+TEST_CASE("Default - a non-contiguous default is allowed on a constructor too", "[default][parser]") {
+    // Constructors route through the same parseParamList, so they share the relaxed rule.
     StderrCapture cap;
     auto prog = parseString("class C { C(i32 a = 0, i32 b) { } }");
-    REQUIRE(cap.contains("must have a default value because an earlier parameter has one"));
+    REQUIRE_FALSE(cap.contains("must have a default value"));
 }
 
 // ---- Semantic ----

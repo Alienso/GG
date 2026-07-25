@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include "helpers.h"
 
+#include <algorithm>   // std::replace (for the cross-file private-function tests)
+
 // ============================================================
 // Valid programs — should produce no errors
 // ============================================================
@@ -657,4 +659,90 @@ TEST_CASE("Uninit - variable initialized before loop body always read is valid",
         }
     )");
     REQUIRE_FALSE(result.hadError);
+}
+
+// ============================================================
+// Access control — `private` on free functions
+// ============================================================
+// A free function may be declared `fn private name(...)`. Like a private field, this is
+// file-local: calling it from a DIFFERENT source file is a warning (not an error); calling
+// it from the same file is silent. Cross-file needs two real files, so these tests write a
+// library file to a temp path and import it by absolute path from an inline source string.
+
+namespace {
+    // Write `libSource` to a per-process temp file and return an importing source string
+    // (absolute import path, forward-slashed for the GG string literal) that runs `body`.
+    std::string importingSource(const std::string& libSource, const std::string& body) {
+        auto dir  = std::filesystem::temp_directory_path();
+        auto name = "gg_priv_lib_" +
+#ifdef _WIN32
+            std::to_string(_getpid())
+#else
+            std::to_string(getpid())
+#endif
+            + ".gg";
+        auto libPath = (dir / name).string();
+        std::ofstream(libPath) << libSource;
+        std::string importPath = libPath;
+        std::replace(importPath.begin(), importPath.end(), '\\', '/');
+        return "import \"" + importPath + "\";\n" + body;
+    }
+}
+
+TEST_CASE("Private fn - parser sets isPublic on the FunctionDeclStmt", "[private][parser]") {
+    auto prog = parseStringRaw(R"(
+        fn private secret() -> i32 { return 1; }
+        fn open() -> i32 { return 2; }
+    )");
+    REQUIRE(prog.declarations.size() == 2);
+    const auto& secret = asStmt<FunctionDeclStmt>(prog.declarations[0]);
+    const auto& open   = asStmt<FunctionDeclStmt>(prog.declarations[1]);
+    REQUIRE(secret.name.lexeme == "secret");
+    REQUIRE_FALSE(secret.isPublic);
+    REQUIRE(open.isPublic);
+}
+
+TEST_CASE("Private fn - a private function is callable within its own file", "[private][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn private secret() -> i32 { return 42; }
+        fn main() -> i32 { return secret(); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - calling a private function cross-file warns (not errors)", "[private][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn private secret() -> i32 { return 42; }\n",
+        "fn main() -> i32 { return secret(); }\n"));
+    REQUIRE_FALSE(result.hadError);                         // warning, not error
+    REQUIRE(cap.contains("function 'secret' is private to its source file"));
+}
+
+TEST_CASE("Private fn - a public function called cross-file does not warn", "[private][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn open() -> i32 { return 42; }\n",
+        "fn main() -> i32 { return open(); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - a private function used internally then imported warns only at the cross-file site",
+          "[private][semantic]") {
+    StderrCapture cap;
+    // The library calls its own private `secret` (same file → silent); the importer calls it
+    // directly (cross-file → one warning).
+    auto result = analyzeString(importingSource(
+        "fn private secret() -> i32 { return 42; }\n"
+        "fn helper() -> i32 { return secret(); }\n",
+        "fn main() -> i32 { return helper() + secret(); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    const std::string& out = cap.str();
+    // Exactly one occurrence of the warning (the importer's direct call), none for helper().
+    auto first = out.find("is private to its source file");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(out.find("is private to its source file", first + 1) == std::string::npos);
 }

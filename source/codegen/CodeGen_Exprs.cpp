@@ -19,52 +19,63 @@ std::string CodeGen::freshAllocaName(const std::string& varName) {
 
 std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& args,
                                      const std::vector<Type>* declaredParamTypes,
-                                     const std::vector<const Expr*>* defaults) {
-    std::string argumentString;
-    bool   first      = true;
-    size_t paramIndex = 0;
-
-    auto emitArg = [&](const Expr& arg) {
-        if (!first) argumentString += ", ";
-        first = false;
+                                     const std::vector<const Expr*>* defaults,
+                                     const std::vector<int>* order) {
+    auto paramTypeAt = [&](size_t slot) -> const Type* {
+        return (declaredParamTypes && slot < declaredParamTypes->size())
+                   ? &(*declaredParamTypes)[slot] : nullptr;
+    };
+    // Emit one argument expression as the IR operand "<irtype> <value>", cast to the parameter
+    // type it fills (`slot`). A primitive-borrow parameter takes the argument's ADDRESS.
+    auto emitOne = [&](const Expr& arg, size_t slot) -> std::string {
         Type argType = exprType(arg);
-        // Borrowing a primitive lvalue into a `ref <primitive>` parameter: pass its ADDRESS, not
-        // the loaded value (like creating a `ref i32` binding). A borrow argument passed onward
-        // resolves through the same helper.
-        if (declaredParamTypes && paramIndex < declaredParamTypes->size()
-            && isPrimitiveBorrow((*declaredParamTypes)[paramIndex]) && !isBorrow(argType)) {
-            std::string addr = genBorrowSource(arg);
-            argumentString += "ptr " + addr;
-            ++paramIndex;
-            return;
-        }
+        const Type* pt = paramTypeAt(slot);
+        if (pt && isPrimitiveBorrow(*pt) && !isBorrow(argType))
+            return "ptr " + genBorrowSource(arg);
         std::string value = genExpr(arg);
-        // Cast to the declared parameter type when the IR types differ.
-        if (declaredParamTypes && paramIndex < declaredParamTypes->size()) {
-            const Type& paramType = (*declaredParamTypes)[paramIndex];
-            value   = emitCast(value, argType, paramType);
-            argType = paramType;
-        }
-        ++paramIndex;
-        // Objects pass by reference: `value` is already the object's address.
-        argumentString += paramIrType(argType) + " " + value;
+        if (pt) { value = emitCast(value, argType, *pt); argType = *pt; }
+        return paramIrType(argType) + " " + value;   // objects pass by address (value is a ptr)
     };
 
-    for (const auto& arg : args) emitArg(*arg);
+    std::string out;
+    bool first = true;
+    auto append = [&](const std::string& s) { if (!first) out += ", "; first = false; out += s; };
 
-    // Fill omitted trailing parameters by emitting their default-value expressions (evaluated
-    // here, at the call site). The default nodes come from the callee's declaration.
-    if (defaults && declaredParamTypes) {
-        for (size_t i = args.size(); i < declaredParamTypes->size(); ++i) {
-            if (i < defaults->size() && (*defaults)[i]) emitArg(*(*defaults)[i]);
+    if (order) {
+        // Named-argument call: evaluate the WRITTEN arguments in source order (so side effects
+        // occur in the order the programmer wrote them), then assemble them in parameter order.
+        const size_t total = order->size();
+        std::vector<int> slotOfWritten(args.size(), -1);
+        for (size_t i = 0; i < total; ++i)
+            if ((*order)[i] >= 0 && size_t((*order)[i]) < args.size()) slotOfWritten[(*order)[i]] = int(i);
+        std::vector<std::string> written(args.size());
+        for (size_t k = 0; k < args.size(); ++k)
+            written[k] = emitOne(*args[k], slotOfWritten[k] >= 0 ? size_t(slotOfWritten[k]) : k);
+        for (size_t i = 0; i < total; ++i) {
+            if ((*order)[i] >= 0)                      append(written[(*order)[i]]);
+            else if (defaults && i < defaults->size() && (*defaults)[i]) append(emitOne(*(*defaults)[i], i));
         }
+        return out;
     }
-    return argumentString;
+
+    // Positional call: arguments in written order, then any omitted trailing params from defaults.
+    size_t slot = 0;
+    for (const auto& arg : args) append(emitOne(*arg, slot++));
+    if (defaults && declaredParamTypes)
+        for (size_t i = args.size(); i < declaredParamTypes->size(); ++i)
+            if (i < defaults->size() && (*defaults)[i]) append(emitOne(*(*defaults)[i], i));
+    return out;
 }
 
 const std::vector<const Expr*>* CodeGen::defaultsFor(const std::string& emittedName) const {
     auto it = funcDefaults_.find(emittedName);
     return it != funcDefaults_.end() ? &it->second : nullptr;
+}
+
+const std::vector<int>* CodeGen::orderFor(const void* node) const {
+    if (!callArgOrder_) return nullptr;
+    auto it = callArgOrder_->find(node);
+    return it != callArgOrder_->end() ? &it->second : nullptr;
 }
 
 // ============================================================
@@ -740,7 +751,8 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
         std::string mangledCtor = calleeName(&call, cn + "_" + cn);
         auto ctorIt = funcParamTypes.find(mangledCtor);
         if (ctorIt != funcParamTypes.end()) {
-            std::string argStr = buildArgString(call.args, &ctorIt->second, defaultsFor(mangledCtor));
+            std::string argStr = buildArgString(call.args, &ctorIt->second, defaultsFor(mangledCtor),
+                                                orderFor(&call));
             emit("call void @" + mangledCtor + "(ptr " + tmp + (argStr.empty() ? "" : ", " + argStr) + ")");
         }
         return tmp;
@@ -766,7 +778,7 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
         }
         if (!fn.empty()) {
             std::string tmp = materializeSlotTemp(resolvedType.className);
-            emitSretCall(fn, call.args, tmp, recv);
+            emitSretCall(fn, call.args, tmp, recv, orderFor(&call));
             return tmp;
         }
     }
@@ -777,7 +789,8 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
         std::string mName = calleeName(&call, currentClassName_ + "_" + call.callee.lexeme);
         auto mp = funcParamTypes.find(mName);
         if (mp != funcParamTypes.end()) {
-            std::string argStr = buildArgString(call.args, &mp->second, defaultsFor(mName));
+            std::string argStr = buildArgString(call.args, &mp->second, defaultsFor(mName),
+                                                orderFor(&call));
             auto cgIt = cgClasses_.find(currentClassName_);
             bool isStatic = cgIt != cgClasses_.end()
                          && cgIt->second.staticMethods.count(call.callee.lexeme) > 0;
@@ -804,7 +817,7 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     const std::vector<Type>* declaredParams =
         funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
 
-    std::string argStr = buildArgString(call.args, declaredParams, defaultsFor(fnName));
+    std::string argStr = buildArgString(call.args, declaredParams, defaultsFor(fnName), orderFor(&call));
 
     if (returnIrType == "void") {
         emit("call void @" + fnName + "(" + argStr + ")");
@@ -821,10 +834,11 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
 
 void CodeGen::emitSretCall(const std::string& fn,
                            const std::vector<std::unique_ptr<Expr>>& args,
-                           const std::string& slotPtr, const std::string& recvPtr) {
+                           const std::string& slotPtr, const std::string& recvPtr,
+                           const std::vector<int>* order) {
     auto it = funcParamTypes.find(fn);
     std::string argStr = buildArgString(args, it != funcParamTypes.end() ? &it->second : nullptr,
-                                        defaultsFor(fn));
+                                        defaultsFor(fn), order);
     std::string full = "ptr " + slotPtr;
     if (!recvPtr.empty()) full += ", ptr " + recvPtr;
     if (!argStr.empty())  full += ", " + argStr;
@@ -859,13 +873,13 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
                 bool isStatic = cgIt != cgClasses_.end()
                              && cgIt->second.staticMethods.count(call.callee.lexeme) > 0;
                 std::string recv = isStatic ? "" : (allocaMap.count("this") ? allocaMap["this"] : "null");
-                emitSretCall(mName, call.args, slotPtr, recv);
+                emitSretCall(mName, call.args, slotPtr, recv, orderFor(&call));
                 return true;
             }
         }
         std::string fnName = calleeName(&call, call.callee.lexeme);
         if (!slotReturningFns_.count(fnName)) return false;
-        emitSretCall(fnName, call.args, slotPtr, "");
+        emitSretCall(fnName, call.args, slotPtr, "", orderFor(&call));
         return true;
     }
 
@@ -878,7 +892,7 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
             if (cgIt != cgClasses_.end() && cgIt->second.staticMethods.count(mc.method.lexeme)) {
                 std::string mName = calleeName(&mc, id.name.lexeme + "_" + mc.method.lexeme);
                 if (!slotReturningFns_.count(mName)) return false;
-                emitSretCall(mName, mc.args, slotPtr, "");
+                emitSretCall(mName, mc.args, slotPtr, "", orderFor(&mc));
                 return true;
             }
         }
@@ -889,7 +903,7 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
         std::string mName = calleeName(&mc, objType.className + "_" + mc.method.lexeme);
         if (!slotReturningFns_.count(mName)) return false;
         std::string recv = isStatic ? "" : genExpr(*mc.object);   // only evaluate once confirmed
-        emitSretCall(mName, mc.args, slotPtr, recv);
+        emitSretCall(mName, mc.args, slotPtr, recv, orderFor(&mc));
         return true;
     }
 
@@ -1074,7 +1088,8 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
                 // No constructor exists (e.g. `C c{}` / `C c()` on a class with no ctor): the
                 // storage is already zero-initialized above, so default-construction is a no-op.
                 if (funcIt != funcParamTypes.end()) {
-                    std::string argStr = buildArgString(ctorCall.args, &funcIt->second, defaultsFor(mangledCtor));
+                    std::string argStr = buildArgString(ctorCall.args, &funcIt->second,
+                                                        defaultsFor(mangledCtor), orderFor(&ctorCall));
                     emit("call void @" + mangledCtor + "(ptr " + ptrName
                          + (argStr.empty() ? "" : ", " + argStr) + ")");
                 }
@@ -1352,7 +1367,8 @@ std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/
     std::string mangledCtor = calleeName(&newExpr, className + "_" + className);
     auto funcIt = funcParamTypes.find(mangledCtor);
     if (funcIt != funcParamTypes.end()) {
-        std::string argStr = buildArgString(newExpr.args, &funcIt->second, defaultsFor(mangledCtor));
+        std::string argStr = buildArgString(newExpr.args, &funcIt->second, defaultsFor(mangledCtor),
+                                            orderFor(&newExpr));
         emit("call void @" + mangledCtor + "(ptr %" + body
              + (argStr.empty() ? "" : ", " + argStr) + ")");
     }

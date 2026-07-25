@@ -1,0 +1,70 @@
+// e2e/named_args_test.gg — named & mixed arguments, default-skipping, and source-order evaluation.
+// Returns 0 on success; a unique code on the first failing check.
+
+// Basic reorder + mixed.
+fn sub(i32 a, i32 b) -> i32 { return a - b; }
+
+// A defaulted MIDDLE parameter — reachable only by naming the later one.
+fn span(i32 lo, i32 step = 10, i32 hi) -> i32 { return (hi - lo) * step; }
+
+// Overload selection by parameter name (distinct names make exactly one candidate viable).
+fn show(i32 count) -> i32 { return count; }
+fn show(bool flag)  -> i32 { if (flag) { return 100; } return 200; }
+
+// Source-order evaluation: arguments are evaluated left-to-right as written, then reordered.
+fn ticket() -> i32 { static mut i32 n = 0; n = n + 1; return n; }
+fn order(i32 first, i32 second) -> i32 { return first * 10 + second; }
+
+fn main() -> i32 {
+    // 1. all-named, reordered
+    if (sub(b: 3, a: 10) != 7)      { return 1; }
+    // 2. mixed: positional prefix + named
+    if (sub(10, b: 4) != 6)         { return 2; }
+    // 3. purely positional still works
+    if (sub(9, 2) != 7)             { return 3; }
+
+    // 4. skip the defaulted middle param by naming `hi` → step defaults to 10
+    if (span(1, hi: 3) != 20)       { return 4; }   // (3-1)*10
+    // 5. override the middle default by name, any order
+    if (span(hi: 5, lo: 1, step: 2) != 8) { return 5; }   // (5-1)*2
+
+    // 6. overload chosen by which name matches
+    if (show(count: 7) != 7)        { return 6; }
+    if (show(flag: true) != 100)    { return 7; }
+
+    // 7. named args evaluate in SOURCE order, not parameter order.
+    //    Written `second:` first → gets ticket()==1; `first:` next → gets ticket()==2.
+    //    order() returns first*10 + second = 2*10 + 1 = 21.
+    if (order(second: ticket(), first: ticket()) != 21) { return 8; }
+
+    // 8. per-slot casting under reordering: written `b`(i8) first, `a`(i64) second —
+    //    the cast must follow each argument to ITS parameter slot.
+    if (widthed(b: 7, a: 5) != 5007)  { return 9; }   // a*1000 + b
+
+    // 9. return-type overloads disambiguated by expected type, through a named arg.
+    i32 c9a = pickRet(v: 5);          // expected i32
+    if (c9a != 6)                     { return 10; }
+    i64 c9b = pickRet(v: 5);          // expected i64
+    if (c9b != 105)                   { return 11; }
+
+    // 10. implicit-this named method call inside a method.
+    mut Counter k;
+    k.bump();                          // reset(step:2, base:100) → 102
+    if (k.value() != 102)              { return 12; }
+
+    return 0;
+}
+
+// (helpers for the deep checks above)
+fn widthed(i64 a, i8 b) -> i64 { return a * 1000 + (b as i64); }
+
+fn pickRet(i32 v) -> i32 { return v + 1; }
+fn pickRet(i32 v) -> i64 { return (v as i64) + 100; }
+
+class Counter {
+    mut i32 n;
+    Counter() { n = 0; }
+    fn setTo(i32 base, i32 step) mut { n = base + step; }
+    fn bump() mut { this.setTo(step: 2, base: 100); }   // implicit-this, named, reordered
+    fn value() -> i32 { return n; }
+}

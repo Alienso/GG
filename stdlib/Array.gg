@@ -1,28 +1,94 @@
+// stdlib/array.gg — a growable array (like C++'s std::vector), generic over the
+// element type T.
+//
+// Storage is a single heap buffer of `T` values that grows geometrically (doubling)
+// as elements are pushed. `[]` reads/writes elements in place via the `Index` trait;
+// `get(i)` hands back a `T*` borrow, so element access is zero-copy.
+//
+// v1 stores elements BY VALUE, so the element type must be a primitive (`Array<i32>`,
+// `Array<f64>`, …). Value objects would need per-element clone/dtor and reference
+// elements would need retain/release, neither of which the raw buffer manages yet, so
+// instantiating `Array<SomeClass>` is a compile error for now (deferred).
+//
+// The buffer and its size/capacity are PRIVATE — the interface never exposes a `ptr`.
+// Requires --unsafe-ptr for the internal `ptr<T>` buffer (compile.ps1 passes it).
+
 import "crt/cmem.gg";
 
 class Array<T> {
-
-    ptr<T> data;
-    u64 size;
-    u64 capacity;
+    private mut ptr<T> data;   // owned buffer of `cap` slots
+    private mut u64    count;  // number of elements in use
+    private mut u64    cap;    // number of slots allocated
 
     Array() {
-        this.size = 0;
-        this.capacity = 8;
-        this.data = malloc(capacity * sizeof(T));
+        this.count = 0;
+        this.cap   = 8;
+        this.data  = malloc(this.cap * sizeof(T));
     }
 
-    ~Array(){
+    ~Array() {
         free(this.data);
     }
 
+    // ---- size / capacity ----
+
+    fn size() -> u64 {
+        return this.count;
+    }
+
+    fn capacity() -> u64 {
+        return this.cap;
+    }
+
+    fn isEmpty() -> bool {
+        return this.count == 0;
+    }
+
+    // ---- mutators ----
+
+    // Append `value` to the end, growing the buffer if it is full.
+    fn push(T value) mut {
+        if (this.count == this.cap) {
+            this.grow();
+        }
+        this.data[this.count] = value;
+        this.count = this.count + 1;
+    }
+
+    // Remove and return the last element. The caller must ensure the array is not
+    // empty (there is no exception mechanism to signal underflow).
+    fn pop() mut -> T {
+        this.count = this.count - 1;
+        return this.data[this.count];
+    }
+
+    // Drop all elements (retains the allocated capacity).
+    fn clear() mut {
+        this.count = 0;
+    }
+
+    // Ensure the buffer can hold at least `minCap` elements without reallocating.
+    fn reserve(u64 minCap) mut {
+        if (minCap > this.cap) {
+            this.cap  = minCap;
+            this.data = realloc(this.data, this.cap * sizeof(T));
+        }
+    }
+
+    // Double the capacity (used when a push overflows the buffer).
+    fn private grow() mut {
+        this.cap  = this.cap * 2;
+        this.data = realloc(this.data, this.cap * sizeof(T));
+    }
 }
 
+// `arr[i]` (read) → get; `arr[i] = v` (write) → set. No bounds check, like
+// std::vector::operator[].
 impl <T> Index for Array<T> {
-    fn get(i32 i) -> ref T {
+    fn get(i32 i) -> T* {
         return data[i];
     }
-    fn set(i32 i, T data) -> void {
-        this.data[i] = data;
+    fn set(i32 i, T value) mut {
+        this.data[i] = value;
     }
 }

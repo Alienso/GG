@@ -265,6 +265,85 @@ TEST_CASE("Const - if/else split initialization of a const is allowed", "[mut][c
     REQUIRE_FALSE(result.hadError);
 }
 
+// Once a const is definitely initialized by BOTH branches of an if/else, it is fully
+// initialized afterwards — so a further write is a reassignment, not a defining
+// assignment, and must be rejected. This pins that the branch-merge marks the binding
+// initialized for const-enforcement, not merely for read-safety.
+TEST_CASE("Const - a const assigned in both branches cannot be reassigned after", "[mut][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i32 x;
+            if (true) { x = 1; } else { x = 2; }
+            x = 3;
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("cannot reassign immutable variable 'x'"));
+}
+
+// The dual: with only one branch assigning, the merge conservatively resets the binding
+// to uninitialized, so the post-if write IS the single defining assignment — allowed.
+TEST_CASE("Const - a const assigned in only one branch may still be defined after", "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i32 x;
+            if (true) { x = 1; }
+            x = 3;
+            return x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+// A loop body may run zero times, so an assignment inside it never establishes
+// initialization for the code after the loop.
+TEST_CASE("Const - a loop-body assignment does not initialize a const for use after the loop", "[mut][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i32 x;
+            while (false) { x = 1; }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+// Deferred initialization applies to `mut` bindings too — definite-assignment is about
+// read-safety, independent of mutability. Assigning in only one branch leaves it possibly
+// unassigned on read.
+TEST_CASE("Const - a mut binding assigned in only one branch is unassigned on a later read", "[mut][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            mut i32 x;
+            if (true) { x = 1; } else { }
+            return x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("before it has been assigned"));
+}
+
+// The branch-merge recurses: nested if/else that assigns on every path fully initializes.
+TEST_CASE("Const - nested if/else assigning on every path initializes a const", "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        fn pick(i32 a, i32 b) -> i32 {
+            i32 x;
+            if (a > 0) {
+                if (b > 0) { x = 1; } else { x = 2; }
+            } else {
+                x = 3;
+            }
+            return x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
 TEST_CASE("Mut - reassigning a mut local is allowed", "[mut][semantic]") {
     auto result = analyzeString(R"(
         fn main() -> i32 {

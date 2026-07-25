@@ -1,0 +1,50 @@
+// e2e/array_test.gg — exercises the growable Array<T> (std::vector-like).
+// Returns a unique number on the first failing check; 0 on success.
+
+import "../stdlib/array.gg";
+
+fn main() -> i32 {
+    mut Array<i32> a{};
+    if (a.size() != 0)  { return 1; }
+    if (!a.isEmpty())   { return 2; }
+
+    // Push past the initial capacity (8) to force at least one growth.
+    mut i32 i = 0;
+    while (i < 20) {
+        a.push(i * i);
+        i = i + 1;
+    }
+    if (a.size() != 20)      { return 3; }
+    if (a.capacity() < 20)   { return 4; }   // must have grown
+    if (a.isEmpty())         { return 5; }
+
+    // Read via [] (Index::get).
+    if (a[0]  != 0)   { return 6; }
+    if (a[5]  != 25)  { return 7; }
+    if (a[19] != 361) { return 8; }
+
+    // Write via [] (Index::set).
+    a[5] = 999;
+    if (a[5] != 999)  { return 9; }
+
+    // Store through a returned borrow (get -> ref i32).
+    a.get(0) = 7;
+    if (a[0] != 7)    { return 10; }
+
+    // pop returns the last element and shrinks the size.
+    i32 last = a.pop();
+    if (last != 361)  { return 11; }
+    if (a.size() != 19) { return 12; }
+
+    // reserve grows capacity without changing size.
+    a.reserve(100);
+    if (a.capacity() < 100) { return 13; }
+    if (a.size() != 19)     { return 14; }
+
+    // clear empties it but keeps capacity.
+    a.clear();
+    if (!a.isEmpty())       { return 15; }
+    if (a.capacity() < 100) { return 16; }
+
+    return 0;
+}

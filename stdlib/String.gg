@@ -1,63 +1,44 @@
-// stdlib/string.gg — a heap-owned, UTF-8 string.
+// stdlib/String.gg — a heap-owned, UTF-8 string with a Java-like interface.
 //
-// The bytes are stored verbatim (a copy of the source C string), so any valid
-// UTF-8 input — including non-ASCII — round-trips unchanged. `size` is the BYTE
-// length; the character (Unicode codepoint) count is computed on demand, because
+// The bytes are stored verbatim (a copy of the source), so any valid UTF-8 input —
+// including non-ASCII — round-trips unchanged. The internal byte length drives the
+// O(1) queries; the character (Unicode codepoint) count is computed on demand, since
 // UTF-8 is variable-width (1-4 bytes per codepoint). A GG `char` is 32-bit, so a
 // decoded codepoint fits directly in a `char`.
 //
-// Requires --unsafe-ptr (the `ptr` field / parameters); compile.ps1 always passes it.
+// The raw buffer (`data`) and everything that touches a `ptr` are PRIVATE — the public
+// interface never exposes a `ptr`. The one exception is the constructor, which takes a
+// `ptr`: a GG string literal *is* a `ptr` to bytes, so `String s("hi")` needs it. That
+// is the only entry point into the type from raw memory.
 //
 // Ownership: a String owns its buffer and frees it in the destructor. It is a value
-// object with a raw `ptr` field, so copy-initialising one (`String b = a;`) would
-// shallow-copy the pointer and double-free. Pass a String by reference (`String&`)
-// instead of copying it.
+// object holding a raw buffer, so copy-initialising one (`String b = a;`) would
+// shallow-copy the pointer and double-free. Pass a String by reference (`String&`).
 
 import "crt/cmem.gg";
 import "crt/cstring.gg";
 
 class String {
-    ptr  data;   // owned, null-terminated UTF-8 byte buffer
-    u64  size;   // byte length (excluding the null terminator)
+    private ptr data;   // owned, null-terminated UTF-8 byte buffer
+    private u64 size;   // byte length (excluding the null terminator)
 
-    // Copy a null-terminated C string (e.g. a string literal) into an owned buffer.
-    String(ptr string) {
-        this.size = strlen(string);
+    // Construct from a null-terminated string literal, copying it into an owned buffer.
+    String(ptr literal) {
+        this.size = strlen(literal);
         u64 allocSize = this.size + 1;          // +1 for the null terminator
         this.data = malloc(allocSize);
-        memcpy(this.data, string, allocSize);
+        memcpy(this.data, literal, allocSize);
     }
 
     ~String() {
         free(this.data);
     }
 
-    // ---- byte view ----
+    // ---- size / emptiness ----
 
-    // Number of bytes (NOT characters). O(1).
-    fn byteLength() -> u64 {
-        return this.size;
-    }
-
-    fn isEmpty() -> bool {
-        return this.size == 0;
-    }
-
-    // The raw byte at position `i`. No bounds check.
-    fn byteAt(u64 i) -> u8 {
-        ptr<u8> bytes = this.data;
-        return bytes[i];
-    }
-
-    // The underlying null-terminated buffer, e.g. to hand to `puts`.
-    fn cStr() -> ptr {
-        return this.data;
-    }
-
-    // ---- UTF-8 (codepoint) view ----
-
-    // Number of Unicode codepoints: every byte that is not a UTF-8 continuation
-    // byte (10xxxxxx) starts a new codepoint. O(n).
+    // Number of Unicode codepoints (Java's `length()` counts UTF-16 units; here it is
+    // codepoints). Every byte that is not a UTF-8 continuation byte (10xxxxxx) starts a
+    // new codepoint. O(n).
     fn length() -> u64 {
         ptr<u8> bytes = this.data;
         mut u64 count = 0;
@@ -72,8 +53,34 @@ class String {
         return count;
     }
 
-    // The Unicode codepoint at codepoint-index `index` (0-based), decoded from its
-    // UTF-8 sequence. Returns 0 if `index` is past the end. O(n).
+    // Number of bytes (NOT characters). O(1).
+    fn byteLength() -> u64 {
+        return this.size;
+    }
+
+    fn isEmpty() -> bool {
+        return this.size == 0;
+    }
+
+    // True if the string is empty or contains only ASCII whitespace (Java 11 `isBlank`).
+    fn isBlank() -> bool {
+        ptr<u8> bytes = this.data;
+        mut u64 i = 0;
+        while (i < this.size) {
+            u8 c = bytes[i];
+            // space, tab, LF, VT, FF, CR
+            if (c != 32 && c != 9 && c != 10 && c != 11 && c != 12 && c != 13) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    // ---- element access ----
+
+    // The Unicode codepoint at codepoint-index `index` (0-based). Returns 0 if past the
+    // end (Java throws; GG returns 0). O(n).
     fn charAt(u64 index) -> char {
         ptr<u8> bytes = this.data;
         mut u64 cpIndex = 0;
@@ -115,11 +122,99 @@ class String {
         }
         return 0 as char;
     }
-}
 
-// Value equality: compare the underlying bytes. Enables `a == b` / `a != b`.
-impl Eq for String {
-    fn eq(String& other) -> bool {
+    // The raw byte at position `i` (byte index, not codepoint). No bounds check.
+    fn byteAt(u64 i) -> u8 {
+        ptr<u8> bytes = this.data;
+        return bytes[i];
+    }
+
+    // ---- comparison ----
+
+    fn equals(String& other) -> bool {
         return strcmp(this.data, other.data) == 0;
     }
+
+    // Lexicographic (by codepoint) comparison: <0 if this < other, 0 if equal, >0 if
+    // this > other. Byte comparison of UTF-8 preserves codepoint order.
+    fn compareTo(String& other) -> i32 {
+        return strcmp(this.data, other.data);
+    }
+
+    // ---- searching ----
+
+    fn startsWith(String& prefix) -> bool {
+        if (prefix.size > this.size) { return false; }
+        return strncmp(this.data, prefix.data, prefix.size) == 0;
+    }
+
+    fn endsWith(String& suffix) -> bool {
+        if (suffix.size > this.size) { return false; }
+        ptr<u8> a = this.data;
+        ptr<u8> b = suffix.data;
+        u64 off = this.size - suffix.size;
+        mut u64 k = 0;
+        while (k < suffix.size) {
+            if (a[off + k] != b[k]) { return false; }
+            k = k + 1;
+        }
+        return true;
+    }
+
+    fn contains(String& needle) -> bool {
+        return this.byteIndexOf(needle) >= 0;
+    }
+
+    // Codepoint index of the first occurrence of `needle`, or -1 if absent.
+    fn indexOf(String& needle) -> i64 {
+        i64 byteOff = this.byteIndexOf(needle);
+        if (byteOff < 0) { return -1; }
+        ptr<u8> bytes = this.data;
+        u64 limit = byteOff as u64;
+        mut u64 count = 0;
+        mut u64 i = 0;
+        while (i < limit) {
+            u8 b = bytes[i];
+            if ((b & 192) != 128) { count = count + 1; }
+            i = i + 1;
+        }
+        return count as i64;
+    }
+
+    // ---- private internals (touch `ptr`; not part of the public interface) ----
+
+    // Byte offset of the first occurrence of `needle`, or -1. O(n*m) naive search.
+    fn private byteIndexOf(String& needle) -> i64 {
+        if (needle.size == 0) { return 0; }
+        if (needle.size > this.size) { return -1; }
+        ptr<u8> h = this.data;
+        ptr<u8> n = needle.data;
+        u64 last = this.size - needle.size;
+        mut u64 i = 0;
+        while (i <= last) {
+            mut u64 j = 0;
+            mut bool matched = true;
+            while (j < needle.size) {
+                if (h[i + j] != n[j]) { matched = false; break; }
+                j = j + 1;
+            }
+            if (matched) { return i as i64; }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    // The underlying null-terminated buffer (e.g. for an IO routine to print). Private:
+    // the public interface never hands out a `ptr`.
+    fn private cStr() -> ptr {
+        return this.data;
+    }
+}
+
+// Value equality / ordering — enable `==`, `!=`, `<`, `<=`, `>`, `>=` on Strings.
+impl Eq for String {
+    fn eq(String& other) -> bool { return this.equals(other); }
+}
+impl Ord for String {
+    fn cmp(String& other) -> i32 { return this.compareTo(other); }
 }

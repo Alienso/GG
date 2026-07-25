@@ -238,7 +238,7 @@ private:
     // ---- Expression codegen — return SSA value string ("%t3", "42", …) ----
     std::string genExpr(const Expr& expr);
     std::string genLiteral(const LiteralExpr& literal, const Type& resolvedType);
-    std::string genIdentifier(const IdentifierExpr& identifier);
+    std::string genIdentifier(const IdentifierExpr& identifier, const Type& resolvedType);
     std::string genUnary(const UnaryExpr& unary, const Type& resolvedType);
     std::string genBinary(const BinaryExpr& binary, const Type& resolvedType);
     std::string genSwitchExpr(const SwitchExpr& switchExpr, const Type& resolvedType);
@@ -274,7 +274,7 @@ private:
     // create a `ref <primitive>` binding, write through one, and return one. Returns "" if the
     // operand is not addressable (a temporary).
     std::string genBorrowSource(const Expr& source);
-    std::string genMemberAccess(const MemberAccessExpr& memberAccess);
+    std::string genMemberAccess(const MemberAccessExpr& memberAccess, const Type& resolvedType);
     std::string genMemberAssign(const MemberAssignExpr& memberAssign);
     std::string genRefStore(const RefStoreExpr& refStore);
     std::string genBraceInit(const BraceInitExpr& braceInit);
@@ -370,6 +370,8 @@ private:
                           const std::string& value,
                           const std::string& ptr);
     std::string emitLoad(const std::string& irType, const std::string& ptr);
+    std::string genUnwrap(const UnwrapExpr& unwrap);
+    std::string genElvis(const ElvisExpr& elvis, const Type& resolvedType);
     void        emitBr(const std::string& label);
     void        emitCondBr(const std::string& cond,
                            const std::string& trueLabel,

@@ -28,6 +28,9 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
         const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
+        const Token& operator()(const NullLiteralExpr& n)              const { return n.keyword; }
+        const Token& operator()(const UnwrapExpr& u)                   const { return exprFirstToken(*u.operand); }
+        const Token& operator()(const ElvisExpr& e)                    const { return exprFirstToken(*e.left); }
     };
     return std::visit(Visitor{}, *expr.node);
 }
@@ -129,22 +132,52 @@ void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
               "if condition must be bool-compatible, got " + typeName(conditionType));
     }
 
-    // Definite-assignment analysis across branches.
-    // A variable is definitely initialized after an if-else only if it is
-    // initialized in BOTH the then-branch and the else-branch.
-    // With no else, the then-branch may not run — so nothing is newly guaranteed.
-    auto snapBefore = symbolTable.captureInitState();
+    // Smart-cast: recognise a null test on a bare nullable binding — `x != null` / `null != x`
+    // (non-null when TRUE) or `x == null` / `null == x` (non-null when FALSE).
+    std::string testName;
+    bool nonNullWhenTrue = false, isNullTest = false;
+    if (ifStmt.condition.node) {
+        if (auto* b = std::get_if<BinaryExpr>(ifStmt.condition.node.get())) {
+            bool eq = b->operatorToken.type == TokenType::EQUAL_EQUAL;
+            bool ne = b->operatorToken.type == TokenType::BANG_EQUAL;
+            if ((eq || ne) && b->left->node && b->right->node) {
+                const Expr* idSide = std::holds_alternative<NullLiteralExpr>(*b->left->node)  ? b->right.get()
+                                   : std::holds_alternative<NullLiteralExpr>(*b->right->node) ? b->left.get()
+                                   : nullptr;
+                if (idSide && idSide->node && std::holds_alternative<IdentifierExpr>(*idSide->node)) {
+                    const auto& id = std::get<IdentifierExpr>(*idSide->node);
+                    const Symbol* s = symbolTable.lookup(id.name.lexeme);
+                    if (s && s->kind == Symbol::Kind::Variable && s->type.isNullable) {
+                        isNullTest = true; testName = id.name.lexeme; nonNullWhenTrue = ne;
+                    }
+                }
+            }
+        }
+    }
+    auto narrow = [&](bool on) {
+        if (isNullTest) if (Symbol* s = symbolTable.lookupMutable(testName)) s->isNarrowedNonNull = on;
+    };
+
+    auto snapBefore   = symbolTable.captureInitState();
+    auto narrowBefore = symbolTable.captureNarrowState();
+
+    // The then-branch runs when the condition is true.
+    if (isNullTest && nonNullWhenTrue) narrow(true);
     analyzeStmt(*ifStmt.thenBranch);
+    auto narrowAfterThen = symbolTable.captureNarrowState();
+    bool thenReturns     = alwaysReturns(*ifStmt.thenBranch);
 
     if (ifStmt.elseBranch) {
         auto snapAfterThen = symbolTable.captureInitState();
         symbolTable.restoreInitState(snapBefore);
+        symbolTable.restoreNarrowState(narrowBefore);
+        if (isNullTest && !nonNullWhenTrue) narrow(true);   // else runs when the condition is false
         analyzeStmt(*ifStmt.elseBranch);
-        auto snapAfterElse = symbolTable.captureInitState();
+        auto snapAfterElse   = symbolTable.captureInitState();
+        auto narrowAfterElse = symbolTable.captureNarrowState();
+        bool elseReturns     = alwaysReturns(*ifStmt.elseBranch);
 
-        // Merge: definitely initialized iff initialized in BOTH branches.
-        // (If a variable was already initialized before the if, both snapshots
-        //  carry that fact, so it stays initialized.)
+        // Merge init: definitely initialized iff initialized in BOTH branches.
         SymbolTable::InitSnapshot merged;
         for (const auto& [name, initThen] : snapAfterThen) {
             auto it = snapAfterElse.find(name);
@@ -152,9 +185,23 @@ void SemanticAnalyzer::analyzeIf(const IfStmt& ifStmt) {
             merged[name] = initThen && initElse;
         }
         symbolTable.restoreInitState(merged);
+
+        // Merge narrowing: non-null after iff non-null on every path that reaches here. A branch
+        // that always returns doesn't reach the join, so the other branch's state survives.
+        SymbolTable::InitSnapshot mergedNarrow;
+        for (const auto& [name, nThen] : narrowAfterThen) {
+            auto it = narrowAfterElse.find(name);
+            bool nElse = (it != narrowAfterElse.end()) && it->second;
+            mergedNarrow[name] = (thenReturns && !elseReturns) ? nElse
+                               : (elseReturns && !thenReturns) ? nThen
+                               : (nThen && nElse);
+        }
+        symbolTable.restoreNarrowState(mergedNarrow);
     } else {
-        // No else branch: then-branch may not run — revert to pre-if state.
         symbolTable.restoreInitState(snapBefore);
+        symbolTable.restoreNarrowState(narrowBefore);
+        // Guard clause: `if (x == null) { return; }` — the null case diverges, so x is non-null after.
+        if (isNullTest && !nonNullWhenTrue && thenReturns) narrow(true);
     }
 }
 
@@ -167,11 +214,13 @@ void SemanticAnalyzer::analyzeWhile(const WhileStmt& whileStmt) {
     // The loop body may never execute, so assignments inside it do not count as
     // definite initialization.  Analyse the body (to catch errors in it) but then
     // restore the pre-loop initialization state.
-    auto snapBefore = symbolTable.captureInitState();
+    auto snapBefore   = symbolTable.captureInitState();
+    auto narrowBefore = symbolTable.captureNarrowState();
     loopDepth++;
     analyzeStmt(*whileStmt.body);
     loopDepth--;
     symbolTable.restoreInitState(snapBefore);
+    mergeLoopNarrowing(narrowBefore);
 }
 
 void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
@@ -191,13 +240,28 @@ void SemanticAnalyzer::analyzeFor(const ForStmt& forStmt) {
 
     // The loop body may never execute: analyse it (to catch errors) but restore
     // the pre-body initialization state so nothing is spuriously deemed initialized.
-    auto snapBefore = symbolTable.captureInitState();
+    auto snapBefore   = symbolTable.captureInitState();
+    auto narrowBefore = symbolTable.captureNarrowState();
     loopDepth++;
     analyzeStmt(*forStmt.body);
     loopDepth--;
     symbolTable.restoreInitState(snapBefore);
+    mergeLoopNarrowing(narrowBefore);
 
     exitScope();
+}
+
+// After a loop body, a binding is known non-null only if it was non-null BEFORE the loop AND is
+// still non-null after the body (the intersection): the body may run zero times (so in-body
+// narrowings can't leak out) or many times (so a body that nulls the binding must drop it).
+void SemanticAnalyzer::mergeLoopNarrowing(const SymbolTable::InitSnapshot& before) {
+    auto after = symbolTable.captureNarrowState();
+    SymbolTable::InitSnapshot merged;
+    for (const auto& [name, b] : before) {
+        auto it = after.find(name);
+        merged[name] = b && (it != after.end() && it->second);
+    }
+    symbolTable.restoreNarrowState(merged);
 }
 
 // Return-alias body setup. The alias is a named result binding declared in the function

@@ -14,6 +14,10 @@
 // ============================================================
 
 inline std::string irTypeName(const Type& t) {
+    // Nullable primitive `i32?` — an inline tag+payload value `{ i1, iN }` (a stack value type, no
+    // heap). Nullable reference-like types keep the plain `ptr` from their kind case below.
+    if (t.isNullable && (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char))
+        return "{ i1, " + irTypeName(Type{t.kind}) + " }";
     switch (t.kind) {
         case TypeKind::I8:     return "i8";
         case TypeKind::I16:    return "i16";

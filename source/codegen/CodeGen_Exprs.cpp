@@ -72,6 +72,79 @@ const std::vector<const Expr*>* CodeGen::defaultsFor(const std::string& emittedN
     return it != funcDefaults_.end() ? &it->second : nullptr;
 }
 
+// `x!!` — non-null assertion. Reference/enum nullables share the `ptr` representation, so this is
+// a machine-null check that aborts on failure; the value passes through unchanged when non-null.
+std::string CodeGen::genUnwrap(const UnwrapExpr& unwrap) {
+    Type t = exprType(*unwrap.operand);
+    std::string v = genExpr(*unwrap.operand);
+    if (!t.isNullable) return v;   // already non-null (e.g. smart-cast) — the assertion is a no-op
+    bool optPrim = t.isNullable && (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char);
+    ensureAbortDeclared();
+    std::string cmp        = freshTemp();
+    std::string okLabel    = freshLabel("nn.ok");
+    std::string panicLabel = freshLabel("nn.null");
+    if (optPrim) {
+        std::string tag = freshTemp();
+        emit("%" + tag + " = extractvalue " + irTypeName(t) + " " + v + ", 0");
+        emit("%" + cmp + " = icmp eq i1 %" + tag + ", false");   // absent?
+    } else {
+        emit("%" + cmp + " = icmp eq ptr " + v + ", null");
+    }
+    emitCondBr("%" + cmp, panicLabel, okLabel);
+    switchBlock(panicLabel);
+    emit("call void @abort()");
+    emit("unreachable");
+    currentBasicBlock->terminated = true;
+    switchBlock(okLabel);
+    if (optPrim) {                                   // extract the payload (proven present)
+        std::string p = freshTemp();
+        emit("%" + p + " = extractvalue " + irTypeName(t) + " " + v + ", 1");
+        return "%" + p;
+    }
+    return v;   // reference: same representation, now known non-null
+}
+
+// `a ?: b` — Elvis. For reference/enum nullables (all `ptr`), select `a` when non-null else `b`,
+// via a result slot. (Refcount adjustment for owning-reference operands is deferred; the common
+// case is a nullable field/borrow with a plain default.)
+std::string CodeGen::genElvis(const ElvisExpr& elvis, const Type& resolvedType) {
+    // A non-null left (e.g. smart-cast) never uses the default — just yield it.
+    if (!exprType(*elvis.left).isNullable)
+        return emitCast(genExpr(*elvis.left), exprType(*elvis.left), resolvedType);
+    std::string resultIr = irTypeName(resolvedType);
+    std::string slot = "%" + freshTemp();
+    emitAlloca(slot, resultIr);
+
+    Type lt = exprType(*elvis.left);
+    bool optPrim = lt.isNullable && (isNumeric(lt.kind) || lt.kind == TypeKind::Bool || lt.kind == TypeKind::Char);
+    std::string lv = genExpr(*elvis.left);
+    std::string cmp      = freshTemp();
+    std::string useLeft  = freshLabel("elvis.left");
+    std::string useRight = freshLabel("elvis.right");
+    std::string merge    = freshLabel("elvis.merge");
+    if (optPrim) {
+        std::string tag = freshTemp();
+        emit("%" + tag + " = extractvalue " + irTypeName(lt) + " " + lv + ", 0");
+        emit("%" + cmp + " = icmp ne i1 %" + tag + ", false");   // present?
+    } else {
+        emit("%" + cmp + " = icmp ne ptr " + lv + ", null");
+    }
+    emitCondBr("%" + cmp, useLeft, useRight);
+
+    switchBlock(useLeft);
+    emitStore(resultIr, emitCast(lv, lt, resolvedType), slot);   // unwrap opt-prim / pass ref through
+    emitBr(merge);
+
+    switchBlock(useRight);
+    Type rt = exprType(*elvis.right);
+    std::string rv = emitCast(genExpr(*elvis.right), rt, resolvedType);
+    emitStore(resultIr, rv, slot);
+    emitBr(merge);
+
+    switchBlock(merge);
+    return emitLoad(resultIr, slot);
+}
+
 const std::vector<int>* CodeGen::orderFor(const void* node) const {
     if (!callArgOrder_) return nullptr;
     auto it = callArgOrder_->find(node);
@@ -86,7 +159,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
     Type resolvedType = exprType(expr);
     return std::visit(overloaded{
         [&](const LiteralExpr& literal)              -> std::string { return genLiteral(literal, resolvedType); },
-        [&](const IdentifierExpr& identifier)        -> std::string { return genIdentifier(identifier); },
+        [&](const IdentifierExpr& identifier)        -> std::string { return genIdentifier(identifier, resolvedType); },
         [&](const UnaryExpr& unary)                  -> std::string { return genUnary(unary, resolvedType); },
         [&](const BinaryExpr& binary)                -> std::string { return genBinary(binary, resolvedType); },
         [&](const AssignExpr& assign)                -> std::string { return genAssign(assign); },
@@ -97,7 +170,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const IndexExpr& indexExpr)              -> std::string { return genIndex(indexExpr); },
         [&](const IndexAssignExpr& indexAssign)      -> std::string { return genIndexAssign(indexAssign); },
         [&](const ThisExpr& thisExpr)                -> std::string { return genThis(thisExpr); },
-        [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess); },
+        [&](const MemberAccessExpr& memberAccess)    -> std::string { return genMemberAccess(memberAccess, resolvedType); },
         [&](const MemberAssignExpr& memberAssign)    -> std::string { return genMemberAssign(memberAssign); },
         [&](const RefStoreExpr& refStore)            -> std::string { return genRefStore(refStore); },
         [&](const BraceInitExpr& braceInit)          -> std::string { return genBraceInit(braceInit); },
@@ -106,6 +179,9 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
         [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
         [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
+        [&](const NullLiteralExpr&)                  -> std::string { return "null"; },
+        [&](const UnwrapExpr& unwrap)                -> std::string { return genUnwrap(unwrap); },
+        [&](const ElvisExpr& elvis)                  -> std::string { return genElvis(elvis, resolvedType); },
     }, *expr.node);
 }
 
@@ -244,7 +320,7 @@ std::string CodeGen::genImplicitFieldPtr(const std::string& name, Type& fieldTyp
     return gep;
 }
 
-std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
+std::string CodeGen::genIdentifier(const IdentifierExpr& identifier, const Type& resolvedType) {
     auto allocaIt  = allocaMap.find(identifier.name.lexeme);
     if (allocaIt == allocaMap.end()) {
         // Implicit `this`: bare reference to a field of the enclosing class.
@@ -267,6 +343,21 @@ std::string CodeGen::genIdentifier(const IdentifierExpr& identifier) {
     if (isPrimitiveBorrow(varType)) {
         std::string referent = emitLoad("ptr", allocaIt->second);
         return emitLoad(irTypeName(borrowElementType(varType)), referent);
+    }
+
+    // Nullable primitive (`i32?`) storage is a `{ i1, iN }` value. Load it; if the use has been
+    // smart-cast to the non-null primitive (`resolvedType` no longer nullable), extract the payload
+    // (proven present by the narrowing — no runtime check).
+    bool storageOptPrim = varType.isNullable
+        && (isNumeric(varType.kind) || varType.kind == TypeKind::Bool || varType.kind == TypeKind::Char);
+    if (storageOptPrim) {
+        std::string structVal = emitLoad(irTypeName(varType), allocaIt->second);
+        if (!resolvedType.isNullable) {
+            std::string p = freshTemp();
+            emit("%" + p + " = extractvalue " + irTypeName(varType) + " " + structVal + ", 1");
+            return "%" + p;
+        }
+        return structVal;
     }
 
     std::string irType  = irTypeName(varType);
@@ -369,6 +460,25 @@ std::string CodeGen::emitEquality(const void* nodeKey, const std::string& lval, 
         std::string t = freshTemp();
         emit("%" + t + " = xor i1 %" + eq + ", true");
         return "%" + t;
+    }
+    // Nullable primitive compared with `null` — test the presence tag (`{i1,iN}` field 0).
+    {
+        auto isOptPrim = [](const Type& t) {
+            return t.isNullable && (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char);
+        };
+        if (lt.kind == TypeKind::Null || rt.kind == TypeKind::Null) {
+            bool leftNull = lt.kind == TypeKind::Null;
+            const Type&        ot = leftNull ? rt : lt;
+            const std::string& ov = leftNull ? rval : lval;
+            if (isOptPrim(ot)) {
+                std::string tag = freshTemp();
+                emit("%" + tag + " = extractvalue " + irTypeName(ot) + " " + ov + ", 0");
+                std::string t = freshTemp();
+                // `== null` → present==false (absent); `!= null` → present==true.
+                emit("%" + t + " = icmp eq i1 %" + tag + ", " + (ne ? "true" : "false"));
+                return "%" + t;
+            }
+        }
     }
     // Reference address identity (recorded by semantics) or enum singleton identity.
     bool addrId = addressIdentityCmp_ && addressIdentityCmp_->count(nodeKey);
@@ -967,12 +1077,16 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         }
     }
 
-    // ---- Reference (Class&) declaration ----
-    if (varDecl.typeName.type == TokenType::IDENTIFIER
-        && !varDecl.typeName.lexeme.empty() && varDecl.typeName.lexeme.back() == '&') {
+    // ---- Reference (Class&, or nullable Class&?) declaration ----
+    {
+        std::string lex = varDecl.typeName.lexeme;
+        bool nullable = !lex.empty() && lex.back() == '?';
+        if (nullable) lex.pop_back();   // `Class&?` → `Class&` (same IR; null is a valid ptr value)
+        if (varDecl.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
         usesRefcount_ = true;
-        std::string className = varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size() - 1);
+        std::string className = lex.substr(0, lex.size() - 1);
         Type        refType   = makeReferenceType(className);
+        if (nullable) refType = makeNullable(refType);
         std::string name      = varDecl.name.lexeme;
         std::string ptrName   = freshAllocaName(name);
 
@@ -1003,6 +1117,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         }
 
         return ptrName;
+        }
     }
 
     // ---- Typed raw pointer (ptr<T>) declaration ----
@@ -1027,12 +1142,16 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         }
     }
 
-    // ---- Enum variable declaration ----
-    // An enum variable holds a `ptr` to a global singleton variant.
-    if (varDecl.typeName.type == TokenType::IDENTIFIER
-        && cgEnumNames_.count(varDecl.typeName.lexeme)) {
-        const std::string& enumName = varDecl.typeName.lexeme;
-        Type        enumType = makeEnumType(enumName);
+    // ---- Enum variable declaration (incl. nullable `Color?`) ----
+    // An enum variable holds a `ptr` to a global singleton variant; nullable is the same IR (null
+    // is a valid ptr), so strip a trailing `?`.
+    if (varDecl.typeName.type == TokenType::IDENTIFIER) {
+        std::string elex = varDecl.typeName.lexeme;
+        bool enumNullable = !elex.empty() && elex.back() == '?';
+        if (enumNullable) elex.pop_back();
+        if (cgEnumNames_.count(elex)) {
+        const std::string& enumName = elex;
+        Type        enumType = enumNullable ? makeNullable(makeEnumType(enumName)) : makeEnumType(enumName);
         std::string name     = varDecl.name.lexeme;
         std::string ptrName  = freshAllocaName(name);
 
@@ -1048,6 +1167,32 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             emitStore("ptr", value, ptrName);
         } else {
             emitStore("ptr", "null", ptrName);
+        }
+        return ptrName;
+        }
+    }
+
+    // ---- Nullable primitive (`i32?`) declaration ----
+    // A tagged optional `{ i1, iN }` value. (Nullable references/borrows/enums were handled by the
+    // branches above; a nullable value object was rejected in semantics.)
+    if (varDecl.typeName.type == TokenType::IDENTIFIER && !varDecl.typeName.lexeme.empty()
+        && varDecl.typeName.lexeme.back() == '?'
+        && typeKindFromName(varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size()-1))
+               != TypeKind::Error) {
+        TypeKind prim = typeKindFromName(varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size()-1));
+        Type        declaredType = makeNullable(Type{prim});
+        std::string irType       = irTypeName(declaredType);
+        std::string name         = varDecl.name.lexeme;
+        std::string ptrName      = freshAllocaName(name);
+        emitAlloca(ptrName, irType);
+        allocaMap[name]  = ptrName;
+        varTypeMap[name] = declaredType;
+        if (debug_) dbgDeclare(ptrName, name, declaredType, varDecl.name.line, 0);
+        emit("store " + irType + " zeroinitializer, ptr " + ptrName);   // default empty (null)
+        if (varDecl.initializer) {
+            Type        initType = exprType(*varDecl.initializer);
+            std::string value    = emitCast(genExpr(*varDecl.initializer), initType, declaredType);
+            emitStore(irType, value, ptrName);
         }
         return ptrName;
     }

@@ -337,6 +337,8 @@ private:
     // True if `expr` is a compile-time constant (literal, or unary/binary/cast of
     // constants). Used to validate static-local initializers, which run pre-main.
     [[nodiscard]] static bool isConstantExpr(const Expr& expr);
+    [[nodiscard]] Type analyzeUnwrap(const UnwrapExpr& unwrap);
+    [[nodiscard]] Type analyzeElvis(const ElvisExpr& elvis);
     [[nodiscard]] Type analyzeIndex(const IndexExpr& indexExpr);
     [[nodiscard]] Type analyzeIndexAssign(const IndexAssignExpr& indexAssign);
     [[nodiscard]] Type analyzeThis(const ThisExpr& thisExpr);
@@ -366,7 +368,9 @@ private:
     void          checkArgCast(const Type& from, const Type& to, const Token& site,
                                const std::string& context);
     // Resolve a type token — handles IDENTIFIER tokens that name a known class.
-    [[nodiscard]] Type resolveTypeToken(const Token& typeToken) const;
+    [[nodiscard]] Type resolveTypeToken(const Token& typeToken);
+    // Intersect pre-loop and post-body smart-cast narrowing (see the .cpp).
+    void mergeLoopNarrowing(const SymbolTable::InitSnapshot& before);
 
     // Resolve an Object type to its ClassInfo; emits error and returns nullptr if not an Object or class not found.
     [[nodiscard]] const ClassInfo* lookupObjectClass(Type objectType, const Token& site);

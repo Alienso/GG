@@ -1,0 +1,75 @@
+// e2e/nullable_test.gg — Kotlin-style nullable references (Phase 1): `T?`, null, `== null`,
+// `!!`, `?:` (Elvis), and smart-casts (if-narrowing, guard clause, mut invalidation/refresh).
+// Returns 0 on success; a unique code on the first failing check.
+
+class Node { mut i32 v; Node(i32 x) { v = x; } fn get() -> i32 { return v; } }
+
+// Nullable return type.
+fn pick(bool b) -> Node&? { if (b) { return new Node(7); } return null; }
+
+// Smart-cast: `if (x != null)` narrows in the block.
+fn sumIf(Node&? n) -> i32 { if (n != null) { return n.get(); } return -1; }
+
+// Guard clause: after `if (x == null) return;`, x is non-null.
+fn guard(Node&? n) -> i32 { if (n == null) { return 0; } return n.v; }
+
+fn main() -> i32 {
+    Node& real = new Node(5);
+
+    // null literal + assignment + `!!` unwrap.
+    mut Node&? a = null;
+    if (a != null) { return 1; }          // a is null
+    a = real;
+    Node& sure = a!!;                      // unwrap (a is non-null)
+    if (sure.v != 5) { return 2; }
+
+    // `== null` on a nullable return.
+    Node&? maybe = pick(false);
+    if (maybe != null) { return 3; }
+    Node&? some = pick(true);
+    if (some == null) { return 4; }
+
+    // Elvis: null → fallback; non-null → itself.
+    Node& viaNull = a ?: real;             // a non-null → a
+    Node&? nn = null;
+    Node& viaFallback = nn ?: real;        // null → real
+    if (viaNull.v + viaFallback.v != 10) { return 5; }
+
+    // Smart-cast forms.
+    if (sumIf(real) != 5)  { return 6; }
+    if (sumIf(null) != -1) { return 7; }
+    if (guard(real) != 5)  { return 8; }
+    if (guard(null) != 0)  { return 9; }
+
+    // mut invalidation/refresh: after re-assigning a narrowed binding to a non-null value it stays
+    // usable; the null case (a compile error) is covered by the unit tests.
+    mut Node&? m = new Node(3);
+    if (m != null) {
+        m = new Node(11);                  // reassigned non-null → still non-null
+        if (m.v != 11) { return 10; }
+    }
+
+    // Nullable primitives (`i32?`) — a tagged optional value.
+    i32? p = 8;
+    i32? q = null;
+    if (p == null) { return 11; }
+    if (q != null) { return 12; }
+    if (p!! != 8)  { return 13; }          // unwrap the payload
+    if ((q ?: 4) != 4) { return 14; }      // Elvis default (q absent)
+    // Smart-cast on a primitive: after the guard, `r` reads as a plain i32.
+    i32? r = 6;
+    if (r == null) { return 15; }
+    i32 rv = r + 1;                        // r narrowed to i32 → arithmetic works
+    if (rv != 7) { return 16; }
+
+    // Safe call `?.` — null-propagating field access / method call.
+    Node& node = new Node(4);
+    Node&? on = node;
+    Node&? xn = null;
+    i32? sf = on?.get();                    // present → 4
+    i32? sn = xn?.get();                    // null (receiver null)
+    if ((sf ?: 0) != 4)  { return 17; }
+    if (sn != null)      { return 18; }
+
+    return 0;
+}

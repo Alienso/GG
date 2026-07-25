@@ -27,6 +27,7 @@ enum class TypeKind {
                // holds the parameter name. Semantic-only — never reaches codegen (which sees only
                // monomorphized concrete decls). Bounds are looked up by name in the analyzer.
     Void,   // for functions that return nothing
+    Null,   // the type of the `null` literal — assignable only to a nullable type `T?`
     Error   // sentinel: suppresses cascading errors
 };
 
@@ -141,6 +142,18 @@ inline Type makeTypeParam(const std::string& name) {
     t.className = name;
     return t;
 }
+
+// ---- Nullability (`T?`) ----
+// A nullable type `T?` may hold `null` in addition to the values of `T`. For reference-like types
+// (Reference/borrow/Enum) this is a machine-null pointer — the SAME representation as `T`, so
+// `T` and `T?` are bit-identical (nullability is purely a compile-time distinction). `null` itself
+// has TypeKind::Null and is assignable only where a nullable type is expected.
+inline Type makeNullable(const Type& t) { Type n = t; n.isNullable = true; return n; }
+inline bool isNullable(const Type& t)   { return t.isNullable; }
+// The narrowed (non-null) form — used by `!!`, smart-casts, and `?:`.
+inline Type stripNullable(const Type& t) { Type n = t; n.isNullable = false; return n; }
+// The type of the `null` literal.
+inline Type makeNullType() { return Type{TypeKind::Null}; }
 
 // The element type of a ptr<T>.
 inline Type typedPtrElement(const Type& t) {

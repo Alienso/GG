@@ -164,6 +164,17 @@ Type CodeGen::exprType(const Expr& expression) const {
 }
 
 Type CodeGen::resolveParamType(const ParamDecl& param) const {
+    // Nullable `T?` (synthesized IDENTIFIER ending in '?'): strip it and resolve the inner type.
+    // Nullability does not change the IR for reference-like types (all `ptr`), so this only needs
+    // to reach the inner type; the flag rides along for exprType consistency.
+    if (param.typeName.type == TokenType::IDENTIFIER && !param.typeName.lexeme.empty()
+        && param.typeName.lexeme.back() == '?') {
+        std::string base = param.typeName.lexeme.substr(0, param.typeName.lexeme.size()-1);
+        TypeKind prim = typeKindFromName(base);
+        if (prim != TypeKind::Error) return makeNullable(Type{prim});   // nullable primitive
+        Token bt{TokenType::IDENTIFIER, base, param.typeName.line};
+        return makeNullable(resolveReturnType(bt));                     // ref/enum inner
+    }
     // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
     Type synth = decodeSynthesizedType(param.typeName);
     if (!isError(synth)) {
@@ -178,6 +189,15 @@ Type CodeGen::resolveParamType(const ParamDecl& param) const {
 }
 
 Type CodeGen::resolveReturnType(const Token& typeToken) const {
+    // Nullable `T?`: strip the '?' and resolve the inner type (IR is unchanged — all `ptr`).
+    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
+        && typeToken.lexeme.back() == '?') {
+        std::string base = typeToken.lexeme.substr(0, typeToken.lexeme.size()-1);
+        TypeKind prim = typeKindFromName(base);
+        if (prim != TypeKind::Error) return makeNullable(Type{prim});   // nullable primitive
+        Token bt{TokenType::IDENTIFIER, base, typeToken.line};
+        return makeNullable(resolveReturnType(bt));
+    }
     // "Class&" → reference return (lowers to ptr); "ptr<Elem>" → typed pointer.
     // Bare class returns (by value) are unsupported and fall through to typeFromToken.
     Type synth = decodeSynthesizedType(typeToken);
@@ -249,6 +269,30 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
     // (lvalue-to-rvalue). `value` is the referent pointer.
     if (isPrimitiveBorrow(from) && !to.borrow && from.elementKind == to.kind)
         return emitLoad(irTypeName(to), value);
+
+    // ---- Nullable-primitive tag+payload (`{ i1, iN }`) ----
+    auto isOptPrim = [](const Type& t) {
+        return t.isNullable && (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char);
+    };
+    // `null` → optional primitive: the empty value { present=false, 0 }.
+    if (isOptPrim(to) && from.kind == TypeKind::Null)
+        return "zeroinitializer";
+    // Wrap `iN → iN?`: build { present=true, value } (coercing the payload's numeric type first).
+    if (isOptPrim(to) && !from.isNullable) {
+        std::string structIr  = irTypeName(to);
+        std::string payloadIr = irTypeName(Type{to.kind});
+        std::string payload   = emitCast(value, from, Type{to.kind});   // numeric coercion to payload
+        std::string t0 = freshTemp(), t1 = freshTemp();
+        emit("%" + t0 + " = insertvalue " + structIr + " poison, i1 true, 0");
+        emit("%" + t1 + " = insertvalue " + structIr + " %" + t0 + ", " + payloadIr + " " + payload + ", 1");
+        return "%" + t1;
+    }
+    // Unwrap `iN? → iN` (used after a null/tag check by `!!` and smart-casts): extract the payload.
+    if (isOptPrim(from) && !to.isNullable && from.kind == to.kind) {
+        std::string t = freshTemp();
+        emit("%" + t + " = extractvalue " + irTypeName(from) + " " + value + ", 1");
+        return "%" + t;
+    }
 
     // If both types map to the same LLVM IR type (e.g. string ↔ ptr, i32 ↔ u32,
     // char ↔ u32) no cast instruction is needed — bits are already identical.

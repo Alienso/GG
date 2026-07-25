@@ -156,6 +156,23 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const NullLiteralExpr&) { out("Null"); },
+
+        [&](const UnwrapExpr& u) {
+            out("Unwrap '!!'");
+            indent++;
+            printExpr(*u.operand);
+            indent--;
+        },
+
+        [&](const ElvisExpr& e) {
+            out("Elvis '?:'");
+            indent++;
+            printExpr(*e.left);
+            printExpr(*e.right);
+            indent--;
+        },
+
         [&](const CastExpr& castExpr) {
             out("Cast as '" + castExpr.targetType.lexeme + "'");
             indent++;

@@ -63,3 +63,29 @@ void SymbolTable::restoreInitState(const InitSnapshot& snap) {
                     sym.isInitialized = it->second;
             }
 }
+
+SymbolTable::InitSnapshot SymbolTable::captureNarrowState() const {
+    InitSnapshot snap;
+    for (const auto& scope : scopes)
+        for (const auto& [name, sym] : scope)
+            if (sym.kind == Symbol::Kind::Variable)
+                snap[name] = sym.isNarrowedNonNull;
+    return snap;
+}
+
+void SymbolTable::restoreNarrowState(const InitSnapshot& snap) {
+    for (auto& scope : scopes)
+        for (auto& [name, sym] : scope)
+            if (sym.kind == Symbol::Kind::Variable) {
+                auto it = snap.find(name);
+                if (it != snap.end())
+                    sym.isNarrowedNonNull = it->second;
+            }
+}
+
+void SymbolTable::clearNarrowing(const std::string& name) {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto found = it->find(name);
+        if (found != it->end()) { found->second.isNarrowedNonNull = false; return; }
+    }
+}

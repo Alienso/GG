@@ -43,6 +43,9 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
         [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
+        [&](const NullLiteralExpr&)                   { return makeNullType(); },
+        [&](const UnwrapExpr& unwrap)                 { return analyzeUnwrap(unwrap); },
+        [&](const ElvisExpr& elvis)                   { return analyzeElvis(elvis); },
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
@@ -300,6 +303,11 @@ Type SemanticAnalyzer::analyzeIdentifier(const IdentifierExpr& identifier) {
         // Return the declared type anyway so downstream analysis uses the right type
         // and does not cascade into spurious "undeclared identifier" errors.
     }
+    // Smart-cast: a nullable binding proven non-null on this path reads as its non-null form.
+    // Recording this narrowed type on the use-node (via the dispatcher's recordType) is what lets
+    // member access / passing / etc. treat it as `T` — and, for references, needs no codegen change.
+    if (sym->isNarrowedNonNull && sym->type.isNullable)
+        return stripNullable(sym->type);
     // Reading a `ref <primitive>` yields the primitive value (lvalue-to-rvalue deref). The symbol
     // keeps its borrow type (so assignment writes through and the codegen loads correctly).
     return decayPrimitiveBorrow(sym->type);
@@ -437,6 +445,23 @@ static int pickOverloadByArgs(const std::vector<ClassInfo::Method>& set,
 Type SemanticAnalyzer::classifyEquality(const Type& leftType, const Type& rightType,
                                         const void* nodeKey, const Token& at,
                                         const std::string& what) {
+    // Comparison with `null`: a machine-pointer identity check (like the enum/reference-identity
+    // path). Valid against a reference-like value (Reference / Enum — both lower to `ptr`).
+    if (leftType.kind == TypeKind::Null || rightType.kind == TypeKind::Null) {
+        const Type& other = (leftType.kind == TypeKind::Null) ? rightType : leftType;
+        // Reference-like (`ptr`) → pointer identity against null (recorded for codegen). A nullable
+        // primitive is NOT recorded — genBinary detects the Null operand and tests its tag directly.
+        bool refLike = other.kind == TypeKind::Reference || other.kind == TypeKind::Enum;
+        bool optPrim = other.isNullable && (isNumeric(other.kind) || other.kind == TypeKind::Bool
+                                            || other.kind == TypeKind::Char);
+        if (other.kind == TypeKind::Null || refLike) {
+            addressIdentityCmp_.insert(nodeKey);   // codegen: `icmp eq/ne ptr …, null`
+            return Type{TypeKind::Bool};
+        }
+        if (optPrim) return Type{TypeKind::Bool};   // codegen tests the tag
+        error(at, "cannot compare a value of type '" + typeName(other) + "' with 'null'");
+        return Type{TypeKind::Error};
+    }
     // Class operands: an `Eq` impl overrides; otherwise default equality —
     //   • two REFERENCES of the same class → address identity (`icmp eq/ne ptr`);
     //   • at least one VALUE object of the same class → memberwise structural equality.
@@ -866,8 +891,13 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     if (sym->isMutable)
         warnConstToMut(assign.name, *assign.value, lhsType);
     // Any successful assignment makes the variable definitely initialized.
-    if (Symbol* mut = symbolTable.lookupMutable(assign.name.lexeme))
+    if (Symbol* mut = symbolTable.lookupMutable(assign.name.lexeme)) {
         mut->isInitialized = true;
+        // Smart-cast invalidation/refresh: after a reassignment, the binding is known non-null
+        // only if the assigned value is itself non-null; assigning `null` or a `T?` drops it back.
+        if (mut->type.isNullable)
+            mut->isNarrowedNonNull = (!rhsType.isNullable && rhsType.kind != TypeKind::Null);
+    }
     return lhsType;
 }
 
@@ -1346,6 +1376,34 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
 // Class expression analysis
 // ============================================================
 
+// `x!!` — non-null assertion: yields the non-null form. On null at runtime it aborts (codegen).
+Type SemanticAnalyzer::analyzeUnwrap(const UnwrapExpr& unwrap) {
+    Type t = analyzeExpr(*unwrap.operand);
+    if (isError(t)) return Type{TypeKind::Error};
+    if (!t.isNullable) {
+        warn(unwrap.op, "'!!' applied to a non-nullable value — the assertion is unnecessary");
+        return t;
+    }
+    return stripNullable(t);
+}
+
+// `a ?: b` — Elvis. Result is the non-null form of `a` (or `b`'s type widened in). `a` must be
+// nullable to be meaningful; `b` must be assignable to the non-null result.
+Type SemanticAnalyzer::analyzeElvis(const ElvisExpr& elvis) {
+    Type lt = analyzeExpr(*elvis.left);
+    Type rt = analyzeExpr(*elvis.right);
+    if (isError(lt) || isError(rt)) return Type{TypeKind::Error};
+    if (lt.kind == TypeKind::Null) return rt;   // `null ?: b` is just `b`
+    if (!lt.isNullable)
+        warn(elvis.op, "left side of '?:' is not nullable — the default is never used");
+    // The result is the non-null form of the left, unless the default itself may be null (then the
+    // whole expression may still be null). Check the RHS against that result type — crucially the
+    // *nullable* one when the default is nullable, so `a ?: b` with a nullable `b` is allowed.
+    Type result = rt.isNullable ? makeNullable(stripNullable(lt)) : stripNullable(lt);
+    checkCast(rt, result, elvis.op, "right side of '?:'");
+    return result;
+}
+
 Type SemanticAnalyzer::analyzeThis(const ThisExpr& thisExpr) {
     if (currentClassName.empty()) {
         error(thisExpr.keyword, "'this' used outside of a class method");
@@ -1394,6 +1452,27 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
     Type objectType = analyzeExpr(*memberAccess.object);
     if (isError(objectType)) return Type{TypeKind::Error};
 
+    // Nullable receiver: `x.f` on a `T?` is an error unless it's a `?.` safe access (which narrows
+    // the receiver and makes the whole access nullable).
+    if (objectType.isNullable) {
+        if (!memberAccess.safe) {
+            error(memberAccess.field, "cannot access member '" + memberAccess.field.lexeme
+                  + "' on a possibly-null value of type '" + typeName(objectType)
+                  + "'; narrow it with a null check, '!!', or '?.'");
+            return Type{TypeKind::Error};
+        }
+        objectType = stripNullable(objectType);
+    }
+    auto wrapSafe = [&](Type t) -> Type {
+        if (!memberAccess.safe) return t;
+        if (t.kind == TypeKind::Object) {
+            error(memberAccess.field, "'?.' cannot yield a value object '" + t.className
+                  + "'; return a reference or a primitive");
+            return Type{TypeKind::Error};
+        }
+        return makeNullable(t);
+    };
+
     // Generic body-check: a type parameter is opaque — traits declare no fields, so field access
     // on a bounded `T` is an error (unbounded ⇒ permissive/suppressed).
     if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
@@ -1413,7 +1492,7 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
         if (!sf.isPublic && currentClassName != objectType.className)
             warn(memberAccess.field, "static field '" + memberAccess.field.lexeme
                  + "' is private in class '" + objectType.className + "'");
-        return sf.type;
+        return wrapSafe(sf.type);
     }
 
     auto fieldIt = cls->fields.find(memberAccess.field.lexeme);
@@ -1430,7 +1509,7 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
              + "' is private in class '" + objectType.className + "'");
     }
 
-    return field.type;
+    return wrapSafe(field.type);
 }
 
 bool SemanticAnalyzer::exprIsMutablePlace(const Expr& expr) {
@@ -1649,6 +1728,28 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
         return Type{TypeKind::Error};
     }
 
+    // Nullable receiver: `x.m()` on a `T?` errors unless it's a `?.` safe call.
+    if (objectType.isNullable) {
+        if (!methodCall.safe) {
+            error(methodCall.method, "cannot call method '" + methodCall.method.lexeme
+                  + "' on a possibly-null value of type '" + typeName(objectType)
+                  + "'; narrow it with a null check, '!!', or '?.'");
+            for (const auto& arg : methodCall.args) analyzeExpr(*arg);
+            return Type{TypeKind::Error};
+        }
+        objectType = stripNullable(objectType);
+    }
+    auto wrapSafe = [&](Type t) -> Type {
+        if (!methodCall.safe) return t;
+        if (t.kind == TypeKind::Void)   return t;   // `x?.doThing()` — a null-guarded void call
+        if (t.kind == TypeKind::Object) {
+            error(methodCall.method, "'?.' cannot yield a value object '" + t.className
+                  + "'; return a reference or a primitive");
+            return Type{TypeKind::Error};
+        }
+        return makeNullable(t);
+    };
+
     // Generic body-check: a method call on a value of a type parameter resolves against the
     // parameter's bounds (not a concrete class). Unbounded ⇒ permissive (suppressed).
     if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
@@ -1718,7 +1819,7 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     if (set.size() > 1)
         resolvedCallee[&methodCall] = mangleOverload(
             objectType.className + "_" + methodCall.method.lexeme, method.paramTypes, method.returnType);
-    return method.returnType;
+    return wrapSafe(method.returnType);
 }
 
 // ============================================================

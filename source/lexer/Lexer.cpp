@@ -65,7 +65,11 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const s
             case '.': tokens.emplace_back(TokenType::DOT,      ".", line); break;
             case ';': tokens.emplace_back(TokenType::SEMICOLON, ";", line); break;
             case '~': tokens.emplace_back(TokenType::TILDE,    "~", line); break;
-            case '?': tokens.emplace_back(TokenType::QUESTION, "?", line); break;
+            case '?':
+                if      (match('.')) tokens.emplace_back(TokenType::QUESTION_DOT,   "?.", line);
+                else if (match(':')) tokens.emplace_back(TokenType::QUESTION_COLON, "?:", line);
+                else                 tokens.emplace_back(TokenType::QUESTION,        "?",  line);
+                break;
             case ':':
                 tokens.emplace_back(match(':') ? TokenType::COLON_COLON : TokenType::COLON,
                                     source.substr(start, current - start), line);
@@ -73,6 +77,9 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const s
 
             // --- one-or-two character tokens ---
             case '!': {
+                // NB: `!!` is NOT a single token — a prefix `!!x` is a double logical-NOT. The
+                // postfix non-null-assertion `x!!` is recognised in the parser as two `!` after an
+                // expression (parseUnary consumes the prefix form first, so there's no conflict).
                 bool eq = match('=');
                 tokens.emplace_back(eq ? TokenType::BANG_EQUAL : TokenType::BANG,
                                     eq ? "!=" : "!", line);

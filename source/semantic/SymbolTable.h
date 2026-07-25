@@ -22,6 +22,9 @@ struct Symbol {
     bool              isInitialized  = false; // true once the variable has been definitely assigned a value
     bool              isMutable      = false; // `mut` — reassignable; otherwise const (single-assignment)
     std::vector<bool> paramMut     = {};      // per-parameter `mut` flag (Function symbols only)
+    bool              isNarrowedNonNull = false; // smart-cast: a nullable `T?` proven non-null on the
+                                                 // current path (so reads narrow to `T`); dropped on
+                                                 // reassignment; merged across branches like init state.
 };
 
 class SymbolTable {
@@ -46,6 +49,12 @@ public:
     using InitSnapshot = std::unordered_map<std::string, bool>;
     [[nodiscard]] InitSnapshot captureInitState() const;
     void                       restoreInitState(const InitSnapshot& snap);
+
+    // Smart-cast narrowing snapshot — same shape/merge as init state, tracking isNarrowedNonNull.
+    [[nodiscard]] InitSnapshot captureNarrowState() const;
+    void                       restoreNarrowState(const InitSnapshot& snap);
+    // Clear a binding's non-null narrowing (on reassignment). Walks innermost→outermost.
+    void                       clearNarrowing(const std::string& name);
 
 private:
     std::vector<std::unordered_map<std::string, Symbol>> scopes;

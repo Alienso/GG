@@ -58,6 +58,17 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     if (from == to)                          return CastResult::Silent;  // identity
     if (isError(from) || isError(to))        return CastResult::None;
 
+    // ---- Nullability ----
+    // `null` → any nullable target.
+    if (from.kind == TypeKind::Null)
+        return to.isNullable ? CastResult::Silent : CastResult::None;
+    // A nullable value never implicitly narrows to a non-nullable one (must use `!!` or a
+    // smart-cast). `T?` identity was already handled by the `from == to` check above.
+    if (from.isNullable && !to.isNullable)   return CastResult::None;
+    // `T → T?` (implicit wrap) and `T? → U?` (compatible underlying): compare the non-null forms.
+    if (to.isNullable)
+        return canImplicitlyCast(stripNullable(from), stripNullable(to));
+
     TypeKind f = from.kind, t = to.kind;
 
     // Generic-body checking only: a type parameter `T` and a reference/value of that same
@@ -226,7 +237,9 @@ Type typeFromToken(TokenType tt) {
 // ============================================================
 
 std::string typeName(const Type& t) {
+    if (t.isNullable) return typeName(stripNullable(t)) + "?";
     switch (t.kind) {
+        case TypeKind::Null:   return "null";
         case TypeKind::I8:     return "i8";
         case TypeKind::I16:    return "i16";
         case TypeKind::I32:    return "i32";
@@ -319,6 +332,16 @@ TypeKind typeKindFromName(const std::string& name) {
 
 Type decodeSynthesizedType(const Token& tok) {
     const std::string& s = tok.lexeme;
+
+    // Nullable: a trailing `?` (`Class&?`, `ref:Class?`, `Color?`). Decode the inner type and mark
+    // it nullable. A bare class/enum name inner isn't a *synthesized* token, so decoding returns
+    // Error and the caller (resolveTypeToken / the codegen resolvers) applies nullability itself.
+    if (!s.empty() && s.back() == '?') {
+        Token inner{TokenType::IDENTIFIER, s.substr(0, s.size() - 1), tok.line};
+        Type t = decodeSynthesizedType(inner);
+        if (t.kind != TypeKind::Error) return makeNullable(t);
+        return Type{TypeKind::Error};
+    }
 
     // Borrow: "ref:T" — a non-owning reference (`ref T`). A primitive inner (`ref i32`) is an
     // lvalue reference to that primitive; anything else is a class borrow.

@@ -99,6 +99,25 @@ struct ThisExpr {
 struct MemberAccessExpr {
     std::unique_ptr<Expr> object;
     Token                 field;
+    bool                  safe = false;   // `x?.field` — null-propagating access on a nullable receiver
+};
+
+// `null` — the null literal (typed TypeKind::Null; assignable only where a `T?` is expected).
+struct NullLiteralExpr {
+    Token keyword;   // the 'null' token
+};
+
+// `x!!` — non-null assertion. Unwraps a `T?` to `T`, aborting the program if it is null.
+struct UnwrapExpr {
+    std::unique_ptr<Expr> operand;
+    Token                 op;   // the '!!' token
+};
+
+// `a ?: b` — Elvis: evaluates to `a` when non-null, else `b`. Result is the non-null form.
+struct ElvisExpr {
+    std::unique_ptr<Expr> left;
+    Token                 op;   // the '?:' token
+    std::unique_ptr<Expr> right;
 };
 
 struct MemberAssignExpr {
@@ -112,6 +131,7 @@ struct MethodCallExpr {
     Token                              method;
     std::vector<std::unique_ptr<Expr>> args;
     std::vector<Token>                 argNames;   // parallel to args; see CallExpr::argNames
+    bool                               safe = false;   // `x?.m(...)` — null-propagating call
 };
 
 // An untyped brace initializer `{ args }` whose class is deduced from the expected type at the use
@@ -194,6 +214,9 @@ struct Expr {
         MethodCallExpr,
         RefStoreExpr,
         BraceInitExpr,
+        NullLiteralExpr,
+        UnwrapExpr,
+        ElvisExpr,
         CastExpr,
         NewExpr,
         SizeofExpr,

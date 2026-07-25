@@ -176,6 +176,7 @@ private:
     // followed by '&' (a reference, Ref<Class>). For a reference, returns a
     // single synthesized IDENTIFIER token with lexeme "<Class>&".
     Token consumeType();
+    Token consumeTypeCore();   // consumeType without the trailing `?` (nullable) handling
 
     // ---- Generics helpers ----
     bool tryCaptureFunctionTemplate();                       // capture a generic fn decl
@@ -246,6 +247,7 @@ private:
     // ---- Expression parsers (low to high precedence) ----
     [[nodiscard]] Expr parseExpression();
     [[nodiscard]] Expr parseAssignment();
+    [[nodiscard]] Expr parseElvis();
     [[nodiscard]] Expr parseLogicalOr();
     [[nodiscard]] Expr parseLogicalAnd();
     [[nodiscard]] Expr parseBitwiseOr();

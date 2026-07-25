@@ -50,7 +50,35 @@ const Type* CodeGen::findStaticField(const std::string& className,
     return nullptr;
 }
 
-std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma) {
+std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma, const Type& resolvedType) {
+    // Safe access `x?.field`: evaluate the (nullable) receiver once; if null the result is the
+    // empty value, else read the field and wrap it. Result flows through a slot.
+    if (ma.safe) {
+        Type recvType = stripNullable(exprType(*ma.object));
+        std::string recv = genExpr(*ma.object);
+        std::string resIr = irTypeName(resolvedType);
+        bool optPrim = resolvedType.isNullable
+            && (isNumeric(resolvedType.kind) || resolvedType.kind == TypeKind::Bool
+                || resolvedType.kind == TypeKind::Char);
+        std::string slot = "%" + freshTemp();
+        emitAlloca(slot, resIr);
+        emitStore(resIr, optPrim ? "zeroinitializer" : "null", slot);   // empty default
+        std::string cmp = freshTemp();
+        std::string present = freshLabel("safe.some"), merge = freshLabel("safe.merge");
+        emit("%" + cmp + " = icmp ne ptr " + recv + ", null");
+        emitCondBr("%" + cmp, present, merge);
+        switchBlock(present);
+        auto [gepReg, fieldType] = resolveFieldGEP(recv, recvType.className, ma.field.lexeme);
+        if (fieldType.kind != TypeKind::Error) {
+            std::string val = (fieldType.kind == TypeKind::Object) ? gepReg
+                                                                   : emitLoad(irTypeName(fieldType), gepReg);
+            emitStore(resIr, emitCast(val, fieldType, resolvedType), slot);
+        }
+        emitBr(merge);
+        switchBlock(merge);
+        return emitLoad(resIr, slot);
+    }
+
     if (std::holds_alternative<IdentifierExpr>(*ma.object->node)) {
         const auto& id = std::get<IdentifierExpr>(*ma.object->node);
         // Static enum variant access: EnumName.VARIANT → address of the global singleton.
@@ -184,6 +212,56 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
 }
 
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
+    // Safe call `x?.m(args)`: evaluate the (nullable) receiver once; if null the result is empty
+    // (or the void call is skipped), else call the instance method and wrap the result. `?.` never
+    // yields a value object (rejected in semantics), so there is no sret path here.
+    if (mc.safe) {
+        std::string className = stripNullable(exprType(*mc.object)).className;
+        std::string recv      = genExpr(*mc.object);
+        bool isVoid  = resolvedType.kind == TypeKind::Void;
+        bool optPrim = resolvedType.isNullable
+            && (isNumeric(resolvedType.kind) || resolvedType.kind == TypeKind::Bool
+                || resolvedType.kind == TypeKind::Char);
+        std::string resIr = isVoid ? "" : irTypeName(resolvedType);
+        std::string slot;
+        if (!isVoid) {
+            slot = "%" + freshTemp();
+            emitAlloca(slot, resIr);
+            emitStore(resIr, optPrim ? "zeroinitializer" : "null", slot);
+        }
+        std::string cmp = freshTemp();
+        std::string present = freshLabel("safe.some"), merge = freshLabel("safe.merge");
+        emit("%" + cmp + " = icmp ne ptr " + recv + ", null");
+        emitCondBr("%" + cmp, present, merge);
+        switchBlock(present);
+        {
+            std::string mName = calleeName(&mc, className + "_" + mc.method.lexeme);
+            auto funcIt = funcParamTypes.find(mName);
+            const std::vector<Type>* declaredParams =
+                funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
+            std::string argStr   = buildArgString(mc.args, declaredParams, defaultsFor(mName), orderFor(&mc));
+            std::string fullArgs = "ptr " + recv + (argStr.empty() ? "" : ", " + argStr);
+            Type        underlying = stripNullable(resolvedType);
+            if (isVoid) {
+                emit("call void @" + mName + "(" + fullArgs + ")");
+            } else {
+                std::string t = freshTemp();
+                emit("%" + t + " = call " + irTypeName(underlying) + " @" + mName + "(" + fullArgs + ")");
+                emitStore(resIr, emitCast("%" + t, underlying, resolvedType), slot);
+            }
+        }
+        emitBr(merge);
+        switchBlock(merge);
+        if (isVoid) return "";
+        std::string res = emitLoad(resIr, slot);
+        // An owning-reference result carries a +1 (on the present path; null on the other) — hand it
+        // to the caller as a pending temp; gg_release is null-safe so the null path is harmless.
+        Type underlying = stripNullable(resolvedType);
+        if (underlying.kind == TypeKind::Reference && !underlying.borrow)
+            pendingTemps_.push_back({ res, underlying.className });
+        return res;
+    }
+
     std::string returnIrType = irTypeName(resolvedType);
 
     // Return-slot (sret) method used as a value (not a plain variable initializer — that path

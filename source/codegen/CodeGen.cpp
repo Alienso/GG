@@ -80,9 +80,17 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             if (fieldType.kind == TypeKind::Reference) {
                 if (!fd.isStatic) hasRefField = true;
             } else if (isError(fieldType)) {
-                // Bare type name: value-object field (embedding) or enum-value field.
+                // Bare type name: value-object field (embedding) or enum-value field; or a nullable
+                // primitive/enum field (`i32?` → `{i1,iN}`, `Color?` → ptr; nullable refs `N&?` were
+                // decoded above).
                 const std::string& lex = fd.typeName.lexeme;
-                if (classNames.count(lex))      fieldType = makeObjectType(lex);
+                if (!lex.empty() && lex.back() == '?') {
+                    std::string base = lex.substr(0, lex.size() - 1);
+                    TypeKind prim = typeKindFromName(base);
+                    if (prim != TypeKind::Error)       fieldType = makeNullable(Type{prim});
+                    else if (enumNames.count(base))    fieldType = makeNullable(makeEnumType(base));
+                }
+                else if (classNames.count(lex))      fieldType = makeObjectType(lex);
                 else if (enumNames.count(lex))  fieldType = makeEnumType(lex);
                 else                            fieldType = typeFromToken(fd.typeName.type);
             }

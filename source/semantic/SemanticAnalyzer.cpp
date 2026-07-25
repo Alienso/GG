@@ -111,6 +111,23 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         if (!isError(synth)) {
             // Reference field (Class&) or typed-pointer field (ptr<T>).
             fieldType = synth;
+        } else if (fd.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '?') {
+            // Nullable field whose inner type is a primitive/enum/class (nullable references `N&?`
+            // were already decoded above). Value objects can't be nullable.
+            std::string base = lex.substr(0, lex.size() - 1);
+            TypeKind prim = typeKindFromName(base);
+            if (prim != TypeKind::Error && prim != TypeKind::Ptr && prim != TypeKind::Void) {
+                fieldType = makeNullable(Type{prim});
+            } else if (declaredEnumNames_.count(base)) {
+                fieldType = makeNullable(makeEnumType(base));
+            } else if (declaredClassNames_.count(base)) {
+                error(fd.name, "a value object cannot be nullable; declare field '" + fd.name.lexeme
+                      + "' as a reference '" + base + "&?'");
+                fieldType = Type{TypeKind::Error};
+            } else {
+                error(fd.name, "unknown type '" + lex + "' for field '" + fd.name.lexeme + "'");
+                fieldType = Type{TypeKind::Error};
+            }
         } else if (fd.typeName.type == TokenType::IDENTIFIER) {
             // Bare type name: an enum-value field, or a value-object field (embedding).
             if (declaredEnumNames_.count(lex)) {
@@ -691,7 +708,33 @@ void SemanticAnalyzer::checkRawPtrAllowed(const Token& typeToken, const Token& s
     }
 }
 
-Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) const {
+Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) {
+    // Nullable `T?` (a synthesized IDENTIFIER whose lexeme ends with '?'): resolve the inner type
+    // and mark it nullable. Only references, borrows, and enums may be nullable in Phase 1 — value
+    // objects have no null representation, and nullable primitives are a Phase-2 feature.
+    if (typeToken.type == TokenType::IDENTIFIER && !typeToken.lexeme.empty()
+        && typeToken.lexeme.back() == '?') {
+        std::string base = typeToken.lexeme.substr(0, typeToken.lexeme.size() - 1);
+        // Nullable primitive (`i32?`, `bool?`, …) → a tagged optional. `ptr`/`void` can't be nullable.
+        TypeKind prim = typeKindFromName(base);
+        if (prim != TypeKind::Error) {
+            if (prim == TypeKind::Ptr || prim == TypeKind::Void) {
+                error(typeToken, "'" + base + "?' is not allowed; `ptr` and `void` cannot be nullable");
+                return Type{TypeKind::Error};
+            }
+            return makeNullable(Type{prim});
+        }
+        Token inner{TokenType::IDENTIFIER, base, typeToken.line};
+        Type t = resolveTypeToken(inner);
+        if (isError(t)) return t;
+        if (t.kind == TypeKind::Object) {
+            error(typeToken, "a value object cannot be nullable; use a reference '" + t.className
+                  + "&?' instead");
+            return Type{TypeKind::Error};
+        }
+        return makeNullable(t);
+    }
+
     // Parser-synthesized types: "<Class>&" (Reference) and "ptr<Elem>" (TypedPtr).
     Type synth = decodeSynthesizedType(typeToken);
     if (!isError(synth)) {

@@ -1040,6 +1040,40 @@ e = 42;              // writes into the buffer through the borrow
   like C++'s `vector<int>::operator[]`. (Storing a whole object through a returned class reference
   is not yet supported.)
 
+### Nullable references (`T?`)
+A reference type may be made **nullable** with a postfix `?`, meaning "possibly absent" — Kotlin's
+model: `null` exists, but the type system forces you to handle it before use.
+```gg
+Node&? maybe = find(key);     // owning reference that may be null
+Node*? peek = borrowMaybe();  // a nullable borrow
+Color? c = null;              // enums are nullable too
+
+if (maybe == null) { return 0; }   // guard clause
+i32 v = maybe.v;                   // smart-cast: `maybe` is now non-null here
+
+Node& sure = maybe!!;              // non-null assertion (aborts if null)
+Node& orElse = maybe ?: fallback;  // Elvis: `maybe` if non-null, else `fallback`
+```
+- **What can be nullable.** Owning `Class&?`, borrow `Class*?`, and enum `Color?` cost nothing extra
+  — they share the plain pointer representation (`null` is the machine null). A **primitive** (`i32?`,
+  `bool?`, …) is also nullable, stored as a small tag+payload value (like Rust's `Option<i32>`); it
+  needs `!!` / `?:` / a null check to read, exactly like a nullable reference. A **value object
+  (`Point?`) cannot be nullable** — use a reference (`Point&?`).
+- **`null`** is assignable only where a `T?` is expected. A non-null `T` widens implicitly to `T?`;
+  the reverse (using a `T?` as a `T`) requires unwrapping.
+- **`== null` / `!= null`** test for absence.
+- **`x!!`** unwraps `T?` → `T`, aborting the program if it is null (the unsafe escape hatch — there
+  are no exceptions to catch).
+- **`a ?: b`** (Elvis) evaluates to `a` when non-null, otherwise `b`.
+- **Smart-casts** are the safe, preferred path: inside `if (x != null) { … }`, and after a guard
+  clause `if (x == null) { return; }`, the binding `x` is treated as the non-null `T` with no
+  ceremony. Reassigning `x` to `null` (or another nullable) drops the narrowing; reassigning it to a
+  non-null value keeps it. (v1 narrows bare local/parameter bindings, not field chains.)
+- **`?.`** (safe access/call) short-circuits on null: `x?.field` / `x?.method()` evaluates the
+  receiver, and if it's null the whole expression is `null`, otherwise it does the access. The
+  result is nullable (so `a?.get()` on a `C&?`, where `get` returns `i32`, yields an `i32?`). A
+  `?.` cannot yield a value object — return a reference or a primitive.
+
 ### Raw pointers (`ptr` / `ptr<T>`)
 ```gg
 ptr buf = malloc(64);    // opaque — GG tracks no lifetime
@@ -1420,11 +1454,10 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Types & values
 | Missing feature | Notes |
 |-----------------|-------|
-| `null` literal  | `ptr` / `ptr<T>` are null at the IR level (store 0), but there is no GG-level `null` keyword |
 | Built-in string type | Strings are C `ptr`; use `extern puts` and pass string literals directly |
 | Union / sum types | No tagged unions (enums are Java-style singletons, not sum types — see §9) |
 | Tuples | No tuple syntax or destructuring |
-| Nullable types (`T?`) | No optional type |
+| Nullable value objects | `T?` covers references, borrows, enums, and primitives; `Point?` (a value object) is rejected — use `Point&?` |
 
 ### Functions & methods
 | Missing feature | Notes |

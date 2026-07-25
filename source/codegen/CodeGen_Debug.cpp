@@ -61,6 +61,9 @@ static int exprLine(const Expr& e) {
     if (auto* p = std::get_if<NewExpr>(&v))           return p->keyword.line;
     if (auto* p = std::get_if<SizeofExpr>(&v))        return p->keyword.line;
     if (auto* p = std::get_if<SwitchExpr>(&v))        return p->keyword.line;
+    if (auto* p = std::get_if<NullLiteralExpr>(&v))   return p->keyword.line;
+    if (auto* p = std::get_if<UnwrapExpr>(&v))        return p->operand ? exprLine(*p->operand) : p->op.line;
+    if (auto* p = std::get_if<ElvisExpr>(&v))         return p->left ? exprLine(*p->left) : p->op.line;
     return 0;
 }
 

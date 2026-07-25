@@ -416,6 +416,8 @@ size_t Parser::typeSpanAt(size_t from) const {
     // reference suffix: `&` (owning heap reference) or `*` (non-owning borrow)
     if (i < tokens.size()
         && (tokens[i].type == TokenType::AMPERSAND || tokens[i].type == TokenType::STAR)) ++i;
+    // nullable suffix: `T?`
+    if (i < tokens.size() && tokens[i].type == TokenType::QUESTION) ++i;
     return i - from;
 }
 
@@ -736,7 +738,20 @@ bool Parser::isTypeName() const {
     }
 }
 
+// A type with an optional trailing `?` (nullable). `T?` → a synthesized token whose lexeme is the
+// core spelling plus `?` (`Class&?`, `ref:Class?`, `Color?`, `i32?`); decodeSynthesizedType /
+// resolveTypeToken decode the suffix. Nested `??` is a parse error.
 Token Parser::consumeType() {
+    Token base = consumeTypeCore();
+    if (match({ TokenType::QUESTION })) {
+        if (check(TokenType::QUESTION))
+            throw error(peek(), "nested '??' is not allowed; a nullable type is written 'T?'");
+        return Token{ TokenType::IDENTIFIER, base.lexeme + "?", base.line };
+    }
+    return base;
+}
+
+Token Parser::consumeTypeCore() {
     Token base = advance();  // caller has verified isTypeName()
 
     std::string lexeme = base.lexeme;
@@ -1596,7 +1611,7 @@ Expr Parser::parseAssignment() {
                 return makeExpr(CompoundAssignExpr{ name, operatorToken, box(std::move(value)) });
         }
     }
-    Expr expression = parseLogicalOr();
+    Expr expression = parseElvis();
 
     // Indexed assignment: arr[i] = expr (detected after parsing the LHS)
     if (expression.node && std::holds_alternative<IndexExpr>(*expression.node)
@@ -1632,6 +1647,17 @@ Expr Parser::parseAssignment() {
     }
 
     return expression;
+}
+
+// Elvis `a ?: b` — sits just below assignment, above logical-or; right-associative.
+Expr Parser::parseElvis() {
+    Expr left = parseLogicalOr();
+    if (match({ TokenType::QUESTION_COLON })) {
+        Token op = previous();
+        Expr right = parseElvis();   // right-associative: a ?: b ?: c == a ?: (b ?: c)
+        return makeExpr(ElvisExpr{ box(std::move(left)), op, box(std::move(right)) });
+    }
+    return left;
 }
 
 Expr Parser::parseLogicalOr() {
@@ -1762,11 +1788,20 @@ Expr Parser::parsePostfix() {
             expression = makeExpr(PostfixExpr{ box(std::move(expression)), previous() });
             continue;
         }
-        // Static member access / call via scope resolution: ClassName::member
-        // (or ClassName::method(args)). Lowered to the same nodes as '.' access;
-        // the semantic analyser resolves the left identifier as a type name.
-        if (check(TokenType::DOT) || check(TokenType::COLON_COLON)) {
-            advance();  // consume '.' or '::'
+        // Non-null assertion: `x!!` — unwrap a nullable, aborting if null. Recognised as two
+        // consecutive `!` AFTER an expression (prefix `!!x` is parsed by parseUnary as double-NOT
+        // and never reaches here).
+        if (check(TokenType::BANG) && peekNext().type == TokenType::BANG) {
+            Token op = advance();   // first '!'
+            advance();              // second '!'
+            expression = makeExpr(UnwrapExpr{ box(std::move(expression)), op });
+            continue;
+        }
+        // Member access / call via `.`, `?.` (safe), or `::` (static scope resolution).
+        // Lowered to the same nodes; `?.` sets the `safe` flag (null-propagating).
+        if (check(TokenType::DOT) || check(TokenType::QUESTION_DOT) || check(TokenType::COLON_COLON)) {
+            bool safe = check(TokenType::QUESTION_DOT);
+            advance();  // consume '.', '?.' or '::'
             Token member = consume(TokenType::IDENTIFIER, "expected member name after '.'");
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('
@@ -1774,11 +1809,11 @@ Expr Parser::parsePostfix() {
                 std::vector<std::unique_ptr<Expr>> args =
                     parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
                 expression = makeExpr(MethodCallExpr{
-                    box(std::move(expression)), member, std::move(args), std::move(argNames)
+                    box(std::move(expression)), member, std::move(args), std::move(argNames), safe
                 });
             } else {
                 expression = makeExpr(MemberAccessExpr{
-                    box(std::move(expression)), member
+                    box(std::move(expression)), member, safe
                 });
             }
             continue;
@@ -1791,6 +1826,11 @@ Expr Parser::parsePostfix() {
 Expr Parser::parsePrimary() {
     if (match({ TokenType::THIS })) {
         return makeExpr(ThisExpr{ previous() });
+    }
+
+    // The null literal — typed against the expected `T?` in the semantic pass.
+    if (match({ TokenType::NULL_LITERAL })) {
+        return makeExpr(NullLiteralExpr{ previous() });
     }
 
     // Switch expression: `switch (x) { case ... -> v; default -> v; }`

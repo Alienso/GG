@@ -123,6 +123,7 @@ add_executable(GG_tests
         tests/ref_tests.cpp
         tests/brace_init_tests.cpp
         tests/named_args_tests.cpp
+        tests/nullable_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

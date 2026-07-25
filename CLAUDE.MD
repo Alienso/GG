@@ -88,6 +88,10 @@ for compound types that don't map to a single keyword:
 | `"ptr<Class>"`      | Typed raw pointer, object element              | `ptr<Class>`    |
 | `"ptr<Class.ref>"`  | Typed raw pointer, reference element           | `ptr<Class&>`   |
 | `"ptr<void>"`       | Alias for opaque `ptr` (`TypeKind::Ptr`)       | `ptr` / `ptr<void>` |
+| `"Class&?"`         | Nullable owning reference (`isNullable`)       | `Class&?`       |
+| `"ref:Class?"`      | Nullable class borrow                          | `Class*?`       |
+| `"Color?"`          | Nullable enum                                  | `Color?`        |
+| `"i32?"`            | Nullable primitive → tag+payload `{ i1, iN }`  | `i32?`          |
 
 Decoded by `decodeSynthesizedType(const Token&)` in `Type.cpp`.
 Both the semantic resolver (`resolveTypeToken`) and codegen resolvers
@@ -644,6 +648,47 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   a `ref <primitive>` param takes its address in `buildArgString` (via `genBorrowSource`).
 - Tests: `tests/ref_tests.cpp` (`[ref]`), `e2e/ref_test.gg`.
 
+### Nullable types — `T?` (Kotlin-style)
+`T?` marks a **nullable** type, with two representations by underlying kind:
+- **Reference-like** (`Class&?`, `Class*?`, `Color?`) → a plain `ptr` (null = machine null), so `T`
+  and `T?` are **bit-identical** and the null-safe `gg_retain`/`gg_release` need no change.
+- **Primitive** (`i32?`, `bool?`, …) → an inline tag+payload value `{ i1 present, iN value }` (a
+  stack value type, no heap). `irTypeName` emits the struct; `emitCast` wraps (`iN` → insertvalue
+  `{true, v}`) / a `null` → `zeroinitializer`; `!!`/`?:`/`== null` extract the tag (field 0) and
+  payload (field 1); a smart-cast narrows via `genIdentifier` payload-extract (no runtime check).
+**Value objects (`Point?`) are rejected** (no null representation); `ptr?`/`void?` rejected.
+- **`?.` safe-call** (`x?.field` / `x?.m(args)`): semantics narrow the receiver and make the result
+  nullable (`wrapSafe` in `analyzeMemberAccess`/`analyzeMethodCall`; a value-object result is
+  rejected — return a reference/primitive). Codegen (`genMemberAccess`/`genMethodCall` safe branch)
+  evaluates the receiver once, `icmp ne ptr recv, null`, and flows through a result slot: the null
+  path leaves the empty default (`null` / `zeroinitializer`), the present path does the field
+  load / instance call and wraps. `?.` never yields a value object, so there's no sret path; an
+  owning-reference result is pushed to `pendingTemps_` (null-safe release covers the null path).
+- **Tokens/AST**: lexer `null` (`NULL_LITERAL`), `?.`/`?:`/`!!` (`QUESTION_DOT`/`QUESTION_COLON`/
+  `BANG_BANG`); `?` (`QUESTION`) as a postfix type suffix. New expr nodes `NullLiteralExpr`,
+  `UnwrapExpr` (`x!!`), `ElvisExpr` (`a ?: b`); a `bool safe` on `MemberAccessExpr`/`MethodCallExpr`
+  for `?.`. Elvis sits just below assignment (right-assoc); `!!` is postfix.
+- **Type**: reuses the (pre-existing) `Type::isNullable` flag + `TypeKind::Null` (the type of
+  `null`). `makeNullable`/`stripNullable`. `canImplicitlyCast`: `null → T?` and `T → T?` are Silent
+  (implicit wrap); `T? → T` is **None** (must unwrap). `typeName` renders `T?`. `consumeType` reads
+  a trailing `?` → a synthesized `"...?"` token; `decodeSynthesizedType` and the semantic/codegen
+  resolvers strip it. `resolveTypeToken` rejects nullable value objects + `??` + (Phase-1) primitives.
+- **Operators**: `!!` (`analyzeUnwrap`/`genUnwrap`) null-checks and `abort()`s on null (no
+  exceptions), else passes the ptr through. `?:` (`analyzeElvis`/`genElvis`) selects the non-null
+  operand via a result slot. `== null` / `!= null` route through `classifyEquality`'s new null case
+  → the address-identity `icmp eq/ne ptr …, null` path.
+- **Smart-casts** (`Symbol::isNarrowedNonNull`, snapshotted like `isInitialized`): `if (x != null)`
+  narrows the then-branch, `if (x == null)` the else; **guard clauses** (`if (x == null) { return; }`
+  → non-null after) reuse `alwaysReturns`; branch joins merge (non-null iff on every reaching path).
+  `analyzeIdentifier` returns `stripNullable` for a narrowed binding (recorded on the use-node —
+  free for references, same `ptr`). **`mut` invalidation**: `analyzeAssign` refreshes the bit from
+  the RHS (non-null value ⇒ still narrowed; `null`/nullable ⇒ dropped). Loops intersect pre-loop and
+  post-body narrowing (`mergeLoopNarrowing`) so a body can neither leak nor unsoundly keep a cast.
+  **Bare local/param bindings only** (not field chains); `&&`-narrowing not done.
+- **Codegen**: nullable references need **no representation change** (still `ptr`); the smart-cast
+  is representation-transparent for references. Tests: `tests/nullable_tests.cpp` `[nullable]`,
+  `e2e/nullable_test.gg`.
+
 ### Brace construction — `Type{args}` (C++-style)
 Braces are an **alternate delimiter for a positional constructor call** — `Point{1, 2}` ≡
 `Point(1, 2)`, same overload resolution. No aggregate/field-fill, no named fields. Two forms:
@@ -792,7 +837,33 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**809 test cases / 1565 assertions** (as of **named & mixed arguments** — `f(x: 1, y: 2)` / a
+**874 test cases / 1656 assertions** (as of the **comprehensive nullable-type test pass** — the
+`[nullable]` group grew to 65 cases (incl. nullable composing with generics and `switch`) covering the full surface (references/primitives/enums, `null`/
+`==null`/`!!`/`?:`/`?.`, smart-casts incl. `mut` invalidation, nullable fields/params/returns,
+overload interaction, codegen IR). The pass surfaced and fixed **three real bugs**: (1) Elvis with a
+nullable RHS (`a ?: b`, both nullable) wrongly checked the RHS against the *non-null* result;
+(2) a nullable **enum local** (`Color?`) mis-alloced as `%Color?` instead of `ptr`; (3) nullable
+**primitive/enum fields** (`i32? tag`) were unresolved in both the semantic field pass and the codegen
+struct layout. `tests/nullable_tests.cpp`.) Prior baseline was
+**833 test cases / 1598 assertions** (as of **`?.` safe-call — Phase 2 complete**: `x?.field` /
+`x?.m(args)` on a nullable receiver — null-checked once, result flows through a slot (empty on the
+null path), wrapped nullable on the present path; a value-object result is rejected. With this the
+Kotlin-style null-safety story — nullable references + primitives, `null`/`==null`/`!!`/`?:`,
+smart-casts, and `?.` — is fully implemented. `tests/nullable_tests.cpp` `[safecall]`,
+`e2e/nullable_test.gg`.) Prior baseline was
+**830 test cases / 1596 assertions** (as of **nullable primitives `i32?` — Phase 2**: a nullable
+primitive lowers to an inline tag+payload `{ i1, iN }` value (stack, no heap); `null`/`== null`/
+`!!`/`?:` and smart-casts all work on it (payload extracted with no runtime check once narrowed);
+`ptr?`/`void?` and nullable value objects stay rejected. `?.` safe-call remains parsed-but-deferred.
+`tests/nullable_tests.cpp` `[primitive]`, `e2e/nullable_test.gg`.) Prior baseline was
+**828 test cases / 1593 assertions** (as of **nullable references `T?` — Kotlin-style, Phase 1**:
+`Class&?`/`Class*?`/`Color?` (reference-like only; value objects + primitives rejected, primitives
+deferred to Phase 2), `null` literal, `== null`, implicit `T→T?` wrap, `!!` (aborts on null), `?:`
+Elvis, and **smart-casts** — `if (x != null)` / guard-clause narrowing with `mut` reassignment
+invalidation, all sound via the definite-assignment snapshot machinery. `?.` parsed but deferred.
+Nullable references reuse the `ptr` representation (no codegen change). See the "Nullable
+references" invariant; `tests/nullable_tests.cpp` `[nullable]`, `e2e/nullable_test.gg`.) Prior
+baseline was **809 test cases / 1565 assertions** (as of **named & mixed arguments** — `f(x: 1, y: 2)` / a
 positional prefix then named; names participate in overload selection; **defaults may now sit on
 any parameter** (contiguous-trailing rule removed) and a named call can skip a defaulted middle
 param; args evaluate in source order then reorder into parameter order; a semantic→codegen

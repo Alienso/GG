@@ -684,20 +684,18 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
             continue;
         }
 
-        // loopVar.name -> "memberName" string; loopVar.<other> -> error.
         if (t.type == TokenType::IDENTIFIER && t.lexeme == loopVar) {
+            // `v.name` -> the member-name string (both fields and variants). `name` is reserved for
+            // the reflection name even if a variant type happens to declare a field called `name`.
             if (i + 2 < body.size() && body[i + 1].type == TokenType::DOT
-                && body[i + 2].type == TokenType::IDENTIFIER) {
-                if (body[i + 2].lexeme == "name") {
-                    out.push_back(Token{ TokenType::STRING, memberName, t.line });
-                    i += 3;
-                    continue;
-                }
-                throw error(body[i + 2], "only '" + loopVar + ".name' is supported in 'inline for' (got '."
-                            + body[i + 2].lexeme + "')");
+                && body[i + 2].type == TokenType::IDENTIFIER && body[i + 2].lexeme == "name") {
+                out.push_back(Token{ TokenType::STRING, memberName, t.line });
+                i += 3;
+                continue;
             }
-            // Bare binding. For @variants it is the variant singleton `Enum::member`; for @fields it
-            // has no standalone value (a field needs an object — use @field).
+            // For @variants the binding IS the variant singleton `Enum::member` — a real value, so
+            // bare `v` and any `v.method()`/`v.field` are valid (the trailing `.member` access stays
+            // and applies to the substituted singleton).
             if (overVariants) {
                 out.push_back(Token{ TokenType::IDENTIFIER,   enumName,   t.line });
                 out.push_back(Token{ TokenType::COLON_COLON,  "::",       t.line });
@@ -705,6 +703,12 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
                 ++i;
                 continue;
             }
+            // For @fields the binding has no standalone value (a field needs an object — use
+            // `@field(obj, v.name)`); only `v.name` is meaningful.
+            if (i + 2 < body.size() && body[i + 1].type == TokenType::DOT
+                && body[i + 2].type == TokenType::IDENTIFIER)
+                throw error(body[i + 2], "only '" + loopVar + ".name' is supported in 'inline for' (got '."
+                            + body[i + 2].lexeme + "')");
             throw error(t, "reflection binding '" + loopVar + "' can only be used as '"
                         + loopVar + ".name' or inside '@field(...)'");
         }

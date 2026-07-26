@@ -416,6 +416,65 @@ TEST_CASE("Reflect - @implements recognises a built-in operator trait", "[reflec
     REQUIRE(ir.find("br i1 1") != std::string::npos);
 }
 
+TEST_CASE("Reflect - a variant binding is a real value (method call / field access)", "[reflect]") {
+    // Inside @variants, `v` is the singleton `Enum::VARIANT`, so `v.method()` / `v.field` work
+    // (they lower to `Enum::VARIANT.method()`), not just `v.name`.
+    auto ir = codegenString(R"(
+        enum Planet {
+            EARTH(1), MARS(2);
+            i32 order;
+            Planet(i32 o) { this.order = o; }
+            fn getOrder() -> i32 { return this.order; }
+        }
+        fn total() -> i32 {
+            mut i32 s = 0;
+            inline for (v in @variants(Planet)) { s = s + v.getOrder(); }
+            return s;
+        }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(ir.find("@Planet$EARTH") != std::string::npos);
+    REQUIRE(ir.find("@Planet$MARS")  != std::string::npos);
+    REQUIRE(ir.find("@Planet_getOrder") != std::string::npos);   // the method is actually called
+}
+
+TEST_CASE("Reflect - @offsetOf skips past an embedded value-object field", "[reflect]") {
+    // Line { Point start; Point end; } — end's offset is sizeof(Point) = 8, not 4.
+    auto ir = codegenString(R"(
+        class Point { i32 x; i32 y; }
+        class Line { Point start; Point end; }
+        fn main() -> i32 {
+            var a = @offsetOf(Line, "start");   // 0
+            var b = @offsetOf(Line, "end");     // 8 (past a whole Point)
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("store i64 0") != std::string::npos);
+    REQUIRE(ir.find("store i64 8") != std::string::npos);
+}
+
+TEST_CASE("Reflect - @alignOf on a reference / borrow is pointer-sized", "[reflect]") {
+    auto ir = codegenString(R"(
+        class C { i32 x; }
+        fn main() -> i32 {
+            var a = @alignOf(C&);   // owning reference -> 8
+            var b = @alignOf(C*);   // borrow          -> 8
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("store i64 8") != std::string::npos);
+}
+
+TEST_CASE("Reflect - @fieldCount on an enum is a (class-only) error", "[reflect]") {
+    // @fields/@fieldCount are class-only; @variants/@variantCount are enum-only. Cross-use errors.
+    StderrCapture cap;
+    analyzeString(R"(
+        enum E { A, B }
+        fn main() -> i32 { var n = @fieldCount(E); return 0; }
+    )");
+    REQUIRE(cap.contains("not a class type"));
+}
+
 TEST_CASE("Reflect - @variants composes with a generic function", "[reflect][generic]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN, BLUE }

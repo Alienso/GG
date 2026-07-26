@@ -1543,6 +1543,21 @@ Expr Parser::parseExpression() {
         break;
     }
 
+    // Inferred local: `var name = expr;`  (const by default; `mut var` / `var mut` for mutable).
+    // The type is left as a `var` sentinel token and deduced from the initializer by the semantic
+    // analyzer, which records the synthesized type token for codegen. An initializer is required —
+    // there is nothing to infer from otherwise.
+    if (match({ TokenType::VAR })) {
+        Token varTok = previous();
+        if (!isMut) isMut = match({ TokenType::MUT });   // accept `var mut` as well as `mut var`
+        Token name = consume(TokenType::IDENTIFIER, "expected variable name after 'var'");
+        consume(TokenType::EQUAL, "an inferred 'var' declaration requires an initializer");
+        std::unique_ptr<Expr> initializer = box(parseExpression());
+        recordLocal(varTok, name);
+        return makeExpr(VarDeclExpr{ varTok, name, std::move(initializer),
+                                     /*arraySize=*/0, isStatic, isMut });
+    }
+
     // Array declaration: typeName [ NUMBER ] IDENTIFIER ( = expr )?
     if (isTypeName() && peekNext().type == TokenType::LEFT_BRACKET) {
         Token  typeName  = advance();

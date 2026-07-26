@@ -31,9 +31,11 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->callableCalls_ = &semanticResult.callableCalls;
     this->braceInitClass_ = &semanticResult.braceInitClass;
     this->callArgOrder_ = &semanticResult.callArgOrder;
+    this->inferredVarType_ = &semanticResult.inferredVarType;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;
+    overflowChecks_  = options.overflowChecks;
     debug_           = options.debugInfo;
     dbgSourceFile_   = options.sourceFile;
     dbgNextId_ = 0; dbgFileId_ = -1; dbgCUId_ = -1; currentSubprogram_ = -1;

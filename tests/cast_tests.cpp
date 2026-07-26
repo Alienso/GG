@@ -402,3 +402,499 @@ TEST_CASE("Cast - Array as ptr emits GEP to first element", "[cast][codegen]") {
     REQUIRE(ir.find("getelementptr [4 x i32]") != std::string::npos);
     REQUIRE(ir.find("i32 0, i32 0")            != std::string::npos);
 }
+
+// ============================================================
+// Numeric-literal type adoption (untyped constants)
+// ============================================================
+// A bare numeric literal is untyped: it adopts the contextual expected type (a numeric target)
+// and only falls back to its default (i32 for integers, f64 for decimals) when there is no
+// numeric context. So `i64 y = 5;` / `f32 f = 1.0;` / `u32 n = 5;` no longer warn. Adoption is
+// confined to *direct* literal bindings — operands of a subexpression keep their default type.
+
+TEST_CASE("Numlit - i64 = literal does not warn (adopts i64)", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { i64 y = 5; return 0; }");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("Warning"));
+}
+
+TEST_CASE("Numlit - small/unsigned integer literals no longer warn or error", "[numlit][semantic]") {
+    for (const char* src : { "fn main() -> i32 { i8  b = 5;  return 0; }",
+                             "fn main() -> i32 { i16 s = 5;  return 0; }",
+                             "fn main() -> i32 { u8  c = 5;  return 0; }",   // was an ERROR before
+                             "fn main() -> i32 { u16 h = 5;  return 0; }",
+                             "fn main() -> i32 { u32 n = 5;  return 0; }",
+                             "fn main() -> i32 { u64 m = 5;  return 0; }" }) {
+        StderrCapture cap;
+        auto result = analyzeString(src);
+        REQUIRE_FALSE(result.hadError);
+        REQUIRE_FALSE(cap.contains("Warning"));
+    }
+}
+
+TEST_CASE("Numlit - f32 = decimal literal does not warn (adopts f32)", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { f32 x = 1.0; return 0; }");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("Warning"));
+}
+
+TEST_CASE("Numlit - a negated literal adopts the target incl. the boundary", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i8 lo = -128;   // boundary min — must not warn
+            i8 hi = -5;
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("Warning"));
+}
+
+TEST_CASE("Numlit - an out-of-range integer literal warns", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { i8 b = 300; return 0; }");
+    REQUIRE_FALSE(result.hadError);   // warning, not error (still adopts, truncating)
+    REQUIRE(cap.contains("does not fit"));
+}
+
+TEST_CASE("Numlit - an out-of-range literal still emits VALID (wrapped) IR", "[numlit][codegen]") {
+    // Regression: `i8 b = 300;` must not emit `store i8 300` (an out-of-range, malformed iN
+    // constant that a strict LLVM rejects). It is masked to the target width → 300 & 0xFF = 44.
+    auto ir = codegenString("fn main() -> i32 { i8 b = 300; return 0; }");
+    REQUIRE(ir.find("store i8 44")  != std::string::npos);
+    REQUIRE(ir.find("store i8 300") == std::string::npos);
+}
+
+TEST_CASE("Numlit - a literal overflowing even u64 emits valid IR (0)", "[numlit][codegen]") {
+    // std::stoull can't parse it → the value is meaningless (already warned) → emit a valid 0
+    // rather than a >64-bit constant that would be malformed IR.
+    auto ir = codegenString("fn main() -> i32 { u64 x = 99999999999999999999999; return 0; }");
+    REQUIRE(ir.find("store i64 0") != std::string::npos);
+}
+
+TEST_CASE("Numlit - u64 max is representable and emits as-is", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { u64 m = 18446744073709551615; return 0; }");
+    REQUIRE(ir.find("store i64 18446744073709551615") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a literal with no numeric context defaults to i32", "[numlit][semantic]") {
+    // `var` has no target type → the default kicks in.
+    auto ir = codegenString("fn main() -> i32 { var z = 5; return z; }");
+    REQUIRE(ir.find("alloca i32") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a huge literal overflowing the i32 default warns", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { var z = 9000000000; return 0; }");
+    REQUIRE(cap.contains("overflows the default type 'i32'"));
+}
+
+TEST_CASE("Numlit - i64 literal lowers to an i64 store with no widening", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { i64 big = 9000000000; return 0; }");
+    REQUIRE(ir.find("store i64 9000000000") != std::string::npos);  // no overflow to i32
+    REQUIRE(ir.find("sext") == std::string::npos);                  // literal was typed i64 directly
+}
+
+TEST_CASE("Numlit - f32 literal lowers to an LLVM hex-float constant", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { f32 x = 0.5; return 0; }");
+    REQUIRE(ir.find("store float 0x") != std::string::npos);   // hex-encoded, exactly representable
+    REQUIRE(ir.find("fptrunc") == std::string::npos);          // no f64→f32 truncation needed
+}
+
+TEST_CASE("Numlit - adoption is confined to direct literals, not subexpressions", "[numlit][codegen]") {
+    // `1 / 2` in an f64 context must stay INTEGER division (operands keep i32), then widen — so the
+    // result is 0.0, not 0.5. If the operands wrongly adopted f64 this would be `fdiv`.
+    auto ir = codegenString("fn main() -> i32 { f64 d = 1 / 2; return 0; }");
+    REQUIRE(ir.find("sdiv i32") != std::string::npos);
+    REQUIRE(ir.find("fdiv")     == std::string::npos);
+}
+
+TEST_CASE("Numlit - a function-argument literal still widens silently (no adoption)", "[numlit][semantic]") {
+    // Arguments are resolved with the expected type cleared, so a literal keeps its default i32 and
+    // reaches an i64 parameter via silent widening — unchanged behavior.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn take(i64 v) -> i64 { return v; }
+        fn main() -> i32 { take(5); return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("Warning"));
+}
+
+TEST_CASE("Numlit - adopts in a return context", "[numlit][codegen]") {
+    StderrCapture cap;
+    auto ir = codegenString("fn f() -> i64 { return 5; }");
+    REQUIRE_FALSE(cap.contains("Warning"));
+    REQUIRE(ir.find("ret i64 5") != std::string::npos);   // literal typed i64, no sext
+}
+
+TEST_CASE("Numlit - adopts on the RHS of an assignment", "[numlit][codegen]") {
+    StderrCapture cap;
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i64 y = 0;
+            y = 5000000000;
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(cap.contains("Warning"));
+    REQUIRE(ir.find("store i64 5000000000") != std::string::npos);
+}
+
+TEST_CASE("Numlit - adopts the inner type of a nullable target", "[numlit][semantic][nullable]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i64? maybe = 5;   // 5 adopts i64, then wraps to i64?
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("Warning"));
+}
+
+TEST_CASE("Numlit - an integer literal in an f32 slot emits a hex float", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { f32 f = 5; return 0; }");
+    REQUIRE(ir.find("store float 0x") != std::string::npos);
+    REQUIRE(ir.find("sitofp")         == std::string::npos);   // no runtime int→float conversion
+}
+
+// ============================================================
+// Overflow checks (--overflow-checks; Rust-style, opt-in)
+// ============================================================
+// When enabled, integer +/-/* (and +=/-=/*=) trap on overflow via
+// llvm.{s,u}{add,sub,mul}.with.overflow.iN, and out-of-range narrowing/sign-changing conversions
+// trap after a range check. Explicit `as` casts are NOT checked (intentional truncation). Off by
+// default the emitted IR is byte-identical to before.
+
+static CompilerOptions checkedOpts() {
+    CompilerOptions o;
+    o.allowRawPtr    = true;   // keep ptr/string usable, like defaultTestOptions()
+    o.overflowChecks = true;
+    return o;
+}
+
+TEST_CASE("Overflow - off by default: plain add, no intrinsic", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn add(i32 a, i32 b) -> i32 { return a + b; }
+        fn main() -> i32 { return add(1, 2); }
+    )");
+    REQUIRE(ir.find("add i32")        != std::string::npos);
+    REQUIRE(ir.find("with.overflow")  == std::string::npos);
+}
+
+TEST_CASE("Overflow - signed + emits sadd.with.overflow and a trap", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn add(i32 a, i32 b) -> i32 { return a + b; }
+        fn main() -> i32 { return add(1, 2); }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.sadd.with.overflow.i32") != std::string::npos);
+    REQUIRE(ir.find("call void @abort()")          != std::string::npos);
+}
+
+TEST_CASE("Overflow - unsigned + emits uadd.with.overflow", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn add(u32 a, u32 b) -> u32 { return a + b; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.uadd.with.overflow.i32") != std::string::npos);
+}
+
+TEST_CASE("Overflow - subtraction and multiplication are checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn f(i64 a, i64 b) -> i64 { return a - b; }
+        fn g(i64 a, i64 b) -> i64 { return a * b; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.ssub.with.overflow.i64") != std::string::npos);
+    REQUIRE(ir.find("llvm.smul.with.overflow.i64") != std::string::npos);
+}
+
+TEST_CASE("Overflow - compound += is checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 x = 1;
+            x += 2;
+            return 0;
+        }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.sadd.with.overflow.i32") != std::string::npos);
+}
+
+TEST_CASE("Overflow - division is NOT checked (plain sdiv)", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn d(i32 a, i32 b) -> i32 { return a / b; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("sdiv i32")     != std::string::npos);
+    REQUIRE(ir.find("with.overflow") == std::string::npos);
+}
+
+TEST_CASE("Overflow - float arithmetic is NOT checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn add(f64 a, f64 b) -> f64 { return a + b; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("fadd")          != std::string::npos);
+    REQUIRE(ir.find("with.overflow") == std::string::npos);
+}
+
+TEST_CASE("Overflow - implicit narrowing is range-checked", "[overflow][codegen]") {
+    // A dynamic i32 value narrowed to i8: trunc, sext back, compare, trap on mismatch.
+    auto ir = codegenString(R"(
+        fn wide() -> i32 { return 5; }
+        fn main() -> i32 {
+            i8 x = wide();
+            return 0;
+        }
+    )", checkedOpts());
+    REQUIRE(ir.find("trunc i32")           != std::string::npos);
+    REQUIRE(ir.find("sext i8")             != std::string::npos);   // extend back to compare
+    REQUIRE(ir.find("call void @abort()")  != std::string::npos);
+}
+
+TEST_CASE("Overflow - an explicit `as` cast is NOT checked", "[overflow][codegen]") {
+    // `as` is an intentional truncation → no trap, even with checks on.
+    auto ir = codegenString(R"(
+        fn wide() -> i32 { return 300; }
+        fn main() -> i32 {
+            i8 x = wide() as i8;
+            return 0;
+        }
+    )", checkedOpts());
+    REQUIRE(ir.find("trunc i32")          != std::string::npos);
+    REQUIRE(ir.find("call void @abort()") == std::string::npos);   // no conversion trap
+}
+
+TEST_CASE("Overflow - widening conversion is not checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn small() -> i32 { return 5; }
+        fn main() -> i32 {
+            i64 x = small();   // widening i32 → i64 can't lose data → no check
+            return 0;
+        }
+    )", checkedOpts());
+    REQUIRE(ir.find("sext i32")           != std::string::npos);
+    REQUIRE(ir.find("call void @abort()") == std::string::npos);
+}
+
+// ---- Literal adoption from a non-literal sibling in a binary op (numlit refinement) ----
+
+TEST_CASE("Numlit - a literal adopts a non-literal sibling's type in a comparison", "[numlit][semantic]") {
+    // `big == 6000000000` — the >i32 literal adopts i64 from `big`, so it does not wrap/warn.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            mut i64 big = 3000000000;
+            big = big + big;
+            if (big == 6000000000) { return 0; }
+            return 1;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("overflows"));
+}
+
+TEST_CASE("Numlit - a literal adopts a non-literal sibling's type in arithmetic", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            mut i64 big = 3000000000;
+            var s = big + 3000000000;   // literal adopts i64 → 6e9, no wrap/warn
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("overflows"));
+}
+
+TEST_CASE("Numlit - a decimal literal does NOT adopt an integer sibling (float division kept)", "[numlit][codegen]") {
+    // `1.0 / count` (count i32) must stay float division — a decimal literal never becomes an int.
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 count = 2;
+            f64 half = 1.0 / count;
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("fdiv")     != std::string::npos);
+    REQUIRE(ir.find("sdiv i32") == std::string::npos);
+}
+
+TEST_CASE("Numlit - two literals in a subexpression still keep the default (no sibling)", "[numlit][codegen]") {
+    // `1 / 2` has no non-literal sibling → both stay i32 → integer division, even in an f64 slot.
+    auto ir = codegenString("fn main() -> i32 { f64 d = 1 / 2; return 0; }");
+    REQUIRE(ir.find("sdiv i32") != std::string::npos);
+    REQUIRE(ir.find("fdiv")     == std::string::npos);
+}
+
+// ---- Overflow checks on ++/-- and unary negation (parity with += / -=) ----
+
+TEST_CASE("Overflow - postfix ++ is checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 { mut i8 c = 0; c++; return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.sadd.with.overflow.i8") != std::string::npos);
+}
+
+TEST_CASE("Overflow - prefix -- is checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 { mut i8 c = 0; --c; return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.ssub.with.overflow.i8") != std::string::npos);
+}
+
+TEST_CASE("Overflow - unsigned ++ uses the unsigned intrinsic", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 { mut u8 c = 0; c++; return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.uadd.with.overflow.i8") != std::string::npos);
+}
+
+TEST_CASE("Overflow - signed unary negation is checked (catches -INT_MIN)", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn neg(i32 x) -> i32 { return -x; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("llvm.ssub.with.overflow.i32") != std::string::npos);
+}
+
+TEST_CASE("Overflow - ++/-- and unary - are NOT checked when the flag is off", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn neg(i32 x) -> i32 { return -x; }
+        fn main() -> i32 { mut i8 c = 0; c++; --c; return 0; }
+    )");   // default options: overflowChecks = false
+    REQUIRE(ir.find("with.overflow") == std::string::npos);
+    REQUIRE(ir.find("add i8")        != std::string::npos);   // plain ++
+}
+
+TEST_CASE("Overflow - a narrowing at a return is checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn narrow(i32 v) -> i8 { return v; }
+        fn main() -> i32 { return 0; }
+    )", checkedOpts());
+    REQUIRE(ir.find("trunc i32")          != std::string::npos);
+    REQUIRE(ir.find("call void @abort()") != std::string::npos);
+}
+
+TEST_CASE("Overflow - a narrowing at a call argument is checked", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn take(i8 v) -> i8 { return v; }
+        fn main() -> i32 {
+            mut i32 big = 200;
+            i8 r = take(big);
+            return 0;
+        }
+    )", checkedOpts());
+    REQUIRE(ir.find("trunc i32")          != std::string::npos);
+    REQUIRE(ir.find("call void @abort()") != std::string::npos);
+}
+
+// ============================================================
+// Mixed signed/unsigned arithmetic — SIGNED wins (GG departs from C)
+// ============================================================
+// The common type of a mixed signed/unsigned operation is a SIGNED integer of the wider width,
+// so `-6 / 3u == -2` (not a huge unsigned result) and `-1 < 1u` is true. The unsigned operand is
+// reinterpreted as signed.
+
+TEST_CASE("Arith - mixed signed/unsigned division is SIGNED division", "[arith]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 s = 0 - 6;
+            mut u32 u = 3;
+            var q = s / u;      // common type i32 → sdiv → -2
+            return q;
+        }
+    )");
+    REQUIRE(ir.find("sdiv i32") != std::string::npos);
+    REQUIRE(ir.find("udiv")     == std::string::npos);
+}
+
+TEST_CASE("Arith - mixed signed/unsigned comparison is a SIGNED compare", "[arith]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 s = 0 - 1;
+            mut u32 u = 1;
+            if (s < u) { return 1; }   // -1 < 1 → true via signed slt, not unsigned ult
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("icmp slt") != std::string::npos);
+    REQUIRE(ir.find("icmp ult") == std::string::npos);
+}
+
+TEST_CASE("Arith - mixed widths widen to a signed type of the larger width", "[arith]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 s = 0 - 6;
+            mut u64 u = 3;
+            var q = s / u;      // → i64 sdiv (signed, widened to 64)
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("sdiv i64") != std::string::npos);
+    REQUIRE(ir.find("udiv")     == std::string::npos);
+}
+
+TEST_CASE("Arith - pure unsigned division is still unsigned", "[arith]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut u32 a = 10;
+            mut u32 b = 3;
+            var q = a / b;      // both unsigned → udiv
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("udiv i32") != std::string::npos);
+}
+
+TEST_CASE("Arith - both-int-literal division stays integer even in an f64 slot", "[arith]") {
+    auto ir = codegenString("fn main() -> i32 { f64 d = 7 / 2; return 0; }");
+    REQUIRE(ir.find("sdiv i32") != std::string::npos);   // 7/2 == 3, then widened to 3.0
+    REQUIRE(ir.find("fdiv")     == std::string::npos);
+}
+
+// ---- Shifts follow the LEFT operand, not the symmetric common type ----
+
+TEST_CASE("Arith - right-shift is LOGICAL for an unsigned left operand", "[arith]") {
+    // u32 >> count must be lshr even when the count is signed (which used to force ashr and
+    // corrupt the high bit).
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut u32 x = 16;
+            mut i32 sh = 1;
+            var r = x >> sh;
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("lshr") != std::string::npos);
+    REQUIRE(ir.find("ashr") == std::string::npos);
+}
+
+TEST_CASE("Arith - right-shift is ARITHMETIC for a signed left operand", "[arith]") {
+    // i32 >> count must be ashr even when the count is unsigned (sign must be preserved).
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut i32 x = 0 - 8;
+            mut u32 sh = 1;
+            var r = x >> sh;
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("ashr") != std::string::npos);
+    REQUIRE(ir.find("lshr") == std::string::npos);
+}
+
+TEST_CASE("Arith - a shift's result type follows the left operand's width", "[arith]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 {
+            mut u8  x = 200;
+            mut i32 c = 1;
+            var r = x >> c;      // result u8 → lshr i8, count coerced to i8
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("lshr i8") != std::string::npos);
+}

@@ -1,5 +1,8 @@
 #include "CodeGen.h"
 #include <cstdint>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 // ============================================================
 // Shared helpers
@@ -192,14 +195,48 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
 
     switch (literal.token.type) {
         case TokenType::NUMBER: {
-            if (lexeme.find('.') != std::string::npos) {
-                // Float literal — ensure at least one digit after '.'
+            bool isDecimal = lexeme.find('.') != std::string::npos
+                          || lexeme.find('e') != std::string::npos
+                          || lexeme.find('E') != std::string::npos;
+
+            // f32 target: emit an LLVM hex-float constant (the double encoding of the value rounded
+            // to float). LLVM rejects a plain decimal that isn't exactly representable as `float`,
+            // and a direct f32 literal (`f32 f = 0.1;`) is now possible via literal-type adoption —
+            // previously f32 was only ever reached by fptrunc from an f64 constant.
+            if (resolvedType.kind == TypeKind::F32) {
+                float    fv = std::strtof(lexeme.c_str(), nullptr);
+                double   dv = static_cast<double>(fv);
+                uint64_t bits;
+                std::memcpy(&bits, &dv, sizeof(bits));
+                char buf[24];
+                std::snprintf(buf, sizeof(buf), "0x%016llX",
+                              static_cast<unsigned long long>(bits));
+                return std::string(buf);
+            }
+
+            // f64 target (or a decimal literal with no numeric context) → a `double` constant.
+            if (resolvedType.kind == TypeKind::F64 || isDecimal) {
                 std::string value = lexeme;
-                if (!value.empty() && value.back() == '.') value += '0';
+                if (!value.empty() && value.back() == '.') value += '0';   // "1." → "1.0"
+                if (value.find('.') == std::string::npos && !isDecimal)
+                    value += ".0";   // integer lexeme in a double slot → a float constant
                 return value;
             }
-            // Integer literal
-            return lexeme;
+
+            // Integer target — emit the value masked to the target width, so the constant is
+            // always a valid `iN` literal even when the source literal is out of range (semantic
+            // has already warned in that case). Masking an in-range value is a no-op.
+            int bits;
+            switch (resolvedType.kind) {
+                case TypeKind::I8:  case TypeKind::U8:  bits = 8;  break;
+                case TypeKind::I16: case TypeKind::U16: bits = 16; break;
+                case TypeKind::I64: case TypeKind::U64: bits = 64; break;
+                default:                                bits = 32; break;   // i32/u32/no-context
+            }
+            unsigned long long v = 0;
+            try { v = std::stoull(lexeme); } catch (...) { v = 0; }   // > u64 → 0 (warned garbage)
+            if (bits < 64) v &= ((1ULL << bits) - 1);
+            return std::to_string(v);
         }
         case TokenType::TRUE:  return "1";
         case TokenType::FALSE: return "0";
@@ -379,11 +416,17 @@ std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) 
             }
             std::string value      = genExpr(*unary.operand);
             std::string irType     = irTypeName(operandType);
-            std::string tempName   = freshTemp();
-            if (isFloat(operandType.kind))
+            if (isFloat(operandType.kind)) {
+                std::string tempName = freshTemp();
                 emit("%" + tempName + " = fneg " + irType + " " + value);
-            else
-                emit("%" + tempName + " = sub " + irType + " 0, " + value);
+                return "%" + tempName;
+            }
+            // Checked signed negation catches -INT_MIN (0 - INT_MIN overflows). Unsigned unary
+            // minus is left as a plain wrapping `sub` (negating an unsigned is a degenerate op).
+            if (overflowChecks_ && isSignedInt(operandType.kind))
+                return emitCheckedArith(TokenType::MINUS, operandType, "0", value);
+            std::string tempName = freshTemp();
+            emit("%" + tempName + " = sub " + irType + " 0, " + value);
             return "%" + tempName;
         }
         case TokenType::BANG: {
@@ -411,6 +454,14 @@ std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) 
             if (!resolveAssignTarget(id.name.lexeme, ptrName, variableType)) return "0";
             std::string irType       = irTypeName(variableType);
             std::string oldValue     = emitLoad(irType, ptrName);
+            // Checked ++/-- on integers trap on overflow, matching `x += 1` / `x -= 1`.
+            if (overflowChecks_ && isInteger(variableType.kind)) {
+                TokenType op = (unary.operatorToken.type == TokenType::INCREMENT)
+                             ? TokenType::PLUS : TokenType::MINUS;
+                std::string nv = emitCheckedArith(op, variableType, oldValue, "1");
+                emitStore(irType, nv, ptrName);
+                return nv;
+            }
             std::string tempName     = freshTemp();
             std::string one          = isFloat(variableType.kind) ? "1.0" : "1";
             std::string instruction  = (unary.operatorToken.type == TokenType::INCREMENT) ? "add" : "sub";
@@ -616,6 +667,12 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
         std::string comparisonInstruction = cmpInstr(operatorType, operandType);
         emit("%" + tempName + " = " + comparisonInstruction + " " + irType + " " + leftValue + ", " + rightValue);
     } else {
+        // Checked integer +/-/* trap on overflow (opt-in). Division/remainder, floats, and the
+        // bitwise/shift operators keep the plain instruction.
+        if (overflowChecks_ && isInteger(operandType.kind)
+            && (operatorType == TokenType::PLUS || operatorType == TokenType::MINUS
+                || operatorType == TokenType::STAR))
+            return emitCheckedArith(operatorType, operandType, leftValue, rightValue);
         std::string arithmeticInstruction = arithInstr(operatorType, operandType);
         emit("%" + tempName + " = " + arithmeticInstruction + " " + irType + " " + leftValue + ", " + rightValue);
     }
@@ -789,6 +846,14 @@ std::string CodeGen::genCompoundAssign(const CompoundAssignExpr& compoundAssign)
 
     // Apply the base operation
     TokenType   baseOperatorType        = compoundBaseOp(compoundAssign.operatorToken.type);
+    // Checked integer +=/-=/*= trap on overflow (opt-in), mirroring the binary path.
+    if (overflowChecks_ && isInteger(lhsType.kind)
+        && (baseOperatorType == TokenType::PLUS || baseOperatorType == TokenType::MINUS
+            || baseOperatorType == TokenType::STAR)) {
+        std::string checked = emitCheckedArith(baseOperatorType, lhsType, currentValue, rightValue);
+        emitStore(irType, checked, ptrName);
+        return checked;
+    }
     std::string arithmeticInstruction   = arithInstr(baseOperatorType, lhsType);
     std::string tempName                = freshTemp();
     emit("%" + tempName + " = " + arithmeticInstruction + " " + irType + " " + currentValue + ", " + rightValue);
@@ -809,7 +874,14 @@ std::string CodeGen::genPostfix(const PostfixExpr& postfix) {
     // Load old value (this is the result of the postfix expression)
     std::string oldValue = emitLoad(irType, ptrName);
 
-    // Compute new value
+    // Compute new value — checked ++/-- on integers trap on overflow (as the prefix form does).
+    if (overflowChecks_ && isInteger(variableType.kind)) {
+        TokenType op = (postfix.operatorToken.type == TokenType::INCREMENT)
+                     ? TokenType::PLUS : TokenType::MINUS;
+        std::string nv = emitCheckedArith(op, variableType, oldValue, "1");
+        emitStore(irType, nv, ptrName);
+        return oldValue;   // postfix yields the OLD value
+    }
     std::string tempName    = freshTemp();
     std::string one         = isFloat(variableType.kind) ? "1.0" : "1";
     std::string instruction = (postfix.operatorToken.type == TokenType::INCREMENT) ? "add" : "sub";
@@ -1022,14 +1094,26 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
 
 // ---- VarDecl ----
 
+// A `var` local carries a `var` sentinel type token; the semantic analyzer deduced its real type
+// and recorded the synthesized type token. Swap it in so every branch below resolves the type as
+// though it were written explicitly. A normal declaration returns its own token unchanged.
+Token CodeGen::varDeclTypeToken(const VarDeclExpr& v) const {
+    if (v.typeName.type == TokenType::VAR && inferredVarType_) {
+        auto it = inferredVarType_->find(&v);
+        if (it != inferredVarType_->end()) return it->second;
+    }
+    return v.typeName;
+}
+
 std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
+    const Token typeTok = varDeclTypeToken(varDecl);
     // ---- C-style static local (persistent global) ----
     // Semantics guarantee a scalar primitive type here.
     if (varDecl.isStatic) return genStaticLocal(varDecl);
 
     // ---- Array declaration ----
     if (varDecl.arraySize > 0) {
-        TypeKind elementKind = typeFromToken(varDecl.typeName.type).kind;
+        TypeKind elementKind = typeFromToken(typeTok.type).kind;
         Type     arrayType   = makeArrayType(elementKind, varDecl.arraySize);
         std::string arrayIrType = irTypeName(arrayType);
         std::string name        = varDecl.name.lexeme;
@@ -1050,7 +1134,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     // A non-owning reference: a ptr to the object body, NOT retained and NOT released at scope exit
     // (so it is never registered in a dtor scope). Same IR as a reference otherwise.
     {
-        Type synth = decodeSynthesizedType(varDecl.typeName);
+        Type synth = decodeSynthesizedType(typeTok);
         if (synth.kind == TypeKind::Reference && synth.borrow) {
             std::string name    = varDecl.name.lexeme;
             std::string ptrName = freshAllocaName(name);
@@ -1079,10 +1163,10 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
 
     // ---- Reference (Class&, or nullable Class&?) declaration ----
     {
-        std::string lex = varDecl.typeName.lexeme;
+        std::string lex = typeTok.lexeme;
         bool nullable = !lex.empty() && lex.back() == '?';
         if (nullable) lex.pop_back();   // `Class&?` → `Class&` (same IR; null is a valid ptr value)
-        if (varDecl.typeName.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
+        if (typeTok.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
         usesRefcount_ = true;
         std::string className = lex.substr(0, lex.size() - 1);
         Type        refType   = makeReferenceType(className);
@@ -1122,7 +1206,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
 
     // ---- Typed raw pointer (ptr<T>) declaration ----
     {
-        Type synth = decodeSynthesizedType(varDecl.typeName);
+        Type synth = decodeSynthesizedType(typeTok);
         if (synth.kind == TypeKind::TypedPtr) {
             std::string name    = varDecl.name.lexeme;
             std::string ptrName = freshAllocaName(name);
@@ -1145,8 +1229,8 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     // ---- Enum variable declaration (incl. nullable `Color?`) ----
     // An enum variable holds a `ptr` to a global singleton variant; nullable is the same IR (null
     // is a valid ptr), so strip a trailing `?`.
-    if (varDecl.typeName.type == TokenType::IDENTIFIER) {
-        std::string elex = varDecl.typeName.lexeme;
+    if (typeTok.type == TokenType::IDENTIFIER) {
+        std::string elex = typeTok.lexeme;
         bool enumNullable = !elex.empty() && elex.back() == '?';
         if (enumNullable) elex.pop_back();
         if (cgEnumNames_.count(elex)) {
@@ -1175,11 +1259,11 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     // ---- Nullable primitive (`i32?`) declaration ----
     // A tagged optional `{ i1, iN }` value. (Nullable references/borrows/enums were handled by the
     // branches above; a nullable value object was rejected in semantics.)
-    if (varDecl.typeName.type == TokenType::IDENTIFIER && !varDecl.typeName.lexeme.empty()
-        && varDecl.typeName.lexeme.back() == '?'
-        && typeKindFromName(varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size()-1))
+    if (typeTok.type == TokenType::IDENTIFIER && !typeTok.lexeme.empty()
+        && typeTok.lexeme.back() == '?'
+        && typeKindFromName(typeTok.lexeme.substr(0, typeTok.lexeme.size()-1))
                != TypeKind::Error) {
-        TypeKind prim = typeKindFromName(varDecl.typeName.lexeme.substr(0, varDecl.typeName.lexeme.size()-1));
+        TypeKind prim = typeKindFromName(typeTok.lexeme.substr(0, typeTok.lexeme.size()-1));
         Type        declaredType = makeNullable(Type{prim});
         std::string irType       = irTypeName(declaredType);
         std::string name         = varDecl.name.lexeme;
@@ -1198,9 +1282,9 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     }
 
     // ---- Object (class) declaration ----
-    if (varDecl.typeName.type == TokenType::IDENTIFIER) {
-        // Class type — varDecl.typeName.lexeme is the class name
-        const std::string& className  = varDecl.typeName.lexeme;
+    if (typeTok.type == TokenType::IDENTIFIER) {
+        // Class type — typeTok.lexeme is the class name
+        const std::string& className  = typeTok.lexeme;
         Type               objectType = makeObjectType(className);
         std::string        name       = varDecl.name.lexeme;
 
@@ -1250,7 +1334,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     }
 
     // ---- Scalar declaration (existing logic) ----
-    Type        declaredType = typeFromToken(varDecl.typeName.type);
+    Type        declaredType = typeFromToken(typeTok.type);
     std::string irType       = irTypeName(declaredType);
     std::string name         = varDecl.name.lexeme;
 
@@ -1278,7 +1362,8 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
 // ---- C-style static local ----
 
 std::string CodeGen::genStaticLocal(const VarDeclExpr& varDecl) {
-    Type        declaredType = typeFromToken(varDecl.typeName.type);
+    const Token typeTok = varDeclTypeToken(varDecl);
+    Type        declaredType = typeFromToken(typeTok.type);
     std::string irType       = irTypeName(declaredType);
     const std::string& name  = varDecl.name.lexeme;
 
@@ -1450,8 +1535,9 @@ std::string CodeGen::genCast(const CastExpr& castExpr, const Type& toType) {
         return "%" + tempName;
     }
 
-    // Numeric / bool / char conversions — emitCast covers all remaining cases.
-    return emitCast(value, fromType, toType);
+    // Numeric / bool / char conversions — emitCast covers all remaining cases. An explicit `as`
+    // cast is an intentional truncation, so it is NOT overflow-checked (checked=false).
+    return emitCast(value, fromType, toType, /*checked=*/false);
 }
 
 // ---- sizeof ----

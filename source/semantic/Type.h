@@ -196,8 +196,19 @@ std::string typeName(const Type& t);
 
 // Maps a primitive type keyword spelling ("i32", "ptr", …) to its TypeKind, or Error.
 TypeKind    typeKindFromName(const std::string& name);
+
+// Whether a non-negative integer literal of the given magnitude fits in integer type `t`.
+// Signed types allow up to 2^(bits-1) — the magnitude of the most-negative value — so a negated
+// literal at the boundary (e.g. `-128` for i8) is accepted. Non-integer `t` returns false.
+bool        integerLiteralFits(unsigned long long magnitude, TypeKind t);
 // Decodes a parser-synthesized type token: "Class&" → Reference, "ptr<Elem>" → TypedPtr.
 // Returns Type{Error} when `tok` is not such a synthesized token.
 Type        decodeSynthesizedType(const Token& tok);
+
+// The inverse of the type-token resolvers: encodes a resolved Type back into a single Token whose
+// (type, lexeme) round-trips through typeFromToken / decodeSynthesizedType to the same Type. Used
+// by `var` local inference so the inferred type can be handed to codegen as an ordinary type token
+// (all of genVarDecl's existing branches then work unchanged).
+Token       synthTypeToken(const Type& t, int line);
 
 #endif //GG_TYPE_H

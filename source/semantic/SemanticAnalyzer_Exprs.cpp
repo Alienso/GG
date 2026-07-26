@@ -56,11 +56,51 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
         case TokenType::TRUE:
         case TokenType::FALSE:
             return Type{TypeKind::Bool};
-        case TokenType::NUMBER:
-            // Decimal point present → floating-point literal → f64
-            if (literal.token.lexeme.find('.') != std::string::npos)
+        case TokenType::NUMBER: {
+            // A bare numeric literal is *untyped*: it adopts the contextual expected type when one
+            // is a numeric type, and otherwise falls back to its default (i32 for integers, f64 for
+            // decimals). So `i64 y = 5;` types `5` as i64 (no widening warning) and `f32 f = 1.0;`
+            // types `1.0` as f32 (no narrowing warning). Only *direct* literals adopt — operands of
+            // a binary expression are analysed with the expected type cleared (see analyzeBinary).
+            const std::string& lex = literal.token.lexeme;
+            bool isDecimal = lex.find('.') != std::string::npos
+                          || lex.find('e') != std::string::npos
+                          || lex.find('E') != std::string::npos;
+
+            // The contextual numeric target, if any (strip nullable; ignore non-numeric contexts).
+            const Type* want = nullptr;
+            Type stripped;
+            if (expectedType_) {
+                stripped = expectedType_->isNullable ? stripNullable(*expectedType_) : *expectedType_;
+                if (isInteger(stripped.kind) || isFloat(stripped.kind)) want = &stripped;
+            }
+
+            if (isDecimal) {
+                // Decimal literal → adopt an expected float type, else default f64.
+                if (want && isFloat(want->kind)) return Type{want->kind};
                 return Type{TypeKind::F64};
+            }
+
+            // Integer literal — parse its magnitude (a leading '-' is a separate UnaryExpr).
+            unsigned long long mag = 0;
+            bool parsed = true;
+            try { mag = std::stoull(lex); } catch (...) { parsed = false; }
+
+            if (want) {
+                if (isFloat(want->kind)) return Type{want->kind};   // integer literal in a float slot
+                // Integer context: adopt the type; warn (and still adopt) if the value won't fit.
+                if (!parsed || !integerLiteralFits(mag, want->kind))
+                    warn(literal.token, "integer literal '" + lex + "' does not fit in '"
+                         + typeName(*want) + "'");
+                return Type{want->kind};
+            }
+
+            // No numeric context → default i32; warn if the literal overflows i32.
+            if (!parsed || !integerLiteralFits(mag, TypeKind::I32))
+                warn(literal.token, "integer literal '" + lex
+                     + "' overflows the default type 'i32'; annotate a wider type (e.g. 'i64')");
             return Type{TypeKind::I32};
+        }
         case TokenType::STRING:
             return Type{TypeKind::Ptr};
         case TokenType::CHAR:
@@ -515,11 +555,53 @@ Type SemanticAnalyzer::classifyEquality(const Type& leftType, const Type& rightT
     return Type{TypeKind::Bool};
 }
 
+// A bare numeric literal `5` / `2.5`, optionally negated (`-5`) — the operands that participate in
+// literal-type adoption. (A negated literal is a UnaryExpr(-) over a NUMBER literal; analyzeUnary
+// does not clear the expected type, so the inner literal still adopts.)
+static bool isNumericLiteralOperand(const Expr& e) {
+    if (const auto* lit = std::get_if<LiteralExpr>(e.node.get()))
+        return lit->token.type == TokenType::NUMBER;
+    if (const auto* un = std::get_if<UnaryExpr>(e.node.get()))
+        if (un->operatorToken.type == TokenType::MINUS && un->operand)
+            if (const auto* lit = std::get_if<LiteralExpr>(un->operand->node.get()))
+                return lit->token.type == TokenType::NUMBER;
+    return false;
+}
+
 Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
+    // The contextual expected type applies to the binary result, NOT to its operands, so it is
+    // cleared here — a bare literal keeps its default type (this confines the outer binding's type
+    // to *direct* bindings, and keeps `1 / 2` integer division even in an `f64` slot).
+    //
+    // EXCEPTION: a bare numeric literal operand adopts the type of a *non-literal* numeric sibling,
+    // so `bigI64 == 6000000000` / `bigI64 + 6000000000` type the literal as i64 rather than the
+    // wrapping i32 default. The both-literals case (`1 / 2`) has no non-literal sibling, so it is
+    // untouched; a *decimal* literal never adopts an integer sibling (analyzeLiteral keeps it f64),
+    // so `1.0 / count` stays float division.
+    std::optional<Type> savedExpected = expectedType_;
+    expectedType_ = std::nullopt;
+
     // A `ref <primitive>` operand decays to its value (deref) before any numeric / operator rule —
     // otherwise a borrow (kind == Reference) would be misrouted into class operator overloading.
-    Type leftType  = decayPrimitiveBorrow(analyzeExpr(*binary.left));
-    Type rightType = decayPrimitiveBorrow(analyzeExpr(*binary.right));
+    bool leftLit  = isNumericLiteralOperand(*binary.left);
+    bool rightLit = isNumericLiteralOperand(*binary.right);
+    Type leftType, rightType;
+    auto isNum = [](const Type& t) { return isInteger(t.kind) || isFloat(t.kind); };
+    if (leftLit && !rightLit) {
+        rightType = decayPrimitiveBorrow(analyzeExpr(*binary.right));
+        leftType  = decayPrimitiveBorrow(isNum(rightType)
+                        ? analyzeWithExpected(*binary.left, rightType)
+                        : analyzeExpr(*binary.left));
+    } else if (rightLit && !leftLit) {
+        leftType  = decayPrimitiveBorrow(analyzeExpr(*binary.left));
+        rightType = decayPrimitiveBorrow(isNum(leftType)
+                        ? analyzeWithExpected(*binary.right, leftType)
+                        : analyzeExpr(*binary.right));
+    } else {
+        leftType  = decayPrimitiveBorrow(analyzeExpr(*binary.left));
+        rightType = decayPrimitiveBorrow(analyzeExpr(*binary.right));
+    }
+    expectedType_ = savedExpected;
 
     if (isError(leftType) || isError(rightType)) return Type{TypeKind::Error};
 
@@ -598,7 +680,7 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
             return commonArithmeticType(leftType, rightType);
         }
 
-        // Bitwise
+        // Bitwise (& | ^) and shifts (<< >>).
         case TokenType::PIPE:
         case TokenType::CARET:
         case TokenType::AMPERSAND:
@@ -614,7 +696,13 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
                       + typeName(rightType));
                 return Type{TypeKind::Error};
             }
-            return commonArithmeticType(leftType, rightType);
+            // A shift is asymmetric: its result type AND its arithmetic-vs-logical behaviour
+            // (`ashr` vs `lshr`) follow the LEFT operand only — so it takes the left operand's type,
+            // NOT the symmetric common type (the shift count is coerced to it in codegen, as LLVM
+            // requires equal operand types). Symmetric bitwise ops keep the common type.
+            bool isShift = binary.operatorToken.type == TokenType::SHIFT_LEFT
+                        || binary.operatorToken.type == TokenType::SHIFT_RIGHT;
+            return isShift ? leftType : commonArithmeticType(leftType, rightType);
         }
 
         // Ordering comparisons
@@ -1170,6 +1258,81 @@ bool SemanticAnalyzer::isConstantExpr(const Expr& expr) {
 }
 
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
+    // ---- Inferred `var` local: deduce the type from the initializer ----
+    if (varDecl.typeName.type == TokenType::VAR) {
+        // Redeclaration in the same scope?
+        if (const Symbol* existing = symbolTable.lookupCurrentScope(varDecl.name.lexeme)) {
+            error(varDecl.name, "variable '" + varDecl.name.lexeme + "' already declared in this scope"
+                  + " (previously declared at line "
+                  + std::to_string(existing->declarationToken.line) + ")");
+            if (varDecl.initializer) analyzeExpr(*varDecl.initializer);
+            return Type{TypeKind::Error};
+        }
+        if (!varDecl.initializer) {   // parser enforces this; defensive
+            error(varDecl.name, "'var " + varDecl.name.lexeme + "' requires an initializer to infer its type");
+            return Type{TypeKind::Error};
+        }
+
+        // Analyse the initializer with NO expected type — the inferred type IS its type.
+        Type inferred = analyzeExpr(*varDecl.initializer);
+
+        // Reject types that carry no usable representation for a local binding.
+        if (isError(inferred)) return Type{TypeKind::Error};
+        if (inferred.kind == TypeKind::Void) {
+            error(varDecl.name, "cannot infer type of '" + varDecl.name.lexeme
+                  + "' from a 'void' initializer");
+            return Type{TypeKind::Error};
+        }
+        if (inferred.kind == TypeKind::Null || (inferred.isNullable && stripNullable(inferred).kind == TypeKind::Null)) {
+            error(varDecl.name, "cannot infer type of '" + varDecl.name.lexeme
+                  + "' from 'null' — annotate the type explicitly (e.g. `Point&? " + varDecl.name.lexeme + " = null;`)");
+            return Type{TypeKind::Error};
+        }
+        if (inferred.kind == TypeKind::Object && inferred.className.rfind("__lambda", 0) == 0) {
+            error(varDecl.name, "cannot infer the type of a lambda into a 'var' — pass it directly "
+                  "to a 'Call'-bounded generic instead");
+            return Type{TypeKind::Error};
+        }
+        // A raw-pointer inference (e.g. `var s = "literal";` → ptr) obeys the same --unsafe-ptr gate.
+        if (!allowRawPtr_ && (inferred.kind == TypeKind::Ptr || inferred.kind == TypeKind::TypedPtr)) {
+            error(varDecl.name, "'" + typeName(inferred) + "' is a raw pointer type and requires "
+                  "--unsafe-ptr (raw pointers are for stdlib/internal use only)");
+            return Type{TypeKind::Error};
+        }
+
+        // A `static var` still obeys the static-local rules against the *inferred* type.
+        if (varDecl.isStatic) {
+            bool primitive = isNumeric(inferred.kind)
+                          || inferred.kind == TypeKind::Bool
+                          || inferred.kind == TypeKind::Char;
+            if (!primitive)
+                error(varDecl.name, "static local variable '" + varDecl.name.lexeme
+                      + "' must have a primitive type (numeric, bool or char)");
+            if (!isConstantExpr(*varDecl.initializer))
+                error(varDecl.name, "static local variable '" + varDecl.name.lexeme
+                      + "' requires a constant initializer");
+        }
+
+        // Initialising a `mut` reference binding from a read-only reference is a const→mut coercion.
+        if (varDecl.isMut)
+            warnConstToMut(varDecl.name, *varDecl.initializer, inferred);
+
+        // Record the synthesized type token so codegen can resolve the type like an explicit one.
+        // (Token has const members → not assignable; emplace constructs in place.)
+        inferredVarType_.emplace(&varDecl, synthTypeToken(inferred, varDecl.name.line));
+
+        symbolTable.declare(varDecl.name.lexeme, Symbol{
+            Symbol::Kind::Variable,
+            inferred,
+            varDecl.name,
+            {},
+            /*isParameter=*/false,
+            /*isInitialized=*/true,
+            /*isMutable=*/varDecl.isMut
+        });
+        return inferred;
+    }
+
     // Resolve the declared type — handles class names (Object) and Class& (Reference).
     Type elementType = resolveTypeToken(varDecl.typeName);
     Type declaredType = varDecl.arraySize > 0

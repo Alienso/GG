@@ -6,7 +6,9 @@
 #   .\compile.ps1 samples\hello.gg -ShowIR
 #   .\compile.ps1 samples\hello.gg -Run
 #   .\compile.ps1 samples\hello.gg -ShowIR -Run
-#   .\compile.ps1 samples\hello.gg -DebugInfo   (emit DWARF for gdb/lldb)
+#   .\compile.ps1 samples\hello.gg -DebugInfo       (emit DWARF for gdb/lldb)
+#   .\compile.ps1 samples\hello.gg -Opt 2           (clang -O2)
+#   .\compile.ps1 samples\hello.gg -OverflowChecks  (trap on integer overflow / narrowing)
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -14,9 +16,14 @@ param(
 
     [switch] $ShowIR,     # print the generated LLVM IR to the console
     [switch] $Run,        # run the compiled executable and show its exit code
-    [switch] $DebugInfo   # emit DWARF debug info (GG --debug + clang -g) for gdb/lldb
+    [switch] $DebugInfo,  # emit DWARF debug info (GG --debug + clang -g) for gdb/lldb
     # NB: named -DebugInfo, not -Debug: this is an advanced script (a [Parameter] attribute
     # is present), so PowerShell reserves -Debug as a common parameter.
+
+    [ValidateSet("0", "1", "2", "3", "s", "z")]
+    [string] $Opt = "0",  # clang optimization level (-O<level>); default 0 (no optimization)
+
+    [switch] $OverflowChecks  # trap on integer overflow + out-of-range narrowing (GG --overflow-checks)
 )
 
 Set-StrictMode -Version Latest
@@ -91,7 +98,8 @@ Write-Host ""
 Write-Host "==> [1/2]  GG  $SourceResolved" -ForegroundColor Cyan
 
 $ggArgs = @("$SourceResolved", "--unsafe-ptr")
-if ($DebugInfo) { $ggArgs += "--debug" }
+if ($DebugInfo)      { $ggArgs += "--debug" }
+if ($OverflowChecks) { $ggArgs += "--overflow-checks" }
 $gg = Invoke-Native $GG $ggArgs
 
 foreach ($line in $gg.Stderr) {
@@ -140,7 +148,7 @@ if (Test-Path $exeOut) {
     }
 }
 
-$clangArgs = @("$llFile", "-o", "$exeOut")
+$clangArgs = @("$llFile", "-o", "$exeOut", "-O$Opt")
 if ($DebugInfo) { $clangArgs += "-g" }
 $clang = Invoke-Native $Clang $clangArgs
 

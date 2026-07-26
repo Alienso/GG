@@ -202,10 +202,15 @@ Type commonArithmeticType(const Type& a, const Type& b) {
     if (isUnsignedInt(a.kind) && isUnsignedInt(b.kind))
         return Type{ wa >= wb ? a.kind : b.kind };
 
-    // Mixed signed/unsigned — unsigned wins when width ≥ signed (mirrors C rules)
-    TypeKind uk = isUnsignedInt(a.kind) ? a.kind : b.kind;
-    TypeKind sk = isSignedInt(a.kind)   ? a.kind : b.kind;
-    return bitWidth(uk) >= bitWidth(sk) ? Type{uk} : Type{sk};
+    // Mixed signed/unsigned — GG departs from C here: the SIGNED interpretation wins, so
+    // `-6 / 3u == -2` rather than a huge unsigned result. The common type is a SIGNED integer of
+    // the wider of the two operands' widths (the unsigned operand is reinterpreted as signed).
+    switch (wa >= wb ? wa : wb) {
+        case 8:  return Type{TypeKind::I8};
+        case 16: return Type{TypeKind::I16};
+        case 64: return Type{TypeKind::I64};
+        default: return Type{TypeKind::I32};
+    }
 }
 
 // ============================================================
@@ -301,6 +306,22 @@ std::string mangleOverload(const std::string& base, const std::vector<Type>& par
 // typeKindFromName — primitive keyword spelling → TypeKind
 // ============================================================
 
+bool integerLiteralFits(unsigned long long magnitude, TypeKind t) {
+    switch (t) {
+        // Signed: allow up to 2^(bits-1) so the negated boundary value fits (e.g. -128 for i8).
+        case TypeKind::I8:  return magnitude <= 128ULL;
+        case TypeKind::I16: return magnitude <= 32768ULL;
+        case TypeKind::I32: return magnitude <= 2147483648ULL;
+        case TypeKind::I64: return magnitude <= 9223372036854775808ULL;
+        // Unsigned: the full 2^bits - 1 range.
+        case TypeKind::U8:  return magnitude <= 255ULL;
+        case TypeKind::U16: return magnitude <= 65535ULL;
+        case TypeKind::U32: return magnitude <= 4294967295ULL;
+        case TypeKind::U64: return true;   // any unsigned long long fits u64
+        default:            return false;
+    }
+}
+
 TypeKind typeKindFromName(const std::string& name) {
     if (name == "i8")   return TypeKind::I8;
     if (name == "i16")  return TypeKind::I16;
@@ -380,4 +401,66 @@ Type decodeSynthesizedType(const Token& tok) {
     }
 
     return Type{TypeKind::Error};
+}
+
+// ============================================================
+// synthTypeToken — resolved Type → single type token (inverse of the resolvers)
+// ============================================================
+
+// Primitive TypeKind → its type-keyword TokenType (IDENTIFIER for non-primitives).
+static TokenType primitiveTokenType(TypeKind k) {
+    switch (k) {
+        case TypeKind::I8:   return TokenType::I8;
+        case TypeKind::I16:  return TokenType::I16;
+        case TypeKind::I32:  return TokenType::I32;
+        case TypeKind::I64:  return TokenType::I64;
+        case TypeKind::U8:   return TokenType::U8;
+        case TypeKind::U16:  return TokenType::U16;
+        case TypeKind::U32:  return TokenType::U32;
+        case TypeKind::U64:  return TokenType::U64;
+        case TypeKind::F32:  return TokenType::F32;
+        case TypeKind::F64:  return TokenType::F64;
+        case TypeKind::Bool: return TokenType::BOOL;
+        case TypeKind::Char: return TokenType::CHAR_TYPE;
+        case TypeKind::Ptr:  return TokenType::PTR;
+        case TypeKind::Void: return TokenType::VOID;
+        default:             return TokenType::IDENTIFIER;
+    }
+}
+
+Token synthTypeToken(const Type& t, int line) {
+    // Nullable wrapper: encode the inner type, append '?'. A nullable reference/enum/primitive all
+    // spell as "<inner>?" (which resolveTypeToken / the codegen resolvers strip back off).
+    if (t.isNullable) {
+        Token inner = synthTypeToken(stripNullable(t), line);
+        return Token{ TokenType::IDENTIFIER, inner.lexeme + "?", line };
+    }
+    switch (t.kind) {
+        case TypeKind::Object:
+        case TypeKind::Enum:
+        case TypeKind::TypeParam:
+            // A plain class / enum / type-parameter name.
+            return Token{ TokenType::IDENTIFIER, t.className, line };
+        case TypeKind::Reference:
+            if (t.borrow) {
+                // Non-owning borrow → the internal "ref:<inner>" spelling.
+                std::string inner = t.className.empty()
+                    ? typeName(Type{t.elementKind})   // primitive borrow (`i32*` → "ref:i32")
+                    : t.className;                     // class borrow  (`Point*` → "ref:Point")
+                return Token{ TokenType::IDENTIFIER, "ref:" + inner, line };
+            }
+            return Token{ TokenType::IDENTIFIER, t.className + "&", line };   // owning heap reference
+        case TypeKind::TypedPtr: {
+            Type elem = typedPtrElement(t);
+            std::string es;
+            if      (elem.kind == TypeKind::Reference) es = elem.className + ".ref";
+            else if (elem.kind == TypeKind::Object)    es = elem.className;
+            else if (elem.kind == TypeKind::Ptr)       es = "void";
+            else                                       es = typeName(elem);   // primitive element
+            return Token{ TokenType::IDENTIFIER, "ptr<" + es + ">", line };
+        }
+        default:
+            // Primitives / void / opaque ptr — the token *type* carries the meaning.
+            return Token{ primitiveTokenType(t.kind), typeName(t), line };
+    }
 }

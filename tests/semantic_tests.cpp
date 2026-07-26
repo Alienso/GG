@@ -130,15 +130,17 @@ TEST_CASE("Semantic - calling function with wrong argument count is an error", "
 // Warning casts (allowed but flagged)
 // ============================================================
 
-TEST_CASE("Semantic - f64 assigned to f32 produces a warning but no error", "[semantic]") {
+TEST_CASE("Semantic - f64 VALUE assigned to f32 produces a warning but no error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         fn main() -> i32 {
-            f32 x = 1.0;
+            f64 d = 1.5;
+            f32 x = d;   // a genuine f64 value narrowed to f32 → warn
             return 0;
         }
     )");
-    // 1.0 is an f64 literal → f64 → f32 is Warn, not an error
+    // A bare literal (`f32 x = 1.0;`) now *adopts* f32 (no warning — see the [numlit] tests);
+    // this narrowing warning fires only for a real f64 value flowing into an f32.
     REQUIRE_FALSE(result.hadError);
     REQUIRE(cap.contains("Warning"));
     REQUIRE(cap.contains("f64"));

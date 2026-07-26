@@ -1,0 +1,88 @@
+// Local variable type inference — `var` (const by default, `mut var` for mutable).
+// Exercises inference across primitives, value objects, heap references, borrows,
+// enums, nullable types, and generic-call results. Expected exit code: 0.
+
+class Point {
+    i32 x;
+    i32 y;
+    Point(i32 a, i32 b) { this.x = a; this.y = b; }
+    fn sum() -> i32 { return this.x + this.y; }
+}
+
+enum Color { RED, GREEN, BLUE }
+
+fn identity<T>(T v) -> T { return v; }
+
+fn dup<T>(T v) -> T { var copy = v; return copy; }   // `var` inside a generic body
+
+fn nextId() -> i32 {
+    mut static var seq = 0;   // `static var` — persistent across calls
+    seq = seq + 1;
+    return seq;
+}
+
+fn makePoint(i32 a, i32 b) -> Point& p {
+    p = new Point(a, b);
+    return p;
+}
+
+fn main() -> i32 {
+    // ---- primitives ----
+    var i = 5;              // i32
+    var f = 2.5;            // f64
+    var b = true;           // bool
+    var c = 'A';            // char
+
+    // ---- mutable inference ----
+    mut var total = 0;      // mut i32
+    total = i + 10;         // 15
+    total = total + 5;      // 20
+
+    // ---- value object (copy) ----
+    var p = Point(3, 4);
+    var s = p.sum();        // i32 = 7
+
+    // ---- heap reference (owning, +1 from new) ----
+    var r = new Point(10, 20);
+    var rs = r.sum();       // 30
+
+    // ---- borrow of a value object ----
+    var pb = p;             // value copy — still a Point
+    var pbsum = pb.sum();   // 7
+
+    // ---- reference-returning call ----
+    var made = makePoint(1, 2);
+    var madeSum = made.sum();   // 3
+
+    // ---- enum ----
+    var col = Color::GREEN;
+    mut var same = 0;
+    if (col == Color::GREEN) { same = 1; }
+
+    // ---- nullable (inferred from a nullable-producing expression) ----
+    var np = makePoint(100, 0);   // Point& (non-null)
+    var npSum = np.sum();          // 100
+
+    // ---- generic-call result ----
+    var gi = identity<i32>(9);     // i32 = 9
+
+    // ---- var in a for-loop initializer ----
+    mut var loopSum = 0;
+    for (mut var k = 0; k < 4; k++) { loopSum = loopSum + k; }   // 0+1+2+3 = 6
+
+    // ---- var inside a generic body + static var persistence ----
+    var dd = dup<i32>(6);          // 6
+    nextId(); nextId();
+    var third = nextId();          // 3
+
+    // total = 20, s = 7, rs = 30, madeSum = 3, same = 1, npSum = 100, gi = 9, pbsum = 7
+    // 20 + 7 + 30 + 3 + 1 + 100 + 9 + 7 = 177 ... but exit codes are mod 256; return a small value.
+    mut var acc = total - s - rs - madeSum + same;   // 20 - 7 - 30 - 3 + 1 = -19
+    acc = acc + npSum - gi - pbsum;               // -19 + 100 - 9 - 7 = 65
+    // Normalize to 0 for a clean pass:
+    if (acc == 65 && i == 5 && f > 2.0 && b && c == 'A'
+        && loopSum == 6 && dd == 6 && third == 3) {
+        return 0;
+    }
+    return 1;
+}

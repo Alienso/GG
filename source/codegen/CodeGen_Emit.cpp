@@ -27,6 +27,54 @@ void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {
     switchBlock(okLabel);
 }
 
+// ---- Overflow-check helpers (gated by overflowChecks_) ----
+
+// Branch on an i1 "overflow / out-of-range happened" condition to an abort()+unreachable block;
+// execution continues in a fresh block when the condition is false. Mirrors emitBoundsCheck.
+void CodeGen::emitOverflowTrap(const std::string& badCond) {
+    ensureAbortDeclared();
+    std::string okLabel  = freshLabel("ovf.ok");
+    std::string badLabel = freshLabel("ovf.bad");
+    emitCondBr(badCond, badLabel, okLabel);
+
+    switchBlock(badLabel);
+    emit("call void @abort()");
+    emit("unreachable");
+    currentBasicBlock->terminated = true;
+
+    switchBlock(okLabel);
+}
+
+// Integer +/-/* via the LLVM checked-arithmetic intrinsic, trapping on overflow. The intrinsic
+// returns { iN result, i1 overflow }; the ALU produces the overflow bit for free, so the only added
+// cost is the (well-predicted, not-taken) branch. Signed vs. unsigned picks the s*/u* variant.
+std::string CodeGen::emitCheckedArith(TokenType op, const Type& type,
+                                      const std::string& lhs, const std::string& rhs) {
+    const char* name = nullptr;
+    bool uns = isUnsignedInt(type.kind);
+    switch (op) {
+        case TokenType::PLUS:  name = uns ? "uadd" : "sadd"; break;
+        case TokenType::MINUS: name = uns ? "usub" : "ssub"; break;
+        case TokenType::STAR:  name = uns ? "umul" : "smul"; break;
+        default: return "";   // caller guarantees +/-/*
+    }
+    std::string ir  = irTypeName(type);                        // iN
+    std::string fn  = std::string("llvm.") + name + ".with.overflow." + ir;
+    std::string decl = "declare {" + ir + ", i1} @" + fn + "(" + ir + ", " + ir + ")";
+    bool have = false;
+    for (const auto& d : module.declares) if (d == decl) { have = true; break; }
+    if (!have) module.declares.push_back(decl);
+
+    std::string agg = freshTemp();
+    emit("%" + agg + " = call {" + ir + ", i1} @" + fn + "(" + ir + " " + lhs + ", " + ir + " " + rhs + ")");
+    std::string res = freshTemp();
+    emit("%" + res + " = extractvalue {" + ir + ", i1} %" + agg + ", 0");
+    std::string ovf = freshTemp();
+    emit("%" + ovf + " = extractvalue {" + ir + ", i1} %" + agg + ", 1");
+    emitOverflowTrap("%" + ovf);
+    return "%" + res;
+}
+
 // ============================================================
 // Reference-counting runtime (emitted once, when `new` is used)
 // ============================================================
@@ -255,7 +303,8 @@ void CodeGen::flushTempReleases() {
     pendingTemps_.clear();
 }
 
-std::string CodeGen::emitCast(const std::string& value, const Type& from, const Type& to) {
+std::string CodeGen::emitCast(const std::string& value, const Type& from, const Type& to,
+                              bool checked) {
     if (from == to) return value;
     if (isError(from) || isError(to)) return value;
 
@@ -331,6 +380,33 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
     if (isInteger(from.kind) && isInteger(to.kind)) {
         int fromBits = getBitWidth(from.kind);
         int toBits   = getBitWidth(to.kind);
+
+        // Overflow-check: verify the value fits in `to` before a lossy narrowing / sign change.
+        // Widening (toBits > fromBits) of a matching signedness can never lose data → no check.
+        if (overflowChecks_ && checked) {
+            if (toBits < fromBits) {
+                // Narrowing: truncate, extend back (per `to`'s signedness), compare to the original.
+                // Any difference means the value didn't fit the narrower type.
+                std::string tv = freshTemp();
+                emit("%" + tv + " = trunc " + fromIrType + " " + value + " to " + toIrType);
+                std::string back = freshTemp();
+                const char* ext = isUnsignedInt(to.kind) ? "zext" : "sext";
+                emit("%" + back + " = " + std::string(ext) + " " + toIrType + " %" + tv + " to " + fromIrType);
+                std::string bad = freshTemp();
+                emit("%" + bad + " = icmp ne " + fromIrType + " " + value + ", %" + back);
+                emitOverflowTrap("%" + bad);
+                return "%" + tv;
+            }
+            if (toBits == fromBits && isSignedInt(from.kind) != isSignedInt(to.kind)) {
+                // Same width, signedness flip: the sign bit set is exactly the out-of-range case
+                // (a negative signed value, or an unsigned value above the signed max).
+                std::string bad = freshTemp();
+                emit("%" + bad + " = icmp slt " + fromIrType + " " + value + ", 0");
+                emitOverflowTrap("%" + bad);
+                return value;   // same IR bits — reinterpret only
+            }
+        }
+
         if (toBits > fromBits)
             instruction = isUnsignedInt(from.kind) ? "zext" : "sext";
         else if (toBits < fromBits)

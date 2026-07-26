@@ -136,6 +136,9 @@ struct SemanticResult {
     // fill from that slot's default). Present only when the call used named arguments; a purely
     // positional call is absent (codegen keeps its identity-order + trailing-default path).
     std::unordered_map<const void*, std::vector<int>> callArgOrder;
+    // Inferred `var` locals: VarDeclExpr node → the synthesized type token for the deduced type.
+    // Codegen swaps this in for the `var` sentinel token so its existing branches resolve the type.
+    std::unordered_map<const void*, Token> inferredVarType;
 };
 
 class SemanticAnalyzer {
@@ -186,6 +189,8 @@ private:
     std::unordered_map<const void*, std::string> braceInitClass_;
     // Named/reordered call nodes → per-slot written-arg index (copied to SemanticResult).
     std::unordered_map<const void*, std::vector<int>> callArgOrder_;
+    // Inferred `var` local nodes → synthesized type token (copied to SemanticResult).
+    std::unordered_map<const void*, Token> inferredVarType_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;

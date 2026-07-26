@@ -1,0 +1,38 @@
+// Overflow-check smoke test. Run with:  .\compile.ps1 e2e\overflow_checks_test.gg -Run -OverflowChecks
+// All arithmetic and narrowing here is IN RANGE, so no check trips and the program exits 0.
+// (Also compiles/runs identically WITHOUT the flag — the checks are transparent when nothing
+// overflows.) Runtime trapping on actual overflow is covered by the [overflow] IR tests + manual
+// probes; a trapping program can't be an exit-0 e2e.
+
+fn main() -> i32 {
+    // Signed i32 multiply, in range (2e9 < i32 max 2_147_483_647).
+    mut i32 a = 100000;
+    mut i32 b = 20000;
+    var p = a * b;               // 2_000_000_000
+
+    // i64 arithmetic that would overflow i32 but fits i64 (literals adopt i64 as direct bindings).
+    mut i64 x = 3000000000;
+    mut i64 y = 2;
+    var big = x * y;             // 6_000_000_000
+
+    // Checked compound assignment, in range.
+    mut i64 acc = 0;
+    acc += big;                  // 6_000_000_000
+
+    // A DYNAMIC narrowing that is in range → the runtime range-check passes (no trap).
+    mut i32 w = 200;
+    u8 small = w;                // 200 fits u8
+
+    // A negated literal at the boundary adopts i8 directly (no narrowing, no trap).
+    i8 neg = -128;
+
+    // Expected i64 constants as direct bindings (a >i32 literal inside a comparison would not
+    // adopt i64 — adoption is confined to direct bindings, so bind it here first).
+    i64 expBig = 6000000000;
+
+    if (p == 2000000000 && big == expBig && acc == expBig
+        && small == 200 && neg == -128) {
+        return 0;
+    }
+    return 1;
+}

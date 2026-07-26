@@ -115,6 +115,11 @@ private:
     const std::unordered_map<const void*, std::string>* braceInitClass_ = nullptr;
     // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
     const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
+    // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
+    // genVarDecl / genStaticLocal resolve the deduced type like an explicit annotation.
+    const std::unordered_map<const void*, Token>* inferredVarType_ = nullptr;
+    // The effective type token of a var-decl: the inferred token for a `var`, else its own.
+    Token varDeclTypeToken(const VarDeclExpr& varDecl) const;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
     // overloaded, otherwise `plainBase`.
     std::string calleeName(const void* node, const std::string& plainBase) const;
@@ -123,6 +128,14 @@ private:
                                     const std::vector<Type>& params, const Type& ret) const;
 
     bool boundsCheck = true;   // from CompilerOptions; false disables runtime checks
+    bool overflowChecks_ = false; // from CompilerOptions; true → trap on integer overflow + narrowing
+
+    // Overflow-check emission (gated by overflowChecks_).
+    // emitOverflowTrap: branch on an i1 "bad" condition to an abort()+unreachable block.
+    // emitCheckedArith: integer +/-/* via llvm.{s,u}{add,sub,mul}.with.overflow.iN, trapping on overflow.
+    void        emitOverflowTrap(const std::string& badCond);
+    std::string emitCheckedArith(TokenType op, const Type& type,
+                                 const std::string& lhs, const std::string& rhs);
 
     // ---- Debug info (DWARF via LLVM metadata), gated by CompilerOptions::debugInfo ----
     bool        debug_ = false;
@@ -405,7 +418,11 @@ private:
     Type        exprType(const Expr& expression) const;
 
     // Insert a cast instruction if from != to; return (possibly unchanged) value reg.
-    std::string emitCast(const std::string& value, const Type& from, const Type& to);
+    // `checked` (default true): when overflowChecks_ is on, an integer narrowing / sign-changing
+    // conversion is range-checked and traps if the value doesn't fit. An explicit `as` cast passes
+    // checked=false — a cast is an intentional truncation and must never trap (Rust/C semantics).
+    std::string emitCast(const std::string& value, const Type& from, const Type& to,
+                         bool checked = true);
 
     // Ensure result is i1 (suitable for conditional branches).
     std::string emitToBool(const std::string& value, const Type& valueType);

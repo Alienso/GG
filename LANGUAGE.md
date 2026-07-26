@@ -139,6 +139,29 @@ ptr<i32> data = malloc(sizeof(i32) * 16);
 **Scope:** Variables are block-scoped. A new block `{ }` creates a new scope.
 Re-declaring the same name in an inner block shadows the outer one.
 
+### Type inference — `var`
+
+`var name = expr;` lets the compiler **deduce** a local's type from its initializer, so you don't
+repeat it. Like every binding it is **const by default**; use `mut var` (or `var mut`) for a
+reassignable one. An initializer is **required** — there is nothing to infer from otherwise.
+
+```gg
+var i = 5;              // i32   (integer literals infer i32)
+var f = 2.5;            // f64   (decimals infer f64)
+var b = true;           // bool
+var name = "gg";        // (raw ptr — requires --unsafe-ptr; wrap in String otherwise)
+
+var p = Point(3, 4);    // Point — value object (copied like `Point q = p;`)
+var r = new Point(1);   // Point& — owning heap reference (co-owned + released like the explicit form)
+var col = Color::GREEN; // an enum
+
+mut var total = 0;      // mutable; `total = total + i;` is allowed
+```
+
+`var` is for **locals only** — parameters, fields, and return types are always written explicitly.
+You cannot infer from something with no value type: `var x = null;` (annotate the nullable type),
+a `void`-returning call, or a lambda literal are all errors.
+
 ### Mutability — `const` by default, `mut` to opt in
 
 Every binding is **immutable by default**. A const variable may be given a value exactly
@@ -236,10 +259,44 @@ new Point(1.0)     // heap allocation + constructor → Point&
 
 ## 4. Type conversions
 
+### Numeric literals are *untyped* (they adopt the target type)
+
+A bare numeric literal has no fixed type of its own — it **takes on the type of its context**, and
+only falls back to a default (`i32` for integers, `f64` for decimals) when there is no numeric
+target. So none of these warn, and no suffix (`5L`, `1.0f`) is needed:
+
+```gg
+i64 y = 5;          // 5 is i64
+i8  b = 5;          // 5 is i8
+u32 n = 5;          // 5 is u32   (no signed→unsigned warning)
+f32 f = 1.0;        // 1.0 is f32 (no f64→f32 narrowing warning)
+i64 big = 9000000000;   // typed i64 directly — no i32 overflow
+var z = 5;          // no target → default i32
+```
+
+A literal that does **not fit** its target warns (and still adopts, truncating): `i8 b = 300;`.
+A bare literal also adopts the type of a **non-literal numeric neighbour** in a binary expression,
+so `big == 6000000000` and `big + 6000000000` (with `big : i64`) treat the literal as `i64`. But two
+literals with no such neighbour keep their defaults — `f64 d = 1 / 2;` is integer division (`0.0`),
+not `0.5` (write `1.0 / 2` for float division); and a decimal literal never becomes an integer, so
+`1.0 / count` stays float division.
+
 ### Implicit conversions (with a warning for narrowing)
 
 - Numeric widening is **silently allowed** (e.g. `i32` → `i64`, `f32` → `f64`).
-- Numeric **narrowing emits a warning** at compile time but is not an error.
+- Numeric **narrowing of a value emits a warning** at compile time but is not an error. (A bare
+  literal does not narrow — it adopts the target type per the rule above.)
+- In a binary op mixing a **signed and an unsigned** integer, the operation is performed as
+  **signed** (unlike C, which picks unsigned). So `-6 / 3u == -2` and `-1 < 1u` is `true`. Mixing
+  an integer with a float promotes the integer to the float type.
+
+> **Optional runtime overflow checks.** Compiling with `--overflow-checks` (or `compile.ps1
+> -OverflowChecks`) makes integer arithmetic (`+` `-` `*`, `+=` `-=` `*=`, `++`/`--`, and signed
+> negation) and out-of-range *implicit* narrowing conversions **trap** (abort) at runtime instead of
+> wrapping silently — the Rust-in-debug model. It is **off by default**, so release builds pay
+> nothing. An explicit `as` cast is never checked (it is an intentional truncation); division and
+> float arithmetic are not checked. Separately, `compile.ps1 -Opt <0|1|2|3|s|z>` selects clang's
+> optimization level (default `0`).
 - `char` ↔ `u32`: silently interchangeable (both map to the same 32-bit value).
 - `bool` → any integer: `false` = 0, `true` = 1.
 - Any integer → `bool`: 0 = false, non-zero = true.
@@ -1497,7 +1554,7 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Other
 | Missing feature | Notes |
 |-----------------|-------|
-| Type inference (`var` / `auto`) | The type keyword is always required |
+| Type inference (return / params) | `var` infers **local** variable types; parameter, field, and return types are always written explicitly |
 | `typeof` / reflection | No runtime type information |
 | Compile-time evaluation (`constexpr`) | `sizeof(T)` is the only compile-time computation |
 | Preprocessor / macros | None — generics handle the primary use case |

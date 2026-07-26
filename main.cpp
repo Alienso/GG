@@ -17,6 +17,8 @@ int main(int argc, char** argv) {
             options.allowRawPtr = true;
         } else if (arg == "--debug" || arg == "-g") {
             options.debugInfo = true;
+        } else if (arg == "--overflow-checks") {
+            options.overflowChecks = true;
         } else {
             paths.emplace_back(std::filesystem::absolute(arg).string());
         }

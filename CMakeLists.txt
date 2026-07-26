@@ -124,6 +124,7 @@ add_executable(GG_tests
         tests/brace_init_tests.cpp
         tests/named_args_tests.cpp
         tests/nullable_tests.cpp
+        tests/var_infer_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

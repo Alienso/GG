@@ -62,6 +62,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     currentReturnSlotName_ = "";
     resolvedCallee.clear();
     callArgOrder_.clear();
+    inferredVarType_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
 
@@ -89,7 +90,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
                           std::move(structuralValueCmp_), std::move(eqImpls),
                           std::move(callableCalls_), std::move(braceInitClass_),
-                          std::move(callArgOrder_) };
+                          std::move(callArgOrder_), std::move(inferredVarType_) };
 }
 
 // ============================================================

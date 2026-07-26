@@ -35,6 +35,12 @@ cmake -S . -B cmake-build-debug
 
 # Both flags together
 .\compile.ps1 e2e\typed_pointer_test.gg -ShowIR -Run
+
+# Optimization level: -Opt <0|1|2|3|s|z> → clang -O<level> (default 0 = unoptimized)
+.\compile.ps1 e2e\typed_pointer_test.gg -Opt 2 -Run
+
+# Trap on integer overflow + out-of-range narrowing (Rust-style, opt-in) → GG --overflow-checks
+.\compile.ps1 e2e\overflow_checks_test.gg -OverflowChecks -Run
 ```
 
 **Pipeline**: GG.exe (`.gg` → LLVM IR `.ll`) → clang (`.ll` → native `.exe`)
@@ -715,6 +721,112 @@ Braces are an **alternate delimiter for a positional constructor call** — `Poi
   (previously it emitted a call to a non-existent `@C_C`). Fixed with the brace work.
 - Tests: `tests/brace_init_tests.cpp` (`[brace]`), `e2e/brace_init_test.gg`.
 
+### Numeric-literal type adoption (untyped constants)
+A bare numeric literal has **no fixed type of its own** — it adopts the contextual expected type
+(Go/Zig "untyped constant" model), falling back to the default only when there's no numeric context.
+Implemented entirely at the literal-typing site: **no new type-kind, no codegen restructuring**.
+- **Default**: integer literal → `i32`, decimal literal → `f64` (unchanged when there's no context).
+- **Adoption** (`analyzeLiteral`, `SemanticAnalyzer_Exprs.cpp`): when `expectedType_` (stripped of
+  nullability) is a numeric type, the literal takes it — `i64 y = 5;` types `5` as i64, `f32 f = 1.0;`
+  types `1.0` as f32, `u32 n = 5;` / `u8 c = 5;` adopt cleanly (no widening/narrowing/sign warning,
+  no more `u8 = 5` *error*). An integer literal in a **float** slot adopts the float type.
+- **Range check** (`integerLiteralFits` in `Type.cpp`): an integer literal's magnitude is checked
+  against the adopted type — out-of-range **warns** (still adopts, truncating): `i8 b = 300;`. Signed
+  types allow magnitude up to `2^(bits-1)` so a negated boundary (`i8 = -128`) is accepted (a
+  negative literal is a `UnaryExpr(-)` over the literal, and `analyzeUnary` doesn't clear
+  `expectedType_`, so the inner literal adopts). With **no** numeric context the default is i32 and an
+  i32-overflowing literal warns (`var z = 9000000000;`) — this also fixes the old **silent** i32
+  overflow of `i64 big = 9000000000;` (now typed i64 directly).
+- **Direct bindings + a non-literal sibling**: `analyzeBinary` snapshots and **clears** `expectedType_`
+  around its operands (as `resolveOverload` does for call args), so a literal buried in a subexpression
+  keeps its default type — **except** a bare numeric-literal operand adopts the type of a *non-literal*
+  numeric sibling (`isNumericLiteralOperand`, incl. a negated literal). So `bigI64 == 6000000000` and
+  `bigI64 + 6000000000` type the literal as i64 (no wrap/overflow warning), while the both-literals
+  `1 / 2` (no non-literal sibling) stays **integer** division (→ 0.0), and a *decimal* literal never
+  adopts an integer sibling (`analyzeLiteral` keeps it f64), so `1.0 / count` stays float division.
+  Function-argument literals still keep their default and reach the parameter via silent widening.
+- **Codegen** (`genLiteral`): emits the literal at its resolved semantic type. Integer literals are
+  **masked to the target width** (`unsigned long long` parse, `& ((1<<bits)-1)`) so the constant is
+  always a valid `iN` even when out of range — `i8 = 300` → `store i8 44`, not the malformed
+  `store i8 300` (a >u64 literal that can't even be parsed emits `0`; both cases are already warned).
+  An integer lexeme in a float slot becomes a decimal (`5` → `5.0`); an **f32** literal is emitted as
+  an **LLVM hex-float** (`store float 0x3FE0000000000000`) computed from the value rounded to float —
+  necessary because f32 was previously only ever reached via `fptrunc` from an f64 constant, and LLVM
+  rejects a non-exactly-representable decimal for `float`.
+- Tests: `tests/cast_tests.cpp` (`[numlit]`).
+
+### Mixed-arithmetic common type — signed wins (`commonArithmeticType`, `Type.cpp`)
+The unified type for a **symmetric** binary numeric op (both the semantic result type and the codegen
+operand type) is: **float dominates** (`f64` > `f32` > any int); both-same-signedness ints → **wider
+wins**; **mixed signed/unsigned → a SIGNED int of the wider width** (GG departs from C's "unsigned
+wins"). So `-6 / 3u == -2` (`sdiv`, not `udiv`), `-1 < 1u` is true (`slt`, not `ult`) — the unsigned
+operand is reinterpreted as signed. The division/compare *instruction* (`sdiv`/`udiv`/`fdiv`,
+`slt`/`ult`/…) is chosen from this common type in `arithInstr`/`cmpInstr`. Integer `/` truncates
+toward zero. Both operands are `emitCast` to the common type before the op.
+- **Shifts are the exception** (`<<`/`>>` in `analyzeBinary`): a shift is *asymmetric*, so its result
+  type and its `ashr`-vs-`lshr` choice follow the **left operand only** (not `commonArithmeticType`).
+  So `u32 >> anyCount` is always **logical** (`lshr`) and `i32 >> anyCount` always **arithmetic**
+  (`ashr`), regardless of the count's signedness; the count is `emitCast` to the left type (LLVM
+  requires equal shift-operand types). (Symmetric `& | ^` still use the common type.)
+- Tests: `tests/cast_tests.cpp` `[arith]`.
+
+### Integer overflow checks — `--overflow-checks` (Rust-style, opt-in)
+Off by default; when enabled, integer overflow and out-of-range narrowing **trap at runtime**
+(`abort()`). `CompilerOptions::overflowChecks` (parsed from `--overflow-checks` in `main.cpp`;
+`compile.ps1 -OverflowChecks`) → `CodeGen::overflowChecks_`. **With it off the emitted IR is
+byte-identical to before** — every check is gated on the flag.
+- **Arithmetic** (`genBinary` + `genCompoundAssign` + `genUnary` + `genPostfix`): integer `+`/`-`/`*`
+  (and `+=`/`-=`/`*=`, the `++`/`--` prefix **and** postfix forms, and signed unary `-` — which catches
+  `-INT_MIN`) route through `emitCheckedArith`, which calls `llvm.{s,u}{add,sub,mul}.with.overflow.iN`
+  (s* for signed, u* for unsigned; the intrinsic is `declare`d once, deduped in `module.declares`),
+  extracts the `{result, i1 overflow}` pair, and `emitOverflowTrap`s on the overflow bit. **Not
+  checked**: division/remainder, shifts/bitwise, all float arithmetic, and unsigned unary `-` (a
+  degenerate op) — all kept on the plain-instruction path.
+- **Conversions** (`emitCast`, integer→integer branch): an **implicit** narrowing (`toBits < fromBits`)
+  is verified by `trunc`→extend-back (`sext`/`zext` per the target's signedness)→`icmp ne` against
+  the original; a same-width signedness flip checks the sign bit (`icmp slt …, 0`). Out of range →
+  `emitOverflowTrap`. An **explicit `as` cast never traps** — `genCast` calls `emitCast(..., checked=false)`
+  (intentional truncation, matching Rust/C); `emitCast`'s new trailing `bool checked = true` param
+  defaults on so all *implicit* conversion sites are checked, and only `genCast` opts out.
+- **Trap** = `emitOverflowTrap(badCond)` (`CodeGen_Emit.cpp`): mirrors `emitBoundsCheck` — cond-branch
+  to an `abort()`+`unreachable` block (reusing `ensureAbortDeclared`), continue in a fresh block.
+- **Cost / rationale**: the overflow bit is free from the ALU; the added cost is a well-predicted
+  not-taken branch (+ lost auto-vectorization at higher `-O`). At the default `-O0` the overhead is
+  small. Compile-time-known-safe conversions (our untyped-literal adoption) never emit a check.
+- **clang `-O` passthrough**: `compile.ps1 -Opt <0|1|2|3|s|z>` adds `-O<level>` to the clang step
+  (default `0` — GG previously always compiled unoptimized). Independent of overflow checks.
+- Tests: `tests/cast_tests.cpp` (`[overflow]`), `e2e/overflow_checks_test.gg` (run with `-OverflowChecks`).
+
+### Local type inference — `var` (const by default)
+`var name = expr;` deduces a local's type from its initializer. **Const by default** (single-
+assignment, exactly like a typed local); `mut var` **or** `var mut` opts into mutability. An
+initializer is **required** — there is nothing to infer from otherwise. `var` is **locals-only**
+(not params, fields, or return types — those stay explicit). The whole feature reuses the existing
+declaration machinery: the deduced type flows back as an ordinary type token, so semantics and
+codegen gain **no new type-kind and no new branch** beyond the inference site.
+- **Lexer**: `var` was already a keyword (`TokenType::VAR`), previously unused. No lexer change.
+- **Parser** (`parseExpression`): after the leading `static`/`mut` modifier loop, `match(VAR)` →
+  read `name`, require `=`, parse the initializer, and emit a `VarDeclExpr` whose `typeName` is the
+  **`var` sentinel token** (`{ VAR, "var" }`). `var mut` is accepted alongside `mut var`.
+- **Semantic** (`analyzeVarDecl`, `var` branch): analyze the initializer with **no expected type**
+  (`analyzeExpr`, not `analyzeWithExpected`); the inferred type **is** its type. Integer literals →
+  `i32`, decimals → `f64` (the literal-default rule). Rejects: no initializer, `void`, bare `null`
+  (needs an explicit nullable annotation), a lambda literal (unspellable — pass it to a `Call`-bound
+  generic), and an inferred raw `ptr`/`ptr<T>` unless `--unsafe-ptr` (e.g. `var s = "lit";` → `ptr`).
+  `static var` still enforces the scalar-primitive + constant-initializer static-local rules against
+  the inferred type. The synthesized type token is recorded in `SemanticResult::inferredVarType`
+  (node → `Token`, via `synthTypeToken(Type,line)` in `Type.cpp`) — the inverse of the type-token
+  resolvers, round-tripping through `typeFromToken`/`decodeSynthesizedType` to the same Type.
+- **Codegen** (`genVarDecl`/`genStaticLocal`): `varDeclTypeToken(v)` swaps the `var` sentinel for the
+  recorded synthesized token at the top, so **every existing branch** (primitive / object / owning
+  `Class&` / borrow / enum / nullable / `ptr<T>`) resolves the deduced type and emits **byte-
+  identical IR** to the explicit form (`var r = new Point()` co-owns + releases at scope exit exactly
+  like `Point& r = …`). `Token` has const members ⇒ not assignable ⇒ the side table is populated with
+  `emplace`, never `map[k]=`.
+- **v1 limitation**: capturing a `var`-typed local inside a lambda is unsupported (the parser records
+  the capture's type at parse time, before inference runs). Rare; a clear failure, not a miscompile.
+- Tests: `tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`.
+
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
   lower to LLVM `ptr`. Intended for stdlib/CRT container internals. **No bounds check.**
@@ -837,6 +949,54 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**948 test cases / 1801 assertions** (as of **mixed signed/unsigned arithmetic resolves to the SIGNED
+type**, plus a **shift-signedness fix** surfaced by it. GG departs from C's "unsigned wins":
+`commonArithmeticType` returns a *signed* int of the wider width for a mixed pair, so `-6 / 3u == -2`
+and `-1 < 1u` is true (signed `slt`); the unsigned operand is reinterpreted as signed. Affects every
+`commonArithmeticType` consumer (`+ - * / %`, bitwise `& | ^`, comparisons). **Shifts are now
+excluded** — `<<`/`>>` follow the **left operand's** type (fixing `ashr`/`lshr` selection: `u32 >>
+signedCount` is now `lshr`, `i32 >> unsignedCount` is `ashr` — the latter was already wrong before
+this change). `tests/cast_tests.cpp` `[arith]` (8 cases). Prior baseline was
+**940 test cases / 1787 assertions** (as of extending `--overflow-checks` to **`++`/`--` (prefix &
+postfix) and signed unary `-`** — previously only `+`/`-`/`*` and `+=`/`-=`/`*=` were checked, so
+`x++` at a type's max silently wrapped while `x += 1` trapped; now consistent. Also verified (already
+correct) that narrowing conversions are checked in **return / call-argument / assignment** positions,
+not just var-init. `tests/cast_tests.cpp` `[overflow]` (17 cases). Prior baseline was
+**933 test cases / 1777 assertions** (as of a **numeric-literal adoption refinement**: a bare
+literal operand of a binary op now adopts the type of a *non-literal* numeric sibling, so
+`bigI64 == 6000000000` / `bigI64 + 6000000000` no longer wrap/warn; the both-literals `1 / 2` and
+`1.0 / count` cases are preserved. `tests/cast_tests.cpp` `[numlit]`. Prior baseline was
+**929 test cases / 1769 assertions** (as of **opt-in integer overflow checks (`--overflow-checks`)
++ clang `-O` passthrough**: Rust-style, off by default. When on, integer `+`/`-`/`*` (and
+`+=`/`-=`/`*=`) trap via `llvm.{s,u}{add,sub,mul}.with.overflow.iN`, and an out-of-range *implicit*
+narrowing / sign-changing conversion traps after a range check (`trunc`→extend-back→`icmp ne`); an
+explicit `as` cast is never checked (intentional truncation, Rust/C semantics), nor is division /
+float arithmetic. Trap = `abort()` (reuses the `!!` path). **Off, the emitted IR is byte-identical
+to before.** `compile.ps1` gained `-Opt <0|1|2|3|s|z>` (→ clang `-O<level>`, default 0) and
+`-OverflowChecks`. See the "Integer overflow checks" invariant; `tests/cast_tests.cpp`
+(`[overflow]`, 10 cases), `e2e/overflow_checks_test.gg`. Prior baseline was
+**919 test cases / 1750 assertions** (as of **numeric-literal type adoption (untyped constants)**:
+a bare numeric literal is untyped — it adopts the contextual expected type when that is numeric,
+else defaults to `i32`/`f64`. So `i64 y = 5;`, `f32 f = 1.0;`, `u32 n = 5;`, `u8 c = 5;` no longer
+warn/error; `i64 big = 9000000000;` types the literal i64 directly (fixing the old silent i32
+overflow); an out-of-range literal (`i8 = 300`) or an i32-default overflow (`var z = 9000000000`)
+warns. Adoption is confined to **direct** literal bindings — `analyzeBinary` clears `expectedType_`
+for its operands, so `f64 d = 1 / 2;` keeps integer division. f32 literals emit as LLVM hex-floats.
+`genLiteral` masks the integer constant to the target width so an out-of-range literal always emits
+**valid** `iN` IR (`i8 = 300` → `store i8 44`) instead of the previously malformed `store i8 300`.
+Adoption works across every binding context — var-init, assignment RHS, `return`, and the inner type
+of a nullable target (`i64? = 5`). See the "Numeric-literal type adoption" invariant;
+`tests/cast_tests.cpp` (`[numlit]`, 18 cases). Prior baseline was
+**901 test cases / 1708 assertions** (as of **local type inference — the `var` keyword**:
+`var x = 5;` deduces a local's type from its initializer, const by default (`mut var`/`var mut` for
+mutable); the deduced type flows back through `synthTypeToken` as an ordinary type token so
+semantics/codegen gain no new type-kind and emit IR byte-identical to the explicit form; rejects
+inference from `void`/`null`/lambda/unspellable, and `static var` keeps the static-local rules. The
+`[var]` group (27 cases) covers inference across primitives/value-objects/heap-refs/borrows/enums/
+nullable-primitives, `mut`/const-by-default, `for`-init + nested-scope shadowing + self-reference,
+`static var` (persist + non-primitive rejection), the raw-ptr gate, and `var` inside a **generic
+body** (surviving monomorphization). See the "Local type inference" invariant;
+`tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`.) Prior baseline was
 **874 test cases / 1656 assertions** (as of the **comprehensive nullable-type test pass** — the
 `[nullable]` group grew to 65 cases (incl. nullable composing with generics and `switch`) covering the full surface (references/primitives/enums, `null`/
 `==null`/`!!`/`?:`/`?.`, smart-casts incl. `mut` invalidation, nullable fields/params/returns,

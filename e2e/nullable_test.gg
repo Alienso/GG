@@ -4,6 +4,8 @@
 
 class Node { mut i32 v; Node(i32 x) { v = x; } fn get() -> i32 { return v; } }
 
+enum Color { RED, GREEN, BLUE }
+
 // Nullable return type.
 fn pick(bool b) -> Node&? { if (b) { return new Node(7); } return null; }
 
@@ -70,6 +72,16 @@ fn main() -> i32 {
     i32? sn = xn?.get();                    // null (receiver null)
     if ((sf ?: 0) != 4)  { return 17; }
     if (sn != null)      { return 18; }
+
+    // Nullable enum (`Color?`) — a reference-like nullable (plain ptr, machine null).
+    Color? c = Color::GREEN;
+    if (c == null)         { return 19; }
+    Color cc = c!!;                         // unwrap → non-null Color
+    if (cc != Color::GREEN){ return 20; }
+    Color? cn = null;
+    if (cn != null)        { return 21; }
+    Color got = cn ?: Color::RED;           // Elvis picks the default
+    if (got != Color::RED) { return 22; }
 
     return 0;
 }

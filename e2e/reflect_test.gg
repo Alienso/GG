@@ -2,6 +2,7 @@
 // All work is a compile-time unroll (zero runtime reflection). Expected exit code: 0.
 
 class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } }
+impl Eq for Point { fn eq(Point& o) -> bool { return this.x == o.x && this.y == o.y; } }
 
 // Generic structural equality — compares every field.
 fn eqAll<T>(T& a, T& b) -> bool {
@@ -60,7 +61,15 @@ fn main() -> i32 {
     if (@isInteger(i32))             { ok = ok + 1; }
     if (@isEnum(Color))              { ok = ok + 1; }
     if (@isClass(Point))             { ok = ok + 1; }
+    if (@isFloat(f64))               { ok = ok + 1; }
+    if (@isPrimitive(bool))          { ok = ok + 1; }
 
-    if (ok == 12) { return 0; }
+    // Bool folds: @hasField and @implements (Point has an Eq impl above).
+    if (@hasField(Point, "x"))          { ok = ok + 1; }
+    if (@hasField(Point, "nope") == false) { ok = ok + 1; }
+    if (@implements(Point, Eq))         { ok = ok + 1; }
+    if (@implements(Color, Eq) == false){ ok = ok + 1; }
+
+    if (ok == 18) { return 0; }
     return 1;
 }

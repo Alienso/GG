@@ -1,0 +1,62 @@
+// e2e/numeric_semantics_test.gg — mixed signed/unsigned arithmetic (signed-wins), shift
+// signedness, integer-division truncation, and numeric-literal type adoption. These are
+// deliberate departures from C's rules, so they get end-to-end coverage here.
+// Returns a unique number on the first failing check; 0 on success.
+
+fn main() -> i32 {
+    // --- Mixed signed/unsigned resolves to the SIGNED type (GG departs from C's "unsigned wins") ---
+    // -6 / 3 with a u32 divisor must be sdiv → -2, NOT udiv (which would give a huge value).
+    i32 a = 0 - 6;
+    u32 b = 3;
+    i32 q = a / b;
+    if (q != 0 - 2) { return 1; }
+
+    // -1 < 1(u32) must be a signed compare (slt) → true, NOT ult (which would be false).
+    i32 x = 0 - 1;
+    u32 y = 1;
+    if (!(x < y)) { return 2; }
+
+    // --- Integer division truncates toward zero; both-literal ops stay integer ---
+    i32 s = 7 / 2;
+    if (s != 3) { return 3; }
+
+    // `f64 d = 7 / 2;` — both operands are integer literals (no non-literal sibling), so the
+    // division is integer (→ 3) and only then widened to f64. Result is 3.0, not 3.5.
+    f64 d = 7 / 2;
+    if (d > 3.5) { return 4; }
+    if (d < 2.5) { return 5; }
+
+    // A float sibling forces float division: 7.0 / 2 → 3.5.
+    f64 e = 7.0 / 2;
+    if (e < 3.4) { return 6; }
+    if (e > 3.6) { return 7; }
+
+    // --- Shift signedness follows the LEFT operand ---
+    // i32 >> → arithmetic (ashr): -8 >> 1 == -4.
+    i32 neg = 0 - 8;
+    if ((neg >> 1) != (0 - 4)) { return 8; }
+
+    // u32 >> → logical (lshr): 2147483648 >> 1 == 1073741824 (sign bit not propagated).
+    u32 u = 2147483648;
+    u32 ur = u >> 1;
+    if (ur != 1073741824) { return 9; }
+
+    // --- Numeric-literal type adoption (untyped constants take the contextual type) ---
+    // i64 adopts a value that overflows i32 — no silent truncation.
+    i64 big = 3000000000;
+    if (big < 2000000000) { return 10; }
+
+    // f32 adopts a decimal literal; u8/u32 adopt integer literals that fit.
+    f32 f = 1.5;
+    if (f < 1.0) { return 11; }
+    u8 c = 200;
+    if (c != 200) { return 12; }
+    u32 n = 5;
+    if (n != 5) { return 13; }
+
+    // A bare literal adopts a non-literal sibling's type: bigI64 + literal stays i64 (no wrap).
+    i64 sum = big + 3000000000;
+    if (sum < 5000000000) { return 14; }
+
+    return 0;
+}

@@ -1,7 +1,8 @@
-// End-to-end test for default parameter values (C++-style; defaults form a contiguous trailing
-// run). Omitted trailing arguments are filled from the callee's defaults, evaluated at the call
-// site. Covers free functions, constructors, methods, an object-value (sret) return, and an
-// object default. Expected exit code: 0.
+// End-to-end test for default parameter values (C++-style). A default may sit on any parameter
+// (the old contiguous-trailing rule was removed when named arguments landed; see named_args_test);
+// for a purely positional call, only a trailing run of defaults may be omitted. Omitted arguments
+// are filled from the callee's defaults, evaluated at the call site. Covers free functions,
+// constructors, methods, an object-value (sret) return, and an object default. Expected exit code: 0.
 
 class Point {
     mut i32 x; mut i32 y;

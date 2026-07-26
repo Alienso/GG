@@ -681,8 +681,9 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   path leaves the empty default (`null` / `zeroinitializer`), the present path does the field
   load / instance call and wraps. `?.` never yields a value object, so there's no sret path; an
   owning-reference result is pushed to `pendingTemps_` (null-safe release covers the null path).
-- **Tokens/AST**: lexer `null` (`NULL_LITERAL`), `?.`/`?:`/`!!` (`QUESTION_DOT`/`QUESTION_COLON`/
-  `BANG_BANG`); `?` (`QUESTION`) as a postfix type suffix. New expr nodes `NullLiteralExpr`,
+- **Tokens/AST**: lexer `null` (`NULL_LITERAL`), `?.`/`?:` (`QUESTION_DOT`/`QUESTION_COLON`); `!!`
+  is parsed as **two `BANG` tokens** (no dedicated token); `?` (`QUESTION`) as a postfix type
+  suffix. New expr nodes `NullLiteralExpr`,
   `UnwrapExpr` (`x!!`), `ElvisExpr` (`a ?: b`); a `bool safe` on `MemberAccessExpr`/`MethodCallExpr`
   for `?.`. Elvis sits just below assignment (right-assoc); `!!` is postfix.
 - **Type**: reuses the (pre-existing) `Type::isNullable` flag + `TypeKind::Null` (the type of
@@ -846,8 +847,8 @@ CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@
   field-name string, `@field(v, f.name)` is the field as an lvalue — read or assignment target);
   scalar queries `@fieldCount(T)`→u64, `@hasField(T,"x")`→bool, `@offsetOf(T,"x")`→u64 (byte offset).
 - **Surface (enums, Phase 2)**: `inline for (v in @variants(E)) { … }` — one body copy per variant;
-  bare `v` lowers to the variant singleton `E::VARIANT`, `v.name` to the variant-name string;
-  `@variantCount(E)`→u64.
+  bare `v` lowers to the variant singleton `E::VARIANT` (a real value — `v.method()`/`v.field` work,
+  `==` compares identity), `v.name` to the variant-name string; `@variantCount(E)`→u64.
 - **Surface (type-level)**: `@typeName(T)`→string; layout `@alignOf(T)`→u64; predicates
   `@isInteger/@isFloat/@isClass/@isEnum/@isPrimitive(T)`→bool and `@implements(T, Trait)`→bool
   (user **and** built-in operator traits); `@compileError("msg")` aborts compilation.
@@ -1008,9 +1009,10 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
-**981 test cases / 1851 assertions** (as of **compile-time reflection, Phase 2** — enum + type-level
+**985 test cases / 1858 assertions** (as of **compile-time reflection, Phase 2** — enum + type-level
 queries on top of Phase 1: `inline for (v in @variants(E)) { … }` unrolls once per variant (bare `v`
-→ the singleton `E::VARIANT`, `v.name` → the variant-name string); scalar folds `@variantCount(E)`,
+→ the singleton `E::VARIANT`, usable as a value — `v.method()`/`v.field` work; `v.name` → the
+variant-name string); scalar folds `@variantCount(E)`,
 `@alignOf(T)`, `@offsetOf(T,"f")`; predicates `@isInteger/@isFloat/@isClass/@isEnum/@isPrimitive(T)`
 and `@implements(T, Trait)` (user + built-in operator traits). Same post-monomorphization
 `Parser::expandReflection` pipeline as Phase 1 — each query folds to a constant in `genReflect`
@@ -1018,7 +1020,7 @@ and `@implements(T, Trait)` (user + built-in operator traits). Same post-monomor
 `comptime if` yet (a predicate is an `i1` constant). `ImportResolver::collectClassNames` now also
 collects `enum` names so `@variants(T)` works after a generic type param is substituted with a
 concrete enum. Deferred to Phase 3: `f.type`/indexed field type queries, `comptime if`, method
-reflection. See the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 33
+reflection. See the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 37
 cases), `e2e/reflect_test.gg`. Prior baseline was
 **966 test cases / 1828 assertions** (as of **compile-time reflection, Phase 1** — `@`-sigil builtins
 + `inline for`: `inline for (f in @fields(T)) { … }` unrolls at compile time (one body copy per

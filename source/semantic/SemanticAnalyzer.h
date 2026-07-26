@@ -57,7 +57,6 @@ struct ClassInfo {
         bool  isPublic = false;
         Type  type;
         Token decl;          // field name token
-        bool  hasInit  = false;  // true if it carries a constant initializer
     };
     std::vector<std::string>              fieldOrder;   // preserves declaration order
     std::unordered_map<std::string, Field>  fields;
@@ -76,19 +75,19 @@ struct FunctionOverload {
     bool              isExtern = false;
     Token             decl;
     std::vector<bool> paramEscapes{};    // per-parameter escape bit (see ClassInfo::Method)
-    std::vector<std::string> paramNames; // parameter names (for named arguments)
-    std::vector<bool> paramHasDefault;   // per-parameter: does it have a default value?
+    std::vector<std::string> paramNames{}; // parameter names (for named arguments)
+    std::vector<bool> paramHasDefault{};   // per-parameter: does it have a default value?
     // `fn private` — file-local. A cross-file call warns (not errors). `sourceFile` is the
     // declaring file's canonical path; empty for extern (always public).
     bool              isPublic = true;
-    std::string       sourceFile;
+    std::string       sourceFile{};
 };
 
 // One overload candidate for resolution: pointers into a registry entry + its return type.
 // `numDefaults` trailing params may be omitted at the call site (filled from their defaults).
 struct OverloadCand {
-    const std::vector<Type>* params;
-    const std::vector<bool>* paramMut;
+    const std::vector<Type>* params   = nullptr;
+    const std::vector<bool>* paramMut = nullptr;
     Type                     returnType;
     size_t                   numDefaults = 0;
     const std::vector<bool>* paramEscapes = nullptr;   // per-parameter escape bit (may be null)

@@ -901,7 +901,9 @@ void SemanticAnalyzer::analyzeSwitchArm(const SwitchArm& arm, const Type& scruti
     for (const auto& label : arm.labels) {
         Type labelType = analyzeExpr(*label);
         if (!isError(labelType) && !isError(scrutineeType))
-            classifyEquality(scrutineeType, labelType, label->node.get(), switchTok, "switch case");
+            // Called for its side effects (records the comparison machinery codegen reads back for
+            // this label node); the returned type isn't needed here — a case compare is always bool.
+            (void)classifyEquality(scrutineeType, labelType, label->node.get(), switchTok, "switch case");
     }
 
     enterScope();

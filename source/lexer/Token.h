@@ -37,7 +37,7 @@ enum class TokenType {
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
     PRIVATE, AS, NEW, SIZEOF, STATIC, MUT, TRAIT, IMPL, SELF, FN,
     SWITCH, CASE, DEFAULT, YIELD, NULL_LITERAL,
-    QUESTION_DOT, QUESTION_COLON, BANG_BANG,
+    QUESTION_DOT, QUESTION_COLON,   // note: `!!` (unwrap) is parsed as two BANG tokens, not one token
     INLINE, IN,   // `inline for (x in @fields(T))` — compile-time reflection unroll
 
     // Type keywords — signed integers.

@@ -7,6 +7,7 @@
     { "include": "#strings" },
     { "include": "#chars" },
     { "include": "#declarations" },
+    { "include": "#reflection" },
     { "include": "#keywords" },
     { "include": "#modifiers" },
     { "include": "#types" },
@@ -77,13 +78,18 @@
       "patterns": [
         {
           "name": "keyword.control.gg",
-          "match": "\\b(if|else|for|while|switch|case|default|yield|return|break|continue)\\b"
+          "match": "\\b(if|else|for|while|switch|case|default|yield|return|break|continue|inline|in)\\b"
         },
         {
           "name": "keyword.declaration.gg",
           "match": "\\b(fn|class|enum|trait|impl|extern|import|new|static|private|var|super)\\b"
         }
       ]
+    },
+    "reflection": {
+      "comment": "Compile-time reflection builtins: @fields, @field, @variants, @typeName, @fieldCount, @hasField, @offsetOf, @alignOf, @variantCount, @implements, @is*, @compileError, ...",
+      "name": "support.function.builtin.reflection.gg",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*"
     },
     "modifiers": {
       "name": "storage.modifier.gg",
@@ -95,7 +101,7 @@
     },
     "constants": {
       "name": "constant.language.gg",
-      "match": "\\b(true|false)\\b"
+      "match": "\\b(true|false|null)\\b"
     },
     "language-variables": {
       "name": "variable.language.this.gg",
@@ -109,12 +115,15 @@
       ]
     },
     "operators": {
+      "comment": "Order matters: longer/more-specific operators are listed first so they win at a given position (?. before ?, !! before !, << before <, &= before &).",
       "patterns": [
         { "name": "keyword.operator.arrow.gg", "match": "->" },
         { "name": "keyword.operator.scope.gg", "match": "::" },
+        { "name": "keyword.operator.nullable.gg", "match": "\\?\\.|\\?:|!!|\\?" },
+        { "name": "keyword.operator.bitwise.shift.gg", "match": "<<|>>" },
         { "name": "keyword.operator.comparison.gg", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.logical.gg", "match": "&&|\\|\\||!" },
-        { "name": "keyword.operator.assignment.gg", "match": "\\+=|-=|\\*=|/=|%=|=" },
+        { "name": "keyword.operator.assignment.gg", "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|=" },
         { "name": "keyword.operator.arithmetic.gg", "match": "\\+\\+|--|[-+*/%]" },
         { "name": "keyword.operator.bitwise.gg", "match": "[&|^~]" }
       ]

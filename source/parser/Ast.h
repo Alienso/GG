@@ -69,7 +69,7 @@ struct CallExpr {
     // Parallel to `args`: the parameter name for a named argument (`f(x: 1)`), or an empty-lexeme
     // token for a positional one. Empty vector ⇒ all positional (the common case). Named args must
     // follow positional ones. Reordered to parameter order in the semantic pass.
-    std::vector<Token> argNames;
+    std::vector<Token> argNames{};   // default-init: omitting it in aggregate init is intentional
 };
 
 struct VarDeclExpr {
@@ -379,7 +379,7 @@ struct MethodDecl {
     BlockStmt              body;
     // Return slot (sret): `method(params) -> RetType slot { }`. See FunctionDeclStmt.
     bool                   hasReturnSlot = false;
-    std::string            returnSlotName;
+    std::string            returnSlotName{};   // default-init: omitting it in aggregate init is fine
 };
 
 struct ClassDeclStmt {

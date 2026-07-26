@@ -1,8 +1,11 @@
 # GG syntax highlighting (TextMate grammar)
 
 A TextMate grammar for `.gg` source, usable in **CLion** (and other JetBrains IDEs) and
-**VS Code**. It highlights keywords, primitive types, `//` and `/* */` comments, string/char
-literals, numeric literals, function/type declaration names, and the `->` / `::` operators.
+**VS Code**. It highlights keywords (control / declaration / `mut` / `as` / `sizeof`), primitive
+types and `Self`, `//` and `/* */` comments, string/char literals, numeric literals (incl. hex),
+`true` / `false` / `null`, `this`, function/type declaration names, compile-time reflection
+builtins (`@fields`, `@typeName`, `@variants`, …), and the operator set — `->`, `::`, the nullable
+operators (`?.`, `?:`, `!!`, `?`), shifts, comparison/logical/bitwise, and compound assignment.
 
 ## CLion / JetBrains IDEs
 

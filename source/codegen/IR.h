@@ -39,6 +39,7 @@ inline std::string irTypeName(const Type& t) {
         case TypeKind::TypedPtr:  return "ptr";   // typed raw pointer ptr<T> — an opaque pointer at the IR level
         case TypeKind::TypeParam: return "ptr";   // generic type parameter — semantic-only, never emitted
         case TypeKind::Void:   return "void";
+        case TypeKind::Null:   return "ptr";   // the `null` literal — a pointer-shaped zero
         case TypeKind::Error:  return "i32";   // fallback — suppressed errors
     }
     return "i32";

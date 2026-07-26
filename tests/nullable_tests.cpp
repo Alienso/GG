@@ -22,7 +22,7 @@ TEST_CASE("Nullable - `T&?` parses and `null` is a literal", "[nullable][parser]
 TEST_CASE("Nullable - nested `??` is a parse error", "[nullable][parser]") {
     StderrCapture cap;
     parseString("class C { i32 x; } fn f(C&?? a) { }");
-    REQUIRE(cap.contains("nested '??'"));
+    REQUIRE(cap.contains("nested '?\?'"));
 }
 
 // ---- Semantic: accepted ----

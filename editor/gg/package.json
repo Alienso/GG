@@ -1,9 +1,11 @@
 {
   "name": "gg-language",
   "displayName": "GG Language",
-  "description": "Syntax highlighting for the GG language (.gg).",
+  "description": "Syntax highlighting for the GG programming language (.gg).",
   "version": "0.1.0",
-  "engines": { "vscode": "^1.0.0" },
+  "publisher": "gg-lang",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
   "contributes": {
     "languages": [

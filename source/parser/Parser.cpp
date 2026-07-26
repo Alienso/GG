@@ -792,11 +792,17 @@ void Parser::expandReflectionInStmt(Stmt& s, const ReflectRegistry& reg) {
 
     Stmt::Variant& v = *s.node;
     if (auto* n = std::get_if<BlockStmt>(&v))        { expandReflectionInBlock(*n, reg); return; }
-    if (auto* n = std::get_if<IfStmt>(&v))           { if (n->thenBranch) expandReflectionInStmt(*n->thenBranch, reg);
-                                                       if (n->elseBranch) expandReflectionInStmt(*n->elseBranch, reg); return; }
+    if (auto* n = std::get_if<IfStmt>(&v))           {
+        if (n->thenBranch) expandReflectionInStmt(*n->thenBranch, reg);
+        if (n->elseBranch) expandReflectionInStmt(*n->elseBranch, reg);
+        return;
+    }
     if (auto* n = std::get_if<WhileStmt>(&v))        { if (n->body) expandReflectionInStmt(*n->body, reg); return; }
-    if (auto* n = std::get_if<ForStmt>(&v))          { if (n->init) expandReflectionInStmt(*n->init, reg);
-                                                       if (n->body) expandReflectionInStmt(*n->body, reg); return; }
+    if (auto* n = std::get_if<ForStmt>(&v))          {
+        if (n->init) expandReflectionInStmt(*n->init, reg);
+        if (n->body) expandReflectionInStmt(*n->body, reg);
+        return;
+    }
     if (auto* n = std::get_if<SwitchStmt>(&v))       { for (auto& arm : n->arms) if (arm.block) expandReflectionInStmt(*arm.block, reg); return; }
     if (auto* n = std::get_if<FunctionDeclStmt>(&v)) { expandReflectionInBlock(n->body, reg); return; }
     if (auto* n = std::get_if<ClassDeclStmt>(&v))    { for (auto& m : n->methods) expandReflectionInBlock(m.body, reg); return; }
@@ -950,7 +956,7 @@ Token Parser::consumeType() {
     Token base = consumeTypeCore();
     if (match({ TokenType::QUESTION })) {
         if (check(TokenType::QUESTION))
-            throw error(peek(), "nested '??' is not allowed; a nullable type is written 'T?'");
+            throw error(peek(), "nested '?\?' is not allowed; a nullable type is written 'T?'");
         return Token{ TokenType::IDENTIFIER, base.lexeme + "?", base.line };
     }
     return base;

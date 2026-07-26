@@ -174,6 +174,26 @@ struct SizeofExpr {
     Token typeName;   // the (possibly synthesized) type token
 };
 
+// Compile-time reflection builtin (`@…`). TRANSIENT: folded/lowered away by the parser's
+// reflection-expansion pass, so it never reaches semantic analysis or codegen.
+//   @typeName(T)      -> string literal
+//   @fieldCount(T)    -> integer literal (u64)
+//   @hasField(T,"x")  -> bool literal
+//   @field(v, name)   -> ordinary MemberAccessExpr / MemberAssignExpr (an lvalue)
+//   @compileError(m)  -> emits a diagnostic and aborts compilation
+enum class ReflectKind {
+    TypeName, FieldCount, HasField, Field, CompileError,
+    // Phase 2 scalar queries (fold to constants like the above):
+    VariantCount, AlignOf, OffsetOf, Implements,
+    IsInteger, IsFloat, IsClass, IsEnum, IsPrimitive
+};
+struct ReflectExpr {
+    Token                              at;         // the '@' token, for diagnostics
+    ReflectKind                        kind;
+    std::vector<Token>                 typeArgs;   // type-token args (e.g. T in @fields(T))
+    std::vector<std::unique_ptr<Expr>> valueArgs;  // value args (e.g. v, "x", or f.name)
+};
+
 // One arm of a `switch`. `labels` empty ⇒ the `default` arm. Exactly one of
 // `valueExpr` (arrow `-> expr` form) or `block` (arrow `-> { ... }` form) is set.
 // All members are pointers so the struct is usable while Expr/Stmt are incomplete
@@ -220,6 +240,7 @@ struct Expr {
         CastExpr,
         NewExpr,
         SizeofExpr,
+        ReflectExpr,
         SwitchExpr
     >;
     std::unique_ptr<Variant> node;
@@ -253,6 +274,18 @@ struct ForStmt {
     std::optional<Expr>   condition;
     std::optional<Expr>   increment;
     std::unique_ptr<Stmt> body;
+};
+
+// Compile-time reflection unroll: `inline for (v in @fields(T)) { body }`. TRANSIENT — the parser's
+// reflection-expansion pass replaces it (per field, once each) with ordinary statements, so it
+// never reaches semantic analysis or codegen. The body is kept as a raw token slice (not parsed)
+// so it can be re-parsed once per field with the loop binding substituted.
+struct InlineForStmt {
+    Token              keyword;      // the 'inline' token
+    Token              loopVar;      // the binding name (e.g. `f` / `v`)
+    Token              targetType;   // the type token inside @fields(T) / @variants(E)
+    std::vector<Token> bodyTokens;   // the `{ … }` body, captured verbatim (braces included)
+    bool               overVariants = false;  // false: @fields(T); true: @variants(E)
 };
 
 struct BreakStmt {
@@ -398,6 +431,7 @@ struct Stmt {
         IfStmt,
         WhileStmt,
         ForStmt,
+        InlineForStmt,
         BreakStmt,
         ContinueStmt,
         ReturnStmt,

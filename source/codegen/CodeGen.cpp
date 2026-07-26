@@ -32,6 +32,8 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->braceInitClass_ = &semanticResult.braceInitClass;
     this->callArgOrder_ = &semanticResult.callArgOrder;
     this->inferredVarType_ = &semanticResult.inferredVarType;
+    this->enumRegistry_ = &semanticResult.enumRegistry;
+    this->implementedTraits_ = &semanticResult.implementedTraits;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;

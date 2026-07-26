@@ -13,6 +13,7 @@ enum class TokenType {
     LEFT_BRACKET, RIGHT_BRACKET,
     COMMA, DOT, SEMICOLON,
     TILDE, QUESTION, COLON, COLON_COLON,
+    AT,   // '@' — prefix for compile-time reflection builtins (@fields, @typeName, …)
 
     // One or two character tokens.
     BANG, BANG_EQUAL,
@@ -37,6 +38,7 @@ enum class TokenType {
     PRIVATE, AS, NEW, SIZEOF, STATIC, MUT, TRAIT, IMPL, SELF, FN,
     SWITCH, CASE, DEFAULT, YIELD, NULL_LITERAL,
     QUESTION_DOT, QUESTION_COLON, BANG_BANG,
+    INLINE, IN,   // `inline for (x in @fields(T))` — compile-time reflection unroll
 
     // Type keywords — signed integers.
     I8, I16, I32, I64,

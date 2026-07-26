@@ -113,6 +113,9 @@ struct SemanticResult {
     ExprTypeMap typeMap;
     std::unordered_map<std::string, ClassInfo> classRegistry;
     std::unordered_map<std::string, EnumInfo>  enumRegistry;
+    // type name → set of trait names it implements (user + built-in). Surfaced for codegen's
+    // `@implements(T, Trait)` reflection fold (trait info is otherwise private to semantics).
+    std::unordered_map<std::string, std::unordered_set<std::string>> implementedTraits;
     // Chosen overload's mangled symbol name per call/new expression node (keyed by the
     // node's address). Absent/empty ⇒ the callee is not overloaded ⇒ use its plain name.
     std::unordered_map<const void*, std::string> resolvedCallee;
@@ -308,6 +311,7 @@ private:
     [[nodiscard]] Type analyzeCompoundAssign(const CompoundAssignExpr& compoundAssign);
     [[nodiscard]] Type analyzePostfix(const PostfixExpr& postfix);
     [[nodiscard]] Type analyzeCall(const CallExpr& call);
+    [[nodiscard]] Type analyzeReflect(const ReflectExpr& reflect);   // @typeName/@fieldCount/@hasField/…
     [[nodiscard]] Type analyzeVarDecl(const VarDeclExpr& varDecl);
     // Effective mutability of a parameter (`mut` flag); see the .cpp for the borrow rules.
     [[nodiscard]] bool paramIsMutable(const ParamDecl& param, const Type& resolvedType);

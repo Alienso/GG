@@ -1,4 +1,4 @@
-// stdlib/array.gg — a growable array (like C++'s std::vector), generic over the
+// stdlib/Array.gg — a growable array (like C++'s std::vector), generic over the
 // element type T.
 //
 // Storage is a single heap buffer of `T` values that grows geometrically (doubling)
@@ -21,64 +21,64 @@ class Array<T> {
     private mut u64    cap;    // number of slots allocated
 
     Array() {
-        this.count = 0;
-        this.cap   = 8;
-        this.data  = malloc(this.cap * sizeof(T));
+        count = 0;
+        cap   = 8;
+        data  = malloc(cap * sizeof(T));
     }
 
     ~Array() {
-        free(this.data);
+        free(data);
     }
 
     // ---- size / capacity ----
 
     fn size() -> u64 {
-        return this.count;
+        return count;
     }
 
     fn capacity() -> u64 {
-        return this.cap;
+        return cap;
     }
 
     fn isEmpty() -> bool {
-        return this.count == 0;
+        return count == 0;
     }
 
     // ---- mutators ----
 
     // Append `value` to the end, growing the buffer if it is full.
     fn push(T value) mut {
-        if (this.count == this.cap) {
-            this.grow();
+        if (count == cap) {
+            grow();
         }
-        this.data[this.count] = value;
-        this.count = this.count + 1;
+        data[count] = value;
+        count = count + 1;
     }
 
     // Remove and return the last element. The caller must ensure the array is not
     // empty (there is no exception mechanism to signal underflow).
     fn pop() mut -> T {
-        this.count = this.count - 1;
-        return this.data[this.count];
+        count = count - 1;
+        return data[count];
     }
 
     // Drop all elements (retains the allocated capacity).
     fn clear() mut {
-        this.count = 0;
+        count = 0;
     }
 
     // Ensure the buffer can hold at least `minCap` elements without reallocating.
     fn reserve(u64 minCap) mut {
-        if (minCap > this.cap) {
-            this.cap  = minCap;
-            this.data = realloc(this.data, this.cap * sizeof(T));
+        if (minCap > cap) {
+            cap  = minCap;
+            data = realloc(data, cap * sizeof(T));
         }
     }
 
     // Double the capacity (used when a push overflows the buffer).
     fn private grow() mut {
-        this.cap  = this.cap * 2;
-        this.data = realloc(this.data, this.cap * sizeof(T));
+        cap  = cap * 2;
+        data = realloc(data, cap * sizeof(T));
     }
 }
 
@@ -89,6 +89,6 @@ impl <T> Index for Array<T> {
         return data[i];
     }
     fn set(i32 i, T value) mut {
-        this.data[i] = value;
+        data[i] = value;
     }
 }

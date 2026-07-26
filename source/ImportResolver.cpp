@@ -95,9 +95,11 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
     fs::path parentDir = canonical.parent_path();
 
     for (size_t i = 0; i < tokens.size(); ++i) {
-        // Collect class names defined in this file
+        // Collect class and enum names defined in this file (both are type names — the
+        // monomorphization parser needs them to recognise e.g. `@variants(Color)` after a
+        // generic type parameter is substituted with a concrete enum).
         if (i + 1 < tokens.size()
-            && tokens[i].type    == TokenType::CLASS
+            && (tokens[i].type == TokenType::CLASS || tokens[i].type == TokenType::ENUM)
             && tokens[i + 1].type == TokenType::IDENTIFIER) {
             names.insert(tokens[i + 1].lexeme);
         }

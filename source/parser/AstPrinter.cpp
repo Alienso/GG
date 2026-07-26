@@ -192,6 +192,10 @@ void AstPrinter::printExpr(const Expr& expr) {
             out("Sizeof '" + sizeofExpr.typeName.lexeme + "'");
         },
 
+        [&](const ReflectExpr&) {
+            out("Reflect");
+        },
+
         [&](const SwitchExpr& switchExpr) {
             out("SwitchExpr");
             indent++;
@@ -267,6 +271,10 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             printStmt(*whileStmt.body);
             indent--;
             indent--;
+        },
+
+        [&](const InlineForStmt& inlineFor) {
+            out("InlineFor '" + inlineFor.loopVar.lexeme + " in @fields(" + inlineFor.targetType.lexeme + ")'");
         },
 
         [&](const ForStmt& forStmt) {

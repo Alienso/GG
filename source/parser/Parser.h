@@ -198,6 +198,25 @@ private:
                              std::vector<std::vector<Token>> args);
     void runMonomorphization(Program& program);
 
+    // ---- Compile-time reflection expansion (runs at the end of runMonomorphization) ----
+    // Build className -> ordered instance-field-name list from parsed ClassDeclStmts, then expand
+    // every `inline for (v in @fields(T))` into ordinary statements (one copy per field, with the
+    // binding token-substituted: `v.name` -> string literal, `@field(obj, v.name)` -> obj.field).
+    // className -> ordered instance-field names; enumName -> ordered variant names.
+    struct ReflectRegistry {
+        std::unordered_map<std::string, std::vector<std::string>> fields;
+        std::unordered_map<std::string, std::vector<std::string>> variants;
+    };
+    void expandReflection(Program& program);
+    void expandReflectionInStmt(Stmt& stmt, const ReflectRegistry& reg);
+    void expandReflectionInBlock(BlockStmt& block, const ReflectRegistry& reg);
+    // Substitute the inline-for binding in one member's copy of the captured body tokens.
+    //   fields   (overVariants=false): `v.name`->string, `@field(o,v.name)`->o.member, bare v = error
+    //   variants (overVariants=true):  `v.name`->string, bare v-> `Enum::member`, @field = error
+    std::vector<Token> substituteInlineForBody(const std::vector<Token>& bodyTokens,
+                                               const std::string& loopVar, const std::string& memberName,
+                                               bool overVariants, const std::string& enumName);
+
     // ---- Statement parsers ----
     [[nodiscard]] Stmt      parseDeclaration();
     [[nodiscard]] Stmt      parseClassDecl();
@@ -235,6 +254,7 @@ private:
     [[nodiscard]] Stmt      parseIfStmt();
     [[nodiscard]] Stmt      parseWhileStmt();
     [[nodiscard]] Stmt      parseForStmt();
+    [[nodiscard]] Stmt      parseInlineForStmt();   // `inline for (v in @fields(T)) { … }`
     [[nodiscard]] Stmt      parseReturnStmt();
     [[nodiscard]] Stmt      parseBreakStmt();
     [[nodiscard]] Stmt      parseContinueStmt();
@@ -262,6 +282,7 @@ private:
     [[nodiscard]] Expr parseUnary();
     [[nodiscard]] Expr parsePostfix();
     [[nodiscard]] Expr parsePrimary();
+    [[nodiscard]] Expr parseReflectExpr();   // `@name(args)` compile-time reflection builtin
 
     // Parse a call's argument list body (the opening delimiter is already consumed) up to and
     // including `close`. Fills `names` parallel to the returned exprs: a name with a non-empty

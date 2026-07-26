@@ -181,6 +181,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
         [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
+        [&](const ReflectExpr& reflect)              -> std::string { return genReflect(reflect); },
         [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
         [&](const NullLiteralExpr&)                  -> std::string { return "null"; },
         [&](const UnwrapExpr& unwrap)                -> std::string { return genUnwrap(unwrap); },
@@ -1559,6 +1560,132 @@ std::string CodeGen::genSizeof(const SizeofExpr& sizeofExpr) {
     std::string sz = freshTemp();
     emit("%" + sz + " = ptrtoint ptr %" + gep + " to i64");
     return "%" + sz;
+}
+
+// ---- compile-time reflection (scalar queries; inline for / @field are expanded in the parser) ----
+
+std::string CodeGen::genReflect(const ReflectExpr& r) {
+    auto baseName = [](std::string s) {
+        if (!s.empty() && s.back() == '?') s.pop_back();
+        if (s.rfind("ref:", 0) == 0)       s = s.substr(4);
+        if (!s.empty() && s.back() == '&') s.pop_back();
+        return s;
+    };
+    switch (r.kind) {
+        case ReflectKind::TypeName: {
+            // A private C-string constant of the type's display name (same shape as a "..." literal).
+            // Resolve the token directly: synthesized forms (Point&, ptr<>, nullable) via
+            // decodeSynthesizedType; a bare class/enum name is its own lexeme; else a primitive.
+            std::string name;
+            if (!r.typeArgs.empty()) {
+                const Token& tok = r.typeArgs[0];
+                Type synth = decodeSynthesizedType(tok);
+                if (!isError(synth))                        name = typeName(synth);
+                else if (tok.type == TokenType::IDENTIFIER) name = tok.lexeme;   // class / enum
+                else                                        name = typeName(typeFromToken(tok.type));
+            }
+            int totalBytes = static_cast<int>(name.size()) + 1;   // + null terminator
+            std::string globalName = "@.str." + std::to_string(stringCounter++);
+            module.globals.push_back(globalName + " = private unnamed_addr constant ["
+                + std::to_string(totalBytes) + " x i8] c\"" + name + "\\00\", align 1");
+            std::string tempName = freshTemp();
+            emit("%" + tempName + " = getelementptr inbounds [" + std::to_string(totalBytes)
+                + " x i8], ptr " + globalName + ", i32 0, i32 0");
+            return "%" + tempName;
+        }
+        case ReflectKind::FieldCount: {
+            std::string cls = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            auto it = cgClasses_.find(cls);
+            return std::to_string(it != cgClasses_.end() ? it->second.fields.size() : 0);
+        }
+        case ReflectKind::HasField: {
+            std::string cls = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            std::string want;
+            if (!r.valueArgs.empty())
+                if (const auto* lit = std::get_if<LiteralExpr>(r.valueArgs[0]->node.get()))
+                    want = lit->token.lexeme;
+            auto it = cgClasses_.find(cls);
+            bool has = false;
+            if (it != cgClasses_.end())
+                for (const auto& f : it->second.fields) if (f.first == want) { has = true; break; }
+            return has ? "1" : "0";
+        }
+        case ReflectKind::VariantCount: {
+            std::string en = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            auto it = enumRegistry_ ? enumRegistry_->find(en) : std::unordered_map<std::string, EnumInfo>::const_iterator{};
+            size_t n = (enumRegistry_ && it != enumRegistry_->end()) ? it->second.variantOrder.size() : 0;
+            return std::to_string(n);   // u64 immediate
+        }
+        case ReflectKind::AlignOf: {
+            // Resolve the type token, then reuse the natural-alignment layout computation.
+            Type t = resolveReflectType(r.typeArgs.empty() ? Token{TokenType::VOID, "void", r.at.line}
+                                                           : r.typeArgs[0]);
+            auto [sz, al] = dbgSizeAlign(t);
+            (void)sz;
+            return std::to_string(al);   // u64 immediate
+        }
+        case ReflectKind::OffsetOf: {
+            std::string cls = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            std::string want;
+            if (!r.valueArgs.empty())
+                if (const auto* lit = std::get_if<LiteralExpr>(r.valueArgs[0]->node.get()))
+                    want = lit->token.lexeme;
+            long long off = 0;
+            auto it = cgClasses_.find(cls);
+            if (it != cgClasses_.end())
+                for (const auto& f : it->second.fields) {
+                    auto [sz, al] = dbgSizeAlign(f.second);
+                    if (al > 0) off = ((off + al - 1) / al) * al;
+                    if (f.first == want) break;
+                    off += sz;
+                }
+            return std::to_string(off);   // u64 immediate (byte offset)
+        }
+        case ReflectKind::Implements: {
+            std::string ty = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            std::string trait = r.typeArgs.size() > 1 ? r.typeArgs[1].lexeme : "";
+            bool ok = false;
+            if (implementedTraits_) {
+                auto it = implementedTraits_->find(ty);
+                ok = it != implementedTraits_->end() && it->second.count(trait) > 0;
+            }
+            return ok ? "1" : "0";
+        }
+        case ReflectKind::IsInteger:
+        case ReflectKind::IsFloat:
+        case ReflectKind::IsClass:
+        case ReflectKind::IsEnum:
+        case ReflectKind::IsPrimitive: {
+            std::string base = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            TypeKind pk = typeKindFromName(base);   // Error unless a primitive spelling
+            bool isEn  = cgEnumNames_.count(base) > 0;
+            bool isCls = !isEn && cgClasses_.count(base) > 0;
+            bool prim  = isInteger(pk) || isFloat(pk) || pk == TypeKind::Bool || pk == TypeKind::Char;
+            bool ans = false;
+            switch (r.kind) {
+                case ReflectKind::IsInteger:   ans = isInteger(pk); break;
+                case ReflectKind::IsFloat:     ans = isFloat(pk);   break;
+                case ReflectKind::IsClass:     ans = isCls;         break;
+                case ReflectKind::IsEnum:      ans = isEn;          break;
+                case ReflectKind::IsPrimitive: ans = prim;          break;
+                default: break;
+            }
+            return ans ? "1" : "0";
+        }
+        default:
+            return "0";   // Field / CompileError never reach codegen
+    }
+}
+
+// Resolve a reflection type-argument token to a Type (for layout queries). Synthesized forms
+// (Point&, ptr<>, nullable) via decodeSynthesizedType; a bare identifier is a class/enum; else a
+// primitive keyword.
+Type CodeGen::resolveReflectType(const Token& tok) {
+    Type synth = decodeSynthesizedType(tok);
+    if (!isError(synth)) return synth;
+    if (tok.type == TokenType::IDENTIFIER)
+        return cgEnumNames_.count(tok.lexeme) ? makeEnumType(tok.lexeme) : makeObjectType(tok.lexeme);
+    return typeFromToken(tok.type);
 }
 
 // ---- new (heap allocation) ----

@@ -36,6 +36,27 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+# ---- Faster linking via lld ----
+# MinGW's default BFD `ld` links GG_tests (≈50 objects + Catch2, static libstdc++, debug info) in
+# ~85 s — the dominant cost of an edit-one-test-file rebuild. LLVM's `lld` does the same link in
+# ~8 s (≈11× faster) and produces an identical, working binary. Auto-detect `ld.lld` (shipped with
+# the mysys2 clang64 toolchain used by compile.ps1) and use it when present; otherwise fall back to
+# the default linker silently, so the build still works without clang64.
+# Override with -DGG_USE_LLD=OFF to force the default linker.
+option(GG_USE_LLD "Link with lld when available (much faster on MinGW)" ON)
+if(GG_USE_LLD)
+    find_program(GG_LLD ld.lld HINTS "C:/Program Files/mysys2/clang64/bin")
+    if(GG_LLD)
+        get_filename_component(GG_LLD_DIR ${GG_LLD} DIRECTORY)
+        # -fuse-ld=lld selects lld; -B adds its directory to the compiler's linker search path so
+        # the (separate-toolchain) ld.lld is found without touching PATH.
+        add_link_options(-fuse-ld=lld "-B${GG_LLD_DIR}")
+        message(STATUS "GG: linking with lld (${GG_LLD})")
+    else()
+        message(STATUS "GG: ld.lld not found; using the default linker (slower link)")
+    endif()
+endif()
+
 # ---- Sanitizers (opt-in, Debug builds recommended) ----
 # Enable with:  cmake -DGG_SANITIZERS=ON ...
 # On MinGW-w64 GCC 13 both ASan and UBSan are supported.
@@ -125,6 +146,7 @@ add_executable(GG_tests
         tests/named_args_tests.cpp
         tests/nullable_tests.cpp
         tests/var_infer_tests.cpp
+        tests/reflect_tests.cpp
         ${GG_SOURCES}
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})

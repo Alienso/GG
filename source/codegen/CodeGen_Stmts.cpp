@@ -14,6 +14,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const IfStmt& ifStmt)          { genIf(ifStmt); },
         [&](const WhileStmt& whileStmt)    { genWhile(whileStmt); },
         [&](const ForStmt& forStmt)        { genFor(forStmt); },
+        [&](const InlineForStmt&)          { /* expanded to plain statements by the parser */ },
         [&](const ReturnStmt& returnStmt)    { genReturn(returnStmt); },
         [&](const BreakStmt& breakStmt)     { genBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },

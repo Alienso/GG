@@ -162,6 +162,73 @@ mut var total = 0;      // mutable; `total = total + i;` is allowed
 You cannot infer from something with no value type: `var x = null;` (annotate the nullable type),
 a `void`-returning call, or a lambda literal are all errors.
 
+### Compile-time reflection — `inline for` + `@`-builtins
+
+Reflection in GG is **compile-time only** and costs nothing at runtime — the compiler unrolls it
+into ordinary code during compilation. Use it to write generic code over a type's fields.
+
+`inline for (f in @fields(T)) { … }` is a **compile-time loop**: the body is copied once per field
+of `T` (it is *not* a runtime loop). Inside it, `f.name` is the field's name as a string, and
+`@field(v, f.name)` accesses that field of `v` (readable, and assignable — an lvalue):
+
+```gg
+// a generic structural-equality function
+fn eqAll<T>(T& a, T& b) -> bool {
+    inline for (f in @fields(T)) {
+        if (@field(a, f.name) != @field(b, f.name)) { return false; }
+    }
+    return true;
+}
+```
+
+For `T = Point { i32 x; i32 y }` this expands, at compile time, into two straight-line comparisons —
+no loop, no runtime type data.
+
+You can also iterate an **enum's variants** at compile time. Inside `inline for (v in @variants(E))`,
+the binding `v` is the variant's singleton value (compare it with `==`) and `v.name` is its name:
+
+```gg
+enum Color { RED, GREEN, BLUE }
+
+// the position of a variant in declaration order
+fn ordinal(Color c) -> i32 {
+    mut i32 i = 0;
+    inline for (v in @variants(Color)) {
+        if (c == v) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+```
+
+Scalar queries fold to compile-time constants (like `sizeof`):
+
+```gg
+@typeName(Point)        // "Point"   (a string)
+@fieldCount(Point)      // 2         (u64)
+@hasField(Point, "x")   // true      (bool)
+@offsetOf(Point, "y")   // 4         (u64 — byte offset of the field)
+@alignOf(f64)           // 8         (u64 — natural alignment)
+@variantCount(Color)    // 3         (u64)
+@compileError("msg")    // aborts compilation with a message
+```
+
+Type predicates answer with a `bool` (usable directly as an `if` condition):
+
+```gg
+@isInteger(i32)         // true
+@isFloat(f64)           // true
+@isClass(Point)         // true
+@isEnum(Color)          // true
+@isPrimitive(bool)      // true
+@implements(Point, Eq)  // true if Point has an `impl Eq for Point` (user or built-in trait)
+```
+
+`inline for` iterates only compile-time-known sequences (`@fields(T)` / `@variants(E)`); the binding
+is a compile-time value (usable as `.name`, inside `@field`, or as the variant value — not stored or
+passed as a runtime value). `break`/`continue` are not allowed directly inside an `inline for`.
+Runtime reflection (asking a value its type, downcasting) does not exist — GG is static-dispatch only.
+
 ### Mutability — `const` by default, `mut` to opt in
 
 Every binding is **immutable by default**. A const variable may be given a value exactly
@@ -1555,7 +1622,7 @@ Attempting them will produce a compile error (or will simply not parse).
 | Missing feature | Notes |
 |-----------------|-------|
 | Type inference (return / params) | `var` infers **local** variable types; parameter, field, and return types are always written explicitly |
-| `typeof` / reflection | No runtime type information |
+| Runtime reflection (`typeof`, downcast) | No runtime type information — reflection is **compile-time only** (see below) |
 | Compile-time evaluation (`constexpr`) | `sizeof(T)` is the only compile-time computation |
 | Preprocessor / macros | None — generics handle the primary use case |
 | Modules / namespaces | No namespacing; all declarations share a flat global scope |

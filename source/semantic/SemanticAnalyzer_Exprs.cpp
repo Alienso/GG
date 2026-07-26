@@ -42,6 +42,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
+        [&](const ReflectExpr& reflect)               { return analyzeReflect(reflect); },
         [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
         [&](const NullLiteralExpr&)                   { return makeNullType(); },
         [&](const UnwrapExpr& unwrap)                 { return analyzeUnwrap(unwrap); },
@@ -49,6 +50,78 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
     }, *expr.node);
     recordType(expr, resolvedType);
     return resolvedType;
+}
+
+// Reduce a type token lexeme to its base class name (drop '?', "ref:", trailing '&').
+static std::string reflBaseClassName(std::string s) {
+    if (!s.empty() && s.back() == '?') s.pop_back();
+    if (s.rfind("ref:", 0) == 0)       s = s.substr(4);
+    if (!s.empty() && s.back() == '&') s.pop_back();
+    return s;
+}
+
+// Compile-time reflection builtins that survive to semantics (the scalar queries). `inline for`,
+// `@field`, and `f.name` are expanded away by the parser and never reach here.
+Type SemanticAnalyzer::analyzeReflect(const ReflectExpr& r) {
+    switch (r.kind) {
+        case ReflectKind::TypeName:
+            // A compile-time string, represented like a normal string literal (ptr to bytes).
+            return Type{TypeKind::Ptr};
+
+        case ReflectKind::FieldCount:
+        case ReflectKind::HasField:
+        case ReflectKind::OffsetOf: {
+            std::string cls = reflBaseClassName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            if (!classRegistry.count(cls) || enumRegistry.count(cls))
+                error(r.at, "reflection query: '" + cls + "' is not a class type");
+            if (!r.valueArgs.empty()) analyzeExpr(*r.valueArgs[0]);   // the "name" string, if any
+            // @offsetOf's field name must be a string literal naming an actual instance field.
+            if (r.kind == ReflectKind::OffsetOf && classRegistry.count(cls)) {
+                std::string field;
+                if (!r.valueArgs.empty())
+                    if (const auto* lit = std::get_if<LiteralExpr>(r.valueArgs[0]->node.get()))
+                        if (lit->token.type == TokenType::STRING) field = lit->token.lexeme;
+                const auto& fields = classRegistry.at(cls).fields;   // instance fields only
+                if (field.empty() || !fields.count(field))
+                    error(r.at, "@offsetOf: '" + cls + "' has no instance field '" + field + "'");
+            }
+            return r.kind == ReflectKind::HasField ? Type{TypeKind::Bool} : Type{TypeKind::U64};
+        }
+
+        case ReflectKind::VariantCount: {
+            std::string en = reflBaseClassName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            if (!enumRegistry.count(en))
+                error(r.at, "@variantCount: '" + en + "' is not an enum type");
+            return Type{TypeKind::U64};
+        }
+
+        case ReflectKind::AlignOf:
+            // Works on any type (primitive / class / enum); the fold happens in codegen.
+            return Type{TypeKind::U64};
+
+        case ReflectKind::Implements:
+        case ReflectKind::IsInteger:
+        case ReflectKind::IsFloat:
+        case ReflectKind::IsClass:
+        case ReflectKind::IsEnum:
+        case ReflectKind::IsPrimitive:
+            // Compile-time predicates — always a bool; the value is folded in codegen.
+            return Type{TypeKind::Bool};
+
+        case ReflectKind::CompileError: {
+            std::string msg = "compile-time error";
+            if (!r.valueArgs.empty())
+                if (const auto* lit = std::get_if<LiteralExpr>(r.valueArgs[0]->node.get()))
+                    if (lit->token.type == TokenType::STRING) msg = lit->token.lexeme;
+            error(r.at, msg);
+            return Type{TypeKind::Error};
+        }
+
+        case ReflectKind::Field:
+            error(r.at, "'@field' is only valid inside an 'inline for' body");
+            return Type{TypeKind::Error};
+    }
+    return Type{TypeKind::Error};
 }
 
 Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {

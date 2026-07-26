@@ -1,0 +1,66 @@
+// Compile-time reflection e2e: generic field-walking via `inline for` + `@field`, plus @fieldCount.
+// All work is a compile-time unroll (zero runtime reflection). Expected exit code: 0.
+
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } }
+
+// Generic structural equality — compares every field.
+fn eqAll<T>(T& a, T& b) -> bool {
+    inline for (f in @fields(T)) {
+        if (@field(a, f.name) != @field(b, f.name)) { return false; }
+    }
+    return true;
+}
+
+// Generic field-zeroing via @field as an lvalue.
+fn zeroAll<T>(mut T& v) {
+    inline for (f in @fields(T)) { @field(v, f.name) = 0; }
+}
+
+// --- Phase 2: enums, layout, predicates ---
+enum Color { RED, GREEN, BLUE }
+
+// Count the variants of an enum by unrolling over @variants (compile-time).
+fn variantCount<T>() -> i32 {
+    mut i32 n = 0;
+    inline for (v in @variants(T)) { n = n + 1; }
+    return n;
+}
+
+// Position of a variant in declaration order (identity compare against each singleton).
+fn ordinal(Color c) -> i32 {
+    mut i32 i = 0;
+    inline for (v in @variants(Color)) {
+        if (c == v) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn main() -> i32 {
+    mut Point p = Point(1, 2);
+    Point q = Point(1, 2);
+    Point r = Point(1, 9);
+
+    mut i32 ok = 0;
+    if (eqAll<Point>(p, q))          { ok = ok + 1; }   // identical fields -> equal
+    if (eqAll<Point>(p, r) == false) { ok = ok + 1; }   // differing field  -> not equal
+    if (@fieldCount(Point) == 2)     { ok = ok + 1; }   // two fields
+
+    zeroAll<Point>(p);
+    if (p.x == 0 && p.y == 0)        { ok = ok + 1; }   // every field written via @field
+
+    // Enum reflection.
+    if (variantCount<Color>() == 3)  { ok = ok + 1; }   // @variants unroll count
+    if (@variantCount(Color) == 3)   { ok = ok + 1; }   // scalar fold
+    if (ordinal(Color::GREEN) == 1)  { ok = ok + 1; }   // per-variant identity match
+
+    // Layout + predicates (compile-time folds).
+    if (@alignOf(f64) == 8)          { ok = ok + 1; }
+    if (@offsetOf(Point, "y") == 4)  { ok = ok + 1; }   // second i32 field
+    if (@isInteger(i32))             { ok = ok + 1; }
+    if (@isEnum(Color))              { ok = ok + 1; }
+    if (@isClass(Point))             { ok = ok + 1; }
+
+    if (ok == 12) { return 0; }
+    return 1;
+}

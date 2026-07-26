@@ -27,6 +27,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const CastExpr& castExpr)              const { return exprFirstToken(*castExpr.operand); }
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
+        const Token& operator()(const ReflectExpr& reflect)            const { return reflect.at; }
         const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
         const Token& operator()(const NullLiteralExpr& n)              const { return n.keyword; }
         const Token& operator()(const UnwrapExpr& u)                   const { return exprFirstToken(*u.operand); }
@@ -70,6 +71,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         },
         [](const WhileStmt&)           { return false; },  // may not execute
         [](const ForStmt&)             { return false; },  // may not execute
+        [](const InlineForStmt&)       { return false; },  // expanded pre-analysis; conservative here
         [](const BreakStmt&)           { return false; },
         [](const ContinueStmt&)        { return false; },
         [](const SwitchStmt& sw)       {
@@ -104,6 +106,10 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const IfStmt& ifStmt)                  { analyzeIf(ifStmt); },
         [&](const WhileStmt& whileStmt)            { analyzeWhile(whileStmt); },
         [&](const ForStmt& forStmt)                { analyzeFor(forStmt); },
+        // `inline for` is expanded by the parser before analysis. It only reaches here in the
+        // generic-body check (over an abstract type parameter, where @fields can't be enumerated) —
+        // skip it; the concrete instantiations are fully checked after monomorphization.
+        [&](const InlineForStmt&)                  { /* skip */ },
         [&](const ReturnStmt& returnStmt)            { analyzeReturn(returnStmt); },
         [&](const BreakStmt& breakStmt)             { analyzeBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },

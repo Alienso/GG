@@ -21,6 +21,17 @@ cmake --build cmake-build-debug --target GG --parallel
 cmake -S . -B cmake-build-debug
 ```
 
+**Linking uses `lld` when available** (auto-detected from the mysys2 clang64 toolchain; see the
+`GG_USE_LLD` block in CMakeLists.txt). MinGW's default BFD `ld` links `GG_tests` (~50 objects +
+Catch2, static, with debug info) in ~85 s — the dominant cost of an edit-one-test-file rebuild; lld
+does it in ~8 s (≈11×), cutting that rebuild loop from ~88 s to ~12 s. It falls back to the default
+linker silently if `ld.lld` isn't found; force the default with `-DGG_USE_LLD=OFF`.
+**Test-suite runtime is a non-issue** (~5 s for the whole suite; the slowest single case is ~30 ms —
+each test's cost is the temp-file round-trip in the `parseString`/`analyzeString` helpers, not
+computation). If test *build* time ever needs more: the compiler sources (`${GG_SOURCES}`) are
+currently compiled **twice** (once for `GG`, once for `GG_tests`) — factoring them into a
+`gg_core` static library would halve that (helps clean / header-change builds, not the link).
+
 ## compile.ps1 — compile a .gg file to a native Windows x86-64 executable
 
 ```powershell
@@ -827,6 +838,54 @@ codegen gain **no new type-kind and no new branch** beyond the inference site.
   the capture's type at parse time, before inference runs). Rare; a clear failure, not a miscompile.
 - Tests: `tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`.
 
+### Compile-time reflection — `@`-sigil builtins + `inline for` (Phases 1 & 2)
+Zig-style compile-time reflection with **zero runtime cost** — no runtime type tags, no vtables, no
+CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@`-prefixed builtins
+(the `@` sigil keeps them out of the identifier namespace and marks them as compiler intrinsics).
+- **Surface (fields)**: `inline for (f in @fields(T)) { … }` (compile-time unroll; `f.name` is the
+  field-name string, `@field(v, f.name)` is the field as an lvalue — read or assignment target);
+  scalar queries `@fieldCount(T)`→u64, `@hasField(T,"x")`→bool, `@offsetOf(T,"x")`→u64 (byte offset).
+- **Surface (enums, Phase 2)**: `inline for (v in @variants(E)) { … }` — one body copy per variant;
+  bare `v` lowers to the variant singleton `E::VARIANT`, `v.name` to the variant-name string;
+  `@variantCount(E)`→u64.
+- **Surface (type-level)**: `@typeName(T)`→string; layout `@alignOf(T)`→u64; predicates
+  `@isInteger/@isFloat/@isClass/@isEnum/@isPrimitive(T)`→bool and `@implements(T, Trait)`→bool
+  (user **and** built-in operator traits); `@compileError("msg")` aborts compilation.
+- **AST (transient)**: `InlineForStmt{keyword,loopVar,targetType,bodyTokens,overVariants}` (body
+  captured as a raw **token slice**, not parsed; `overVariants` picks fields vs enum variants) and
+  `ReflectExpr{at,kind,typeArgs,valueArgs}` (one node, `ReflectKind` enum). Lexer: `@`→`AT`, plus
+  `inline`/`in` keywords.
+- **Key design — expansion in a post-monomorphization PARSER pass** (`Parser::expandReflection`, run
+  at the end of `runMonomorphization`, so it sees every class/enum incl. monomorphized ones).
+  Generics are monomorphized *before* semantics, so the parser has type names but not field/variant
+  lists — hence reflection can't expand *during* monomorphization like generics do, and a
+  "double-iterate the body in semantic+codegen" scheme would break GG's one-AST-node→one-resolution
+  invariant (the node-address-keyed side tables). Instead: `inline for` bodies are captured as
+  tokens; the pass builds a `ReflectRegistry` (`className → ordered field names`, `enumName → ordered
+  variant names`) from the parsed `ClassDeclStmt`/`EnumDeclStmt`s, then **re-parses the body once per
+  member** (`substituteInlineForBody`: `v.name`→a `STRING` literal; for fields `@field(obj,v.name)`→
+  `(obj).<field>`, for variants bare `v`→`Enum::variant`; nested `inline for` handled by leaving
+  other-binding references verbatim + a fixpoint recurse). Everything lowers to **ordinary AST**
+  (member accesses, `Enum::V`, literals) → **semantic and codegen need almost no reflection logic**,
+  only: scalar-query arms (`analyzeReflect`/`genReflect`) that fold each `@`-query to a constant like
+  `sizeof`, plus trivial guard arms for the transient nodes. `@compileError` errors in `analyzeReflect`.
+- **Scalar folds (codegen)**: `genReflect` computes each query's constant — `@typeName` a private
+  C-string; counts/offsets/alignment from `cgClasses_`/`enumRegistry_`/`dbgSizeAlign` (the same
+  natural-alignment layout used by DWARF); predicates from the base type name vs `cgClasses_`/
+  `cgEnumNames_`/`typeKindFromName`; `@implements` from `implementedTraits_` (surfaced onto
+  `SemanticResult` — trait info is otherwise private to semantics). No `comptime if` yet, so a
+  predicate is just an `i1` constant usable at runtime (e.g. as an `if` condition).
+- **Rulings**: `break`/`continue` directly in an `inline for` (brace-depth 1) is an error; `@field`
+  as an lvalue reuses `MemberAssignExpr` (so `mut`-field gating applies for free); an `inline for`
+  over an abstract `TypeParam` in `checkGenericBodies` is skipped (validated at each concrete
+  instantiation instead); `@field`/`@fields`/`@variants` outside their valid positions are parse
+  errors; `@offsetOf` on a missing field and `@variantCount`/`@fieldCount` on the wrong type kind are
+  semantic errors. **Enum names are type names to the monomorphizer** — `ImportResolver::collectClassNames`
+  collects `enum` names too, so `@variants(T)` works after `T` is substituted with a concrete enum.
+- **Phase 3 (deferred)**: `f.type`/indexed `@fieldName`/`@fieldType`, `comptime if` (per-type
+  specialization), method reflection (`@methods`/`@hasMethod`).
+- Tests: `tests/reflect_tests.cpp` (`[reflect]`), `e2e/reflect_test.gg`.
+
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
   lower to LLVM `ptr`. Intended for stdlib/CRT container internals. **No bounds check.**
@@ -949,6 +1008,27 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**981 test cases / 1851 assertions** (as of **compile-time reflection, Phase 2** — enum + type-level
+queries on top of Phase 1: `inline for (v in @variants(E)) { … }` unrolls once per variant (bare `v`
+→ the singleton `E::VARIANT`, `v.name` → the variant-name string); scalar folds `@variantCount(E)`,
+`@alignOf(T)`, `@offsetOf(T,"f")`; predicates `@isInteger/@isFloat/@isClass/@isEnum/@isPrimitive(T)`
+and `@implements(T, Trait)` (user + built-in operator traits). Same post-monomorphization
+`Parser::expandReflection` pipeline as Phase 1 — each query folds to a constant in `genReflect`
+(layout via `dbgSizeAlign`, traits via `implementedTraits` surfaced onto `SemanticResult`), no
+`comptime if` yet (a predicate is an `i1` constant). `ImportResolver::collectClassNames` now also
+collects `enum` names so `@variants(T)` works after a generic type param is substituted with a
+concrete enum. Deferred to Phase 3: `f.type`/indexed field type queries, `comptime if`, method
+reflection. See the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 33
+cases), `e2e/reflect_test.gg`. Prior baseline was
+**966 test cases / 1828 assertions** (as of **compile-time reflection, Phase 1** — `@`-sigil builtins
++ `inline for`: `inline for (f in @fields(T)) { … }` unrolls at compile time (one body copy per
+field, `f.name` → the field-name string, `@field(v, f.name)` → ordinary member access), and scalar
+queries `@typeName(T)` / `@fieldCount(T)` / `@hasField(T,"x")` fold to constants like `sizeof`;
+`@compileError(msg)` aborts compilation. Implemented as a **post-monomorphization parser expansion
+pass** (`Parser::expandReflection`) that lowers everything to ordinary AST — semantic/codegen get only
+scalar-query arms + trivial guards, no reflection logic. Zero runtime cost; no runtime type info. See
+the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 18 cases),
+`e2e/reflect_test.gg`. Prior baseline was
 **948 test cases / 1801 assertions** (as of **mixed signed/unsigned arithmetic resolves to the SIGNED
 type**, plus a **shift-signedness fix** surfaced by it. GG departs from C's "unsigned wins":
 `commonArithmeticType` returns a *signed* int of the wider width for a mixed pair, so `-6 / 3u == -2`

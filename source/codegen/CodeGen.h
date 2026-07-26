@@ -118,6 +118,10 @@ private:
     // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
     // genVarDecl / genStaticLocal resolve the deduced type like an explicit annotation.
     const std::unordered_map<const void*, Token>* inferredVarType_ = nullptr;
+    // Enum name → semantic info (variant list) — for `@variantCount`. From SemanticResult.
+    const std::unordered_map<std::string, EnumInfo>* enumRegistry_ = nullptr;
+    // type name → traits it implements (user + built-in) — for `@implements`. From SemanticResult.
+    const std::unordered_map<std::string, std::unordered_set<std::string>>* implementedTraits_ = nullptr;
     // The effective type token of a var-decl: the inferred token for a `var`, else its own.
     Token varDeclTypeToken(const VarDeclExpr& varDecl) const;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is
@@ -325,6 +329,8 @@ private:
     std::string genCast(const CastExpr& castExpr, const Type& toType);
     std::string genNew(const NewExpr& newExpr, const Type& resolvedType);
     std::string genSizeof(const SizeofExpr& sizeofExpr);
+    std::string genReflect(const ReflectExpr& reflect);   // @typeName/@fieldCount/@hasField/…
+    Type        resolveReflectType(const Token& tok);      // reflection type-arg token → Type
 
     // ---- Destructor helpers ----
     // Emit destructor / release calls for all entries in one scope (reverse order).

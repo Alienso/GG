@@ -891,6 +891,46 @@ CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@
   specialization), method reflection (`@methods`/`@hasMethod`).
 - Tests: `tests/reflect_tests.cpp` (`[reflect]`), `e2e/reflect_test.gg`.
 
+### Annotations — compile-time metadata (`annotation` + `@Name`)
+User-defined compile-time metadata on declarations, read only by reflection. **Zero runtime cost, no
+runtime representation** — an annotation emits **no IR** (no struct/ctor); it's collected into a
+registry and folded away, riding the same reflection-expansion pipeline.
+- **Surface**: `annotation Name { <const fields> }` declares a metadata type (fields limited to
+  `str`/primitive/`bool`/`char`/enum — the comptime-constant set; **no methods**). `@Name(args)`
+  prefixes a **class / field / method / enum-variant** (args must be compile-time constants). Read
+  inside `inline for`: `f.has(Ann)`→bool, `f.get(Ann).field`→the const value; type-level
+  `@hasAnnotation(T, Ann)`→bool (type or any member carries it).
+- **`@`-disambiguation (the load-bearing rule)**: a leading `@` in **declaration/member position**
+  is an annotation **iff the name is Capitalized** (`@Skip`); a lowercase `@name` (`@compileError`,
+  `@typeName`) is a reflection builtin and falls through to the statement/expression path. Position
+  alone is insufficient because statement-level builtins (`@compileError`) also start a statement —
+  case is the tiebreaker. (`parseDeclaration` gates on `std::isupper`; member/variant positions have
+  no builtins so any `@` there is an annotation.)
+- **AST**: `AnnotationDeclStmt{name, deque<FieldDecl> fields}` (Stmt variant, no-codegen like a
+  trait); `AnnotationApp{name, args (Exprs), argTokens}` on `FieldDecl`/`MethodDecl`/`ClassDeclStmt`/
+  `EnumVariant` (as `std::deque<AnnotationApp>` — `AnnotationApp` holds a const-member `Token`, so its
+  move isn't noexcept → `vector` would copy-on-grow and hit `Token`'s deleted copy-assign; deque
+  doesn't relocate). `ReflectKind::HasAnnotation`.
+- **Reading — token-splice, no Expr→token reconstruction**: `parseAnnotationPrefixes` captures each
+  arg's **raw source tokens** (`AnnotationApp::argTokens`) at parse time. `expandReflection` builds
+  the annotation tables into `ReflectRegistry` (annotation types, per-member names, `annotationFields`
+  order, per-member arg tokens, per-field-type default placeholder); `substituteInlineForBody` folds
+  `v.has(Ann)`→`true`/`false` and `v.get(Ann).field`→the spliced arg tokens.
+- **The comptime-if gap (important)**: `inline for` unrolls the body per member and folds `f.get`
+  **unconditionally** — an enclosing `if (f.has(Ann))` does NOT prune the dead branch (`comptime if`
+  is deferred). So `f.get(Ann).field` on a member that **lacks** `Ann` folds to a **type-appropriate
+  default placeholder** (`0`/`""`/`false`) instead of erroring — only ever reached in a false-guarded
+  dead branch. Trade-off: an *unguarded* `f.get` on an absent annotation silently defaults rather than
+  erroring (documented v1 limitation).
+- **Semantic** (`collectAnnotations`, pass 0b'): registers `annotation` types (`annotationRegistry`),
+  records per-type annotation names (`typeAnnotations`, surfaced on `SemanticResult` for codegen's
+  `@hasAnnotation` fold like `implementedTraits`), and validates each application — **unknown
+  annotation**, **duplicate on one target**, **arg-count mismatch**, and **non-constant arg**
+  (`isConstantExpr`). `analyzeAnnotationDecl` validates field types are comptime-representable.
+- **v1 limits**: no `@Target` restrictions, no annotation inheritance / annotations-on-annotations /
+  repeatable, enum-variant args (`Enum::V`) not spliceable, and `f.get` needs `f.has` guarding.
+- Tests: `tests/annotation_tests.cpp` (`[annotation]`), `e2e/annotation_test.gg`.
+
 ### ptr<T> — typed raw pointer
 - `ptr` and `ptr<T>` (e.g. `ptr<i32>`, `ptr<Point&>`) are low-level raw pointers;
   lower to LLVM `ptr`. Intended for stdlib/CRT container internals. **No bounds check.**
@@ -1047,6 +1087,29 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1024 test cases / 1921 assertions** (as of a **QA edge-case pass over annotations** — added
+field-type coverage (`f.get` splicing `char`/`bool` const values), target coverage (`@hasAnnotation`
+seeing a **method-carried** and a **class-level** annotation), and more error cases
+(non-comptime annotation field type, annotation/class name collision, `@hasAnnotation` with an
+undeclared annotation). The pass surfaced and fixed a **pre-existing `char` bug**: `integerLiteralFits`
+had no `Char` case, so **any** integer literal adopted into `char` (`char c = 65;`, and the annotation
+`f.get` char-field default placeholder) spuriously warned "does not fit in 'char'" — `char` is a
+32-bit code point (u32 range), now handled; the char-field placeholder is also a `char` literal, not a
+numeric `0`. `tests/annotation_tests.cpp` (`[annotation]`, 22 cases), `tests/cast_tests.cpp`
+(`[numlit]` char adoption). Prior baseline was
+**1015 test cases / 1906 assertions** (as of **user-defined annotations — compile-time metadata,
+Phases 1 & 2** — `annotation Name { <const fields> }` declares a metadata type (no methods; fields
+limited to the comptime-constant set: `str`/primitive/`bool`/`char`/enum); `@Name(args)` prefixes a
+class / field / method / enum-variant with compile-time-constant args. Read only via reflection:
+`f.has(Ann)`→bool and `f.get(Ann).field`→the const value inside `inline for`, and type-level
+`@hasAnnotation(T, Ann)`→bool. **Zero runtime cost, no IR** — annotation arg tokens are captured raw
+at parse time and spliced by the same post-monomorphization `expandReflection` pass. A leading `@` in
+declaration position is disambiguated from a reflection builtin by **case** (Capitalized = annotation).
+Semantic validation (`collectAnnotations`): unknown-annotation / duplicate-on-target / arg-count /
+non-constant-arg errors. v1 limits: `comptime if` isn't pruned so an unguarded `f.get` on an absent
+annotation folds to a type-default placeholder (`f.has`-guard it); no `@Target`, no enum-variant-arg
+splicing. See the "Annotations" invariant; `tests/annotation_tests.cpp` (`[annotation]`, 14 cases),
+`e2e/annotation_test.gg`. Prior baseline was
 **1001 test cases / 1883 assertions** (as of **the `str` compile-time string-literal type, Phases 1 & 2** —
 a string literal is typed `str` (an immutable `{ ptr, i64 }` view over static bytes) instead of a
 raw `ptr`: `.data` decays to a NUL-terminated `ptr` for FFI, `.len` is the O(1) byte length, `str`

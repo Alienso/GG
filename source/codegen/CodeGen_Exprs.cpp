@@ -1664,6 +1664,16 @@ std::string CodeGen::genReflect(const ReflectExpr& r) {
             }
             return ok ? "1" : "0";
         }
+        case ReflectKind::HasAnnotation: {
+            std::string ty  = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);
+            std::string ann = r.typeArgs.size() > 1 ? r.typeArgs[1].lexeme : "";
+            bool ok = false;
+            if (typeAnnotations_) {
+                auto it = typeAnnotations_->find(ty);
+                ok = it != typeAnnotations_->end() && it->second.count(ann) > 0;
+            }
+            return ok ? "1" : "0";
+        }
         case ReflectKind::IsInteger:
         case ReflectKind::IsFloat:
         case ReflectKind::IsClass:

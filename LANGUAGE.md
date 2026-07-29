@@ -249,6 +249,62 @@ is a compile-time value (usable as `.name`, inside `@field`, or as the variant v
 passed as a runtime value). `break`/`continue` are not allowed directly inside an `inline for`.
 Runtime reflection (asking a value its type, downcasting) does not exist — GG is static-dispatch only.
 
+### Annotations — compile-time metadata
+
+An `annotation` is a user-defined metadata type you attach to declarations and read back through
+reflection. It has **no runtime representation** and emits **no code** — it exists purely to drive
+compile-time generation (serializers, validators, key remapping, etc.).
+
+Declare one with the `annotation` keyword. Its body holds only compile-time-constant fields
+(`str`, primitives, `bool`, `char`, or enums) — no methods:
+
+```gg
+annotation Skip {}                       // a marker (no fields)
+annotation Rename { str key; }           // one str field
+annotation Range  { i32 lo; i32 hi; }    // two int fields
+```
+
+Apply one with an `@Name(args)` prefix on a **class, field, method, or enum variant**. Arguments
+must be compile-time constants and match the annotation's field list:
+
+```gg
+class User {
+    @Rename("user_id") mut i32 id;
+    @Skip              mut i32 cache;
+    @Range(0, 150)     mut i32 age;
+}
+```
+
+Read annotations inside an `inline for`, or at the type level:
+
+```gg
+fn serialize<T>(T& v) -> i32 {
+    mut i32 acc = 0;
+    inline for (f in @fields(T)) {
+        if (!f.has(Skip)) { acc = acc + @field(v, f.name); }   // skip @Skip fields
+        if (f.has(Range)) {                                     // read @Range's data
+            i32 x = @field(v, f.name);
+            if (x < f.get(Range).lo) { return 0 - 1; }
+        }
+    }
+    return acc;
+}
+
+@hasAnnotation(User, Skip)   // true — the type or any member carries @Skip
+```
+
+- `f.has(Ann)` → `bool`: does the current member carry `Ann`.
+- `f.get(Ann).field` → the constant value of that annotation field.
+- `@hasAnnotation(T, Ann)` → `bool`: does the type `T` or any of its members carry `Ann`.
+
+A capitalized `@Name` in declaration position is an annotation; a lowercase `@name` (like
+`@fields`, `@typeName`, `@compileError`) is a reflection builtin.
+
+**Note:** an `inline for` unrolls unconditionally, so guard every `f.get(Ann)` with `if (f.has(Ann))`.
+On a member that lacks `Ann`, an unguarded `f.get(Ann).field` folds to a type-default placeholder
+(`0` / `""` / `false`) rather than an error (a `comptime if` that prunes such branches is a future
+addition).
+
 ### Mutability — `const` by default, `mut` to opt in
 
 Every binding is **immutable by default**. A const variable may be given a value exactly

@@ -58,6 +58,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     functionRegistry.clear();
     traitRegistry.clear();
     implementedTraits.clear();
+    annotationRegistry.clear();
+    typeAnnotations.clear();
     currentSelfType_ = "";
     currentReturnSlotName_ = "";
     resolvedCallee.clear();
@@ -71,6 +73,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     collectClasses(program);    // pass 0: build class registry
     checkValueFieldCycles(program); // pass 0a: reject infinite-size value-object embedding cycles
     collectTraits(program);     // pass 0b: register trait contracts
+    collectAnnotations(program);// pass 0b': register annotation types + per-type annotation names
     collectImpls(program);      // pass 0c: attach impl methods to their class + check conformance
     checkGenericBounds(program);// pass 0d: verify generic trait-bound obligations
     collectFunctions(program);  // pass 1: hoist function signatures
@@ -87,7 +90,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
         if (traits.count("Eq")) eqImpls.insert(type);
 
     return SemanticResult{hadError, std::move(typeMap), classRegistry, enumRegistry,
-                          implementedTraits,
+                          implementedTraits, typeAnnotations,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
                           std::move(structuralValueCmp_), std::move(eqImpls),
                           std::move(callableCalls_), std::move(braceInitClass_),
@@ -372,6 +375,67 @@ void SemanticAnalyzer::collectTraits(const Program& program) {
                 error(md.name, "default trait method bodies are not yet supported; "
                       "declare a signature ending in ';'");
         traitRegistry[tr.name.lexeme] = &tr;
+    }
+}
+
+void SemanticAnalyzer::collectAnnotations(const Program& program) {
+    // 1. Register annotation types; reject collisions with existing type/trait names.
+    for (const Stmt& stmt : program.declarations) {
+        if (!std::holds_alternative<AnnotationDeclStmt>(*stmt.node)) continue;
+        const auto& an = std::get<AnnotationDeclStmt>(*stmt.node);
+        if (annotationRegistry.count(an.name.lexeme) || classRegistry.count(an.name.lexeme)
+            || traitRegistry.count(an.name.lexeme))
+            error(an.name, "'" + an.name.lexeme + "' is already declared");
+        annotationRegistry[an.name.lexeme] = &an;
+    }
+    // 2. Record which annotation names appear on each type (itself or any member), validating each
+    //    application names a registered annotation and isn't duplicated on the same target.
+    auto note = [&](const std::string& typeName, const std::deque<AnnotationApp>& apps) {
+        std::unordered_set<std::string> seenOnTarget;
+        for (const AnnotationApp& a : apps) {
+            if (!annotationRegistry.count(a.name.lexeme)) {
+                error(a.name, "unknown annotation '" + a.name.lexeme
+                      + "' (declare it with 'annotation " + a.name.lexeme + " { ... }')");
+                continue;
+            }
+            if (!seenOnTarget.insert(a.name.lexeme).second)
+                error(a.name, "duplicate annotation '" + a.name.lexeme + "' on the same declaration");
+            typeAnnotations[typeName].insert(a.name.lexeme);
+            // Validate the application's arguments: count must match the annotation's field count,
+            // and each argument must be a compile-time constant.
+            const AnnotationDeclStmt* decl = annotationRegistry[a.name.lexeme];
+            size_t nFields = decl ? decl->fields.size() : 0;
+            if (a.args.size() != nFields)
+                error(a.name, "annotation '" + a.name.lexeme + "' expects " + std::to_string(nFields)
+                      + " argument(s), got " + std::to_string(a.args.size()));
+            for (const auto& arg : a.args)
+                if (arg && !isConstantExpr(*arg))
+                    error(a.name, "annotation '" + a.name.lexeme
+                          + "' arguments must be compile-time constants");
+        }
+    };
+    for (const Stmt& stmt : program.declarations) {
+        if (const auto* c = std::get_if<ClassDeclStmt>(stmt.node.get())) {
+            note(c->name.lexeme, c->annotations);
+            for (const FieldDecl& f : c->fields)  note(c->name.lexeme, f.annotations);
+            for (const MethodDecl& m : c->methods) note(c->name.lexeme, m.annotations);
+        } else if (const auto* e = std::get_if<EnumDeclStmt>(stmt.node.get())) {
+            for (const EnumVariant& v : e->variants) note(e->name.lexeme, v.annotations);
+            for (const FieldDecl& f : e->fields)     note(e->name.lexeme, f.annotations);
+        }
+    }
+}
+
+void SemanticAnalyzer::analyzeAnnotationDecl(const AnnotationDeclStmt& annDecl) {
+    // An annotation's fields must be compile-time-representable: str, primitives, bool, char, or an
+    // enum. (No value objects, references, ptr, or nested annotations — they have no const form.)
+    for (const FieldDecl& f : annDecl.fields) {
+        Type t = resolveTypeToken(f.typeName);
+        bool ok = isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char
+               || t.kind == TypeKind::Str || t.kind == TypeKind::Enum;
+        if (!ok)
+            error(f.typeName, "annotation field '" + f.name.lexeme + "' must be a compile-time type "
+                  "(str, a primitive, bool, char, or an enum); got '" + typeName(t) + "'");
     }
 }
 

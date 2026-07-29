@@ -34,6 +34,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->inferredVarType_ = &semanticResult.inferredVarType;
     this->enumRegistry_ = &semanticResult.enumRegistry;
     this->implementedTraits_ = &semanticResult.implementedTraits;
+    this->typeAnnotations_ = &semanticResult.typeAnnotations;
     stringCounter    = 0;
     currentClassName_ = "";
     boundsCheck      = options.boundsCheck;

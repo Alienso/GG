@@ -206,6 +206,27 @@ private:
     struct ReflectRegistry {
         std::unordered_map<std::string, std::vector<std::string>> fields;
         std::unordered_map<std::string, std::vector<std::string>> variants;
+        // All declared `annotation` type names (to validate `f.has(Ann)` references).
+        std::unordered_set<std::string> annotationTypes;
+        // "TypeName#memberName" → set of annotation names on that member (drives `f.has`).
+        std::unordered_map<std::string, std::unordered_set<std::string>> memberAnnotations;
+        // annotationName → ordered field names (maps `f.get(Ann).field` to a positional arg).
+        std::unordered_map<std::string, std::vector<std::string>> annotationFields;
+        // annotationName → per-field default literal token (used by `f.get` on a member that lacks
+        // the annotation — only reached in a false-`f.has`-guarded dead branch). Parallel to fields.
+        std::unordered_map<std::string, std::vector<Token>> annotationFieldDefaults;
+        // "TypeName#memberName" → annotationName → positional arg token-sequences (drives `f.get`).
+        std::unordered_map<std::string,
+            std::unordered_map<std::string, std::vector<std::vector<Token>>>> memberAnnotationArgs;
+    };
+    // Per-inline-for annotation context handed to substituteInlineForBody (transient; not stored).
+    // Bundles the global annotation tables + the CURRENT member's annotation names/args.
+    struct InlineAnnCtx {
+        const std::unordered_set<std::string>& annTypes;
+        const std::unordered_set<std::string>& memberAnns;
+        const std::unordered_map<std::string, std::vector<std::vector<Token>>>& memberArgs;
+        const std::unordered_map<std::string, std::vector<std::string>>& annFields;
+        const std::unordered_map<std::string, std::vector<Token>>& annFieldDefaults;
     };
     void expandReflection(Program& program);
     void expandReflectionInStmt(Stmt& stmt, const ReflectRegistry& reg);
@@ -213,9 +234,14 @@ private:
     // Substitute the inline-for binding in one member's copy of the captured body tokens.
     //   fields   (overVariants=false): `v.name`->string, `@field(o,v.name)`->o.member, bare v = error
     //   variants (overVariants=true):  `v.name`->string, bare v-> `Enum::member`, @field = error
+    //   both: `v.has(Ann)` -> a bool literal (does the current member carry annotation `Ann`),
+    //         `v.get(Ann).field` -> the const value of that annotation field (spliced arg tokens).
+    // `memberAnns`=annotation names on this member; `annTypes`=all declared annotations;
+    // `memberArgs`=annName→positional arg tokens for this member; `annFields`=annName→field names.
     std::vector<Token> substituteInlineForBody(const std::vector<Token>& bodyTokens,
                                                const std::string& loopVar, const std::string& memberName,
-                                               bool overVariants, const std::string& enumName);
+                                               bool overVariants, const std::string& enumName,
+                                               const InlineAnnCtx& ann);
 
     // ---- Statement parsers ----
     [[nodiscard]] Stmt      parseDeclaration();
@@ -223,6 +249,9 @@ private:
     [[nodiscard]] Stmt      parseEnumDecl();
     [[nodiscard]] Stmt      parseTraitDecl();
     [[nodiscard]] Stmt      parseImplDecl();
+    [[nodiscard]] Stmt      parseAnnotationDecl();   // `annotation Name { <const fields> }`
+    // Parse a run of `@Name` / `@Name(args)` annotation prefixes in declaration position.
+    [[nodiscard]] std::deque<AnnotationApp> parseAnnotationPrefixes();
     // Parse one method signature/definition inside a trait or impl body. In a trait, a `;`
     // after the header means a required (bodyless) method; a `{` means a default body.
     [[nodiscard]] MethodDecl parseTraitMethod(bool bodyOptional);

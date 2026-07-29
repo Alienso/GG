@@ -1,0 +1,62 @@
+// e2e/annotation_test.gg — compile-time annotations driving generic "derive"-style code:
+// @Skip (marker), @Rename (str data), @Range (int data), read via f.has / f.get inside `inline for`.
+// All folding is compile-time (zero runtime cost). Returns a unique code on the first failing
+// check; 0 on success.
+
+annotation Skip {}
+annotation Rename { str key; }
+annotation Range  { i32 lo; i32 hi; }
+
+class User {
+    @Rename("user_id") mut i32 id;
+    @Skip              mut i32 cache;
+    @Range(0, 150)     mut i32 age;
+}
+
+// Sum of the values of all fields NOT marked @Skip (a serialize-style walk).
+fn sumLive<T>(T& v) -> i32 {
+    mut i32 acc = 0;
+    inline for (f in @fields(T)) {
+        if (!f.has(Skip)) { acc = acc + @field(v, f.name); }
+    }
+    return acc;
+}
+
+// Validate every @Range field's value is within its [lo, hi] bounds.
+fn valid<T>(T& v) -> bool {
+    inline for (f in @fields(T)) {
+        if (f.has(Range)) {
+            i32 x = @field(v, f.name);
+            if (x < f.get(Range).lo) { return false; }
+            if (x > f.get(Range).hi) { return false; }
+        }
+    }
+    return true;
+}
+
+// Total byte length of all @Rename keys (proves str-valued annotation args splice at runtime).
+fn renameKeyBytes<T>() -> u64 {
+    mut u64 total = 0;
+    inline for (f in @fields(T)) {
+        if (f.has(Rename)) { total = total + f.get(Rename).key.len; }
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    mut User u;
+    u.id = 7;
+    u.cache = 999;
+    u.age = 30;
+
+    mut i32 ok = 0;
+    if (sumLive<User>(u) == 37)         { ok = ok + 1; }   // 7 + 30 (cache @Skip'd)
+    if (valid<User>(u))                 { ok = ok + 1; }   // age 30 ∈ [0,150]
+    u.age = 200;
+    if (valid<User>(u) == false)        { ok = ok + 1; }   // 200 > 150
+    if (renameKeyBytes<User>() == 7)    { ok = ok + 1; }   // "user_id"
+    if (@hasAnnotation(User, Skip))     { ok = ok + 1; }   // type-level query
+
+    if (ok == 5) { return 0; }
+    return 1;
+}

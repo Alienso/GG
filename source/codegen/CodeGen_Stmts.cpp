@@ -26,6 +26,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const ClassDeclStmt&)            { /* handled at module level in generate() */ },
         [&](const EnumDeclStmt&)             { /* handled at module level in generate() */ },
         [&](const TraitDeclStmt&)            { /* no code — a contract only */ },
+        [&](const AnnotationDeclStmt&)       { /* no code — compile-time metadata only */ },
         [&](const ImplDeclStmt&)             { /* handled at module level in generate() */ },
     }, *stmt.node);
 }

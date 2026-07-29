@@ -441,6 +441,12 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             }
             indent--;
         },
+        [&](const AnnotationDeclStmt& an) {
+            out("AnnotationDecl '" + an.name.lexeme + "'");
+            indent++;
+            for (const FieldDecl& fd : an.fields) out("field '" + fd.name.lexeme + "'");
+            indent--;
+        },
 
     }, *stmt.node);
 }

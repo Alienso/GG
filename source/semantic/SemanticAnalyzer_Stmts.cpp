@@ -91,6 +91,7 @@ static bool alwaysReturns(const Stmt& stmt) {
         [](const ClassDeclStmt&)       { return false; },
         [](const EnumDeclStmt&)        { return false; },
         [](const TraitDeclStmt&)       { return false; },
+        [](const AnnotationDeclStmt&)  { return false; },
         [](const ImplDeclStmt&)        { return false; },
     }, *stmt.node);
 }
@@ -121,6 +122,7 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const ClassDeclStmt& classDecl)          { analyzeClassDecl(classDecl); },
         [&](const EnumDeclStmt& enumDecl)            { analyzeEnumDecl(enumDecl); },
         [&](const TraitDeclStmt&)                    { /* validated in collectTraits */ },
+        [&](const AnnotationDeclStmt& an)            { analyzeAnnotationDecl(an); },
         [&](const ImplDeclStmt& impl)                { analyzeImplDecl(impl); },
     }, *stmt.node);
 }

@@ -432,6 +432,18 @@ TEST_CASE("Numlit - small/unsigned integer literals no longer warn or error", "[
     }
 }
 
+TEST_CASE("Numlit - integer literal adopts char (a 32-bit code point) without warning", "[numlit][semantic]") {
+    // `char` is a u32-ranged integer kind, so an in-range integer literal adopts it silently.
+    // (Regression: `integerLiteralFits` used to lack a Char case and warned for every value.)
+    for (const char* src : { "fn main() -> i32 { char a = 65;  return 0; }",
+                             "fn main() -> i32 { char z = 300; return 0; }" }) {   // 300 is a valid code point
+        StderrCapture cap;
+        auto result = analyzeString(src);
+        REQUIRE_FALSE(result.hadError);
+        REQUIRE_FALSE(cap.contains("Warning"));
+    }
+}
+
 TEST_CASE("Numlit - f32 = decimal literal does not warn (adopts f32)", "[numlit][semantic]") {
     StderrCapture cap;
     auto result = analyzeString("fn main() -> i32 { f32 x = 1.0; return 0; }");

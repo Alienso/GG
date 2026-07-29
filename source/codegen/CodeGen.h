@@ -122,6 +122,8 @@ private:
     const std::unordered_map<std::string, EnumInfo>* enumRegistry_ = nullptr;
     // type name → traits it implements (user + built-in) — for `@implements`. From SemanticResult.
     const std::unordered_map<std::string, std::unordered_set<std::string>>* implementedTraits_ = nullptr;
+    // type name → annotation names on it or any member — for `@hasAnnotation`. From SemanticResult.
+    const std::unordered_map<std::string, std::unordered_set<std::string>>* typeAnnotations_ = nullptr;
     // The effective type token of a var-decl: the inferred token for a `var`, else its own.
     Token varDeclTypeToken(const VarDeclExpr& varDecl) const;
     // The emitted symbol name for a call/new node: the resolved mangled name if the callee is

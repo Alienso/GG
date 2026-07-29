@@ -99,6 +99,13 @@ Type SemanticAnalyzer::analyzeReflect(const ReflectExpr& r) {
             // Works on any type (primitive / class / enum); the fold happens in codegen.
             return Type{TypeKind::U64};
 
+        case ReflectKind::HasAnnotation: {
+            // `@hasAnnotation(T, Ann)` — Ann (typeArgs[1]) must be a declared annotation type.
+            if (r.typeArgs.size() > 1 && !annotationRegistry.count(r.typeArgs[1].lexeme))
+                error(r.at, "unknown annotation '" + r.typeArgs[1].lexeme + "' in '@hasAnnotation'");
+            return Type{TypeKind::Bool};
+        }
+
         case ReflectKind::Implements:
         case ReflectKind::IsInteger:
         case ReflectKind::IsFloat:

@@ -115,6 +115,9 @@ struct SemanticResult {
     // type name → set of trait names it implements (user + built-in). Surfaced for codegen's
     // `@implements(T, Trait)` reflection fold (trait info is otherwise private to semantics).
     std::unordered_map<std::string, std::unordered_set<std::string>> implementedTraits;
+    // type name → set of annotation names appearing on it or any member. Surfaced for codegen's
+    // `@hasAnnotation(T, Ann)` reflection fold.
+    std::unordered_map<std::string, std::unordered_set<std::string>> typeAnnotations;
     // Chosen overload's mangled symbol name per call/new expression node (keyed by the
     // node's address). Absent/empty ⇒ the callee is not overloaded ⇒ use its plain name.
     std::unordered_map<const void*, std::string> resolvedCallee;
@@ -177,6 +180,10 @@ private:
     // Trait declarations (name → AST node) and, per type, the set of traits it implements.
     std::unordered_map<std::string, const TraitDeclStmt*>          traitRegistry;
     std::unordered_map<std::string, std::unordered_set<std::string>> implementedTraits;
+    // Annotation types (name → AST node) and, per type, the set of annotation names appearing
+    // anywhere on it (the type itself or any member) — the source for `@hasAnnotation`.
+    std::unordered_map<std::string, const AnnotationDeclStmt*>       annotationRegistry;
+    std::unordered_map<std::string, std::unordered_set<std::string>> typeAnnotations;
     // Free-function overload sets (name → overloads). >1 entry ⇒ overloaded ⇒ mangled.
     std::unordered_map<std::string, std::vector<FunctionOverload>> functionRegistry;
     // Chosen overload mangled name per call/new node address (copied to SemanticResult).
@@ -231,6 +238,8 @@ private:
     // class and check conformance.
     void collectTraits(const Program& program);
     void collectImpls(const Program& program);
+    // Annotation pass: register `annotation` types + which annotation names appear on each type.
+    void collectAnnotations(const Program& program);
     void analyzeImplDecl(const ImplDeclStmt& impl);
     // Verify generic trait-bound obligations recorded during monomorphization:
     // each instantiation's concrete type argument must implement its declared trait(s).
@@ -279,6 +288,7 @@ private:
     void analyzeYield(const YieldStmt& yieldStmt);
     void analyzeFunctionDecl(const FunctionDeclStmt& functionDecl);
     void analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl);
+    void analyzeAnnotationDecl(const AnnotationDeclStmt& annDecl);
     void analyzeClassDecl(const ClassDeclStmt& classDecl);
     void analyzeEnumDecl(const EnumDeclStmt& enumDecl);
 

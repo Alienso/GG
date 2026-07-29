@@ -627,7 +627,8 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
                                                    const std::string& loopVar,
                                                    const std::string& memberName,
                                                    bool overVariants,
-                                                   const std::string& enumName) {
+                                                   const std::string& enumName,
+                                                   const InlineAnnCtx& ann) {
     const std::string& fieldName = memberName;   // alias for the field-mode paths below
     std::vector<Token> out;
     size_t i = 0;
@@ -661,7 +662,7 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
                 // The name refers to a DIFFERENT binding (a nested `inline for`) — leave the whole
                 // @field(...) verbatim for that loop's own expansion pass; only substitute this
                 // binding's f-references within the object sub-expression.
-                std::vector<Token> objSub = substituteInlineForBody(objToks, loopVar, memberName, overVariants, enumName);
+                std::vector<Token> objSub = substituteInlineForBody(objToks, loopVar, memberName, overVariants, enumName, ann);
                 int line = t.line;
                 out.push_back(t);                 // @
                 out.push_back(body[i + 1]);        // field
@@ -674,7 +675,7 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
                 continue;
             }
             std::string accessName = nameIsThisBinding ? fieldName : nameToks[0].lexeme;
-            std::vector<Token> objSub = substituteInlineForBody(objToks, loopVar, memberName, overVariants, enumName);
+            std::vector<Token> objSub = substituteInlineForBody(objToks, loopVar, memberName, overVariants, enumName, ann);
             int line = t.line;
             out.push_back(Token{ TokenType::LEFT_PAREN,  "(", line });
             for (const Token& o : objSub) out.push_back(o);
@@ -686,6 +687,57 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
         }
 
         if (t.type == TokenType::IDENTIFIER && t.lexeme == loopVar) {
+            // `v.has(Ann)` -> a bool literal: does the current member carry annotation `Ann`?
+            if (i + 5 < body.size() && body[i + 1].type == TokenType::DOT
+                && body[i + 2].type == TokenType::IDENTIFIER && body[i + 2].lexeme == "has"
+                && body[i + 3].type == TokenType::LEFT_PAREN
+                && body[i + 4].type == TokenType::IDENTIFIER
+                && body[i + 5].type == TokenType::RIGHT_PAREN) {
+                const std::string& annName = body[i + 4].lexeme;
+                if (!ann.annTypes.count(annName))
+                    throw error(body[i + 4], "unknown annotation '" + annName + "' in '"
+                                + loopVar + ".has(" + annName + ")'");
+                bool present = ann.memberAnns.count(annName) > 0;
+                out.push_back(Token{ present ? TokenType::TRUE : TokenType::FALSE,
+                                     present ? "true" : "false", t.line });
+                i += 6;
+                continue;
+            }
+            // `v.get(Ann).field` -> the const value of that annotation field (spliced arg tokens).
+            if (i + 7 < body.size() && body[i + 1].type == TokenType::DOT
+                && body[i + 2].type == TokenType::IDENTIFIER && body[i + 2].lexeme == "get"
+                && body[i + 3].type == TokenType::LEFT_PAREN
+                && body[i + 4].type == TokenType::IDENTIFIER
+                && body[i + 5].type == TokenType::RIGHT_PAREN
+                && body[i + 6].type == TokenType::DOT
+                && body[i + 7].type == TokenType::IDENTIFIER) {
+                const std::string& annName = body[i + 4].lexeme;
+                const std::string& fld     = body[i + 7].lexeme;
+                if (!ann.annTypes.count(annName))
+                    throw error(body[i + 4], "unknown annotation '" + annName + "' in '" + loopVar + ".get'");
+                auto fIt = ann.annFields.find(annName);
+                if (fIt == ann.annFields.end())
+                    throw error(body[i + 4], "'" + annName + "' is not an annotation type");
+                const std::vector<std::string>& fnames = fIt->second;
+                size_t idx = 0; bool found = false;
+                for (; idx < fnames.size(); ++idx) if (fnames[idx] == fld) { found = true; break; }
+                if (!found)
+                    throw error(body[i + 7], "annotation '" + annName + "' has no field '" + fld + "'");
+                // Present on this member → splice the real arg tokens. Absent → splice a default
+                // placeholder of the field's type: only reachable in a false-`f.has`-guarded dead
+                // branch (comptime-if pruning is deferred), so the value is never actually used.
+                auto argIt = ann.memberArgs.find(annName);
+                if (argIt != ann.memberArgs.end() && idx < argIt->second.size()) {
+                    for (const Token& tk : argIt->second[idx]) out.push_back(tk);
+                } else {
+                    auto dIt = ann.annFieldDefaults.find(annName);
+                    Token def = (dIt != ann.annFieldDefaults.end() && idx < dIt->second.size())
+                                ? dIt->second[idx] : Token{ TokenType::NUMBER, "0", t.line };
+                    out.push_back(def);
+                }
+                i += 8;
+                continue;
+            }
             // `v.name` -> the member-name string (both fields and variants). `name` is reserved for
             // the reflection name even if a variant type happens to declare a field called `name`.
             if (i + 2 < body.size() && body[i + 1].type == TokenType::DOT
@@ -721,18 +773,50 @@ std::vector<Token> Parser::substituteInlineForBody(const std::vector<Token>& bod
 }
 
 void Parser::expandReflection(Program& program) {
-    // 1. className -> ordered instance-field names; enumName -> ordered variant names.
+    // 1. className -> ordered instance-field names; enumName -> ordered variant names; plus the
+    //    annotation types and per-member annotation names (for `f.has` / validation).
     ReflectRegistry reg;
+    for (Stmt& d : program.declarations)
+        if (d.node)
+            if (const auto* an = std::get_if<AnnotationDeclStmt>(d.node.get())) {
+                reg.annotationTypes.insert(an->name.lexeme);
+                std::vector<std::string> fnames;
+                std::vector<Token>       defaults;
+                for (const FieldDecl& f : an->fields) {
+                    fnames.push_back(f.name.lexeme);
+                    // Type-appropriate default placeholder for `f.get` on an absent (dead-guarded) member.
+                    switch (f.typeName.type) {
+                        case TokenType::STR:  defaults.push_back(Token{ TokenType::STRING, "", f.name.line }); break;
+                        case TokenType::BOOL: defaults.push_back(Token{ TokenType::FALSE, "false", f.name.line }); break;
+                        // A CHAR literal with an empty lexeme lowers to code point 0; a numeric `0` here
+                        // would be adopted into `char` and warn ("does not fit in 'char'") in the dead
+                        // guarded branch that reaches this placeholder.
+                        case TokenType::CHAR: defaults.push_back(Token{ TokenType::CHAR, "", f.name.line }); break;
+                        default:              defaults.push_back(Token{ TokenType::NUMBER, "0", f.name.line }); break;
+                    }
+                }
+                reg.annotationFields[an->name.lexeme] = std::move(fnames);
+                reg.annotationFieldDefaults[an->name.lexeme] = std::move(defaults);
+            }
+    auto noteAnns = [&](const std::string& type, const std::string& member,
+                        const std::deque<AnnotationApp>& apps) {
+        for (const AnnotationApp& a : apps) {
+            std::string key = type + "#" + member;
+            reg.memberAnnotations[key].insert(a.name.lexeme);
+            // emplace (copy-CONSTRUCT) — Token has no copy-assignment, so `map[k] = …` won't compile.
+            reg.memberAnnotationArgs[key].emplace(a.name.lexeme, a.argTokens);   // positional arg tokens
+        }
+    };
     for (Stmt& d : program.declarations) {
         if (!d.node) continue;
         if (const auto* c = std::get_if<ClassDeclStmt>(d.node.get())) {
             std::vector<std::string> names;
             for (const FieldDecl& f : c->fields)
-                if (!f.isStatic) names.push_back(f.name.lexeme);
+                if (!f.isStatic) { names.push_back(f.name.lexeme); noteAnns(c->name.lexeme, f.name.lexeme, f.annotations); }
             reg.fields[c->name.lexeme] = std::move(names);
         } else if (const auto* e = std::get_if<EnumDeclStmt>(d.node.get())) {
             std::vector<std::string> vs;
-            for (const EnumVariant& v : e->variants) vs.push_back(v.name.lexeme);
+            for (const EnumVariant& v : e->variants) { vs.push_back(v.name.lexeme); noteAnns(e->name.lexeme, v.name.lexeme, v.annotations); }
             reg.variants[e->name.lexeme] = std::move(vs);
         }
     }
@@ -771,10 +855,21 @@ void Parser::expandReflectionInStmt(Stmt& s, const ReflectRegistry& reg) {
             }
         }
 
+        static const std::unordered_set<std::string> kNoAnns;
+        static const std::unordered_map<std::string, std::vector<std::vector<Token>>> kNoArgs;
         std::vector<std::unique_ptr<Stmt>> perField;
         for (const std::string& fname : it->second) {
+            std::string key = cls + "#" + fname;
+            auto maIt  = reg.memberAnnotations.find(key);
+            auto argIt = reg.memberAnnotationArgs.find(key);
+            const std::unordered_set<std::string>& memberAnns =
+                maIt != reg.memberAnnotations.end() ? maIt->second : kNoAnns;
+            const std::unordered_map<std::string, std::vector<std::vector<Token>>>& memberArgs =
+                argIt != reg.memberAnnotationArgs.end() ? argIt->second : kNoArgs;
+            InlineAnnCtx annCtx{ reg.annotationTypes, memberAnns, memberArgs,
+                                 reg.annotationFields, reg.annotationFieldDefaults };
             std::vector<Token> sub = substituteInlineForBody(inf.bodyTokens, inf.loopVar.lexeme,
-                                                             fname, inf.overVariants, cls);
+                                                             fname, inf.overVariants, cls, annCtx);
             sub.push_back(Token{ TokenType::END_OF_FILE, "", inf.keyword.line });
             // Re-parse the substituted body as a block (save/restore the token cursor).
             std::vector<Token> savedTokens = std::move(tokens);
@@ -1026,6 +1121,30 @@ Token Parser::consumeTypeCore() {
 // ============================================================
 
 Stmt Parser::parseDeclaration() {
+    // A leading `@Name(...)` in declaration position is an annotation applied to the following
+    // class. Disambiguated from statement-level reflection builtins (`@compileError`, …) by CASE:
+    // annotation types are Capitalized, builtins are lowercase. A lowercase `@…` falls through to
+    // parseStatement (an expression statement) below.
+    if (check(TokenType::AT) && peekNext().type == TokenType::IDENTIFIER
+        && !peekNext().lexeme.empty() && std::isupper(static_cast<unsigned char>(peekNext().lexeme[0]))) {
+        std::deque<AnnotationApp> anns = parseAnnotationPrefixes();
+        Token where = previous();
+        if (match({ TokenType::CLASS })) {
+            Stmt s = parseClassDecl();
+            std::get<ClassDeclStmt>(*s.node).annotations = std::move(anns);
+            return s;
+        }
+        if (match({ TokenType::ENUM })) {
+            Stmt s = parseEnumDecl();
+            // enum-level annotations are recorded on… v1 has no enum-type annotation slot beyond
+            // variants, so reject to keep the surface honest.
+            (void)anns;
+            throw error(where, "annotations on an 'enum' type are not supported; annotate its "
+                               "variants or fields instead");
+        }
+        throw error(where, "an annotation here must prefix a 'class' declaration");
+    }
+
     // extern returnType name( params );
     if (match({ TokenType::IMPORT })) {
         Token keyword = previous();
@@ -1043,6 +1162,10 @@ Stmt Parser::parseDeclaration() {
 
     if (match({ TokenType::ENUM })) {
         return parseEnumDecl();
+    }
+
+    if (match({ TokenType::ANNOTATION })) {
+        return parseAnnotationDecl();
     }
 
     if (match({ TokenType::TRAIT })) {
@@ -1193,6 +1316,47 @@ Stmt Parser::parseClassDecl() {
 
     consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
     return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
+}
+
+// A run of `@Name` / `@Name(arg, …)` annotation prefixes in declaration position. Args are ordinary
+// expressions (validated compile-time-constant in semantics). Positional disambiguation: this is
+// only called where a declaration/member starts, so a leading '@' is never a reflection builtin.
+std::deque<AnnotationApp> Parser::parseAnnotationPrefixes() {
+    std::deque<AnnotationApp> anns;
+    while (check(TokenType::AT)) {
+        advance();   // '@'
+        Token name = consume(TokenType::IDENTIFIER, "expected an annotation name after '@'");
+        std::vector<std::unique_ptr<Expr>> args;
+        std::vector<std::vector<Token>>    argTokens;
+        if (match({ TokenType::LEFT_PAREN })) {
+            if (!check(TokenType::RIGHT_PAREN))
+                do {
+                    size_t start = current;
+                    args.push_back(box(parseExpression()));
+                    argTokens.emplace_back(tokens.begin() + start, tokens.begin() + current);
+                } while (match({ TokenType::COMMA }));
+            consume(TokenType::RIGHT_PAREN, "expected ')' after annotation arguments");
+        }
+        anns.push_back(AnnotationApp{ name, std::move(args), std::move(argTokens) });
+    }
+    return anns;
+}
+
+// `annotation Name { <const fields> }` — a compile-time metadata type. Reuses the class member
+// parser for its fields; methods are rejected (an annotation carries data only).
+Stmt Parser::parseAnnotationDecl() {
+    Token name = consume(TokenType::IDENTIFIER, "expected annotation name after 'annotation'");
+    consume(TokenType::LEFT_BRACE, "expected '{' after annotation name");
+    std::deque<FieldDecl>  fields;
+    std::deque<MethodDecl> methods;
+    parseMemberList(name, fields, methods, /*allowDestructor=*/false, /*isEnum=*/false);
+    if (!methods.empty())
+        throw error(name, "an annotation cannot declare methods — only const data fields");
+    for (const FieldDecl& f : fields)
+        if (f.isStatic)
+            throw error(f.name, "an annotation field cannot be 'static'");
+    consume(TokenType::RIGHT_BRACE, "expected '}' after annotation body");
+    return makeStmt(AnnotationDeclStmt{ name, std::move(fields) });
 }
 
 // One method inside a trait or impl body, `fn`-prefixed and unified:
@@ -1408,9 +1572,11 @@ Stmt Parser::parseEnumDecl() {
     consume(TokenType::LEFT_BRACE, "expected '{' after enum name");
 
     std::deque<EnumVariant> variants;
-    // Variant list: IDENTIFIER ( '(' args ')' )?  comma-separated, terminated by ';' or '}'.
-    if (check(TokenType::IDENTIFIER)) {
+    // Variant list: [@Name…] IDENTIFIER ( '(' args ')' )?  comma-separated, terminated by ';' or '}'.
+    if (check(TokenType::IDENTIFIER) || check(TokenType::AT)) {
         do {
+            std::deque<AnnotationApp> vanns;
+            if (check(TokenType::AT)) vanns = parseAnnotationPrefixes();
             Token vname = consume(TokenType::IDENTIFIER, "expected enum variant name");
             std::vector<std::unique_ptr<Expr>> args;
             if (match({ TokenType::LEFT_PAREN })) {
@@ -1420,6 +1586,7 @@ Stmt Parser::parseEnumDecl() {
                 consume(TokenType::RIGHT_PAREN, "expected ')' after enum variant arguments");
             }
             variants.push_back(EnumVariant{ vname, std::move(args) });
+            variants.back().annotations = std::move(vanns);
         } while (match({ TokenType::COMMA }));
     }
     // Optional ';' separates the variant list from the body (fields / constructor / methods).
@@ -1443,6 +1610,11 @@ void Parser::parseMemberList(const Token& name,
                              bool isEnum) {
     classFieldScope_.clear();   // fresh per class (no nested classes); populated as fields are parsed
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+        // A member may be prefixed with `@Name(...)` annotations; attach them to whatever member
+        // this iteration parses (each branch ends by pushing exactly one field/method).
+        std::deque<AnnotationApp> memberAnns;
+        if (check(TokenType::AT)) memberAnns = parseAnnotationPrefixes();
+
         // ---- Method: `fn [static] [private] ...` (the `fn` leads; modifiers follow) ----
         if (match({ TokenType::FN })) {
             bool mPublic = true;
@@ -1473,6 +1645,7 @@ void Parser::parseMemberList(const Token& name,
                 /*isMut=*/methodMut, /*hasBody=*/true, retType, mname,
                 std::move(params), std::move(body), hasAlias, alias
             });
+            methods.back().annotations = std::move(memberAnns);
             continue;
         }
 
@@ -1514,6 +1687,7 @@ void Parser::parseMemberList(const Token& name,
                 isPublic, /*isConstructor=*/false, /*isDestructor=*/true, /*isStatic=*/false,
                 /*isMut=*/false, /*hasBody=*/true, dtorName, dtorName, {}, std::move(dtorBody)
             });
+            methods.back().annotations = std::move(memberAnns);
             continue;
         }
 
@@ -1535,6 +1709,7 @@ void Parser::parseMemberList(const Token& name,
                 ctorName,   // name token
                 std::move(params), std::move(body)
             });
+            methods.back().annotations = std::move(memberAnns);
             continue;
         }
 
@@ -1559,6 +1734,7 @@ void Parser::parseMemberList(const Token& name,
         fields.push_back(FieldDecl{
             isPublic, isStatic, isMut, memberType, memberName, std::move(initializer)
         });
+        fields.back().annotations = std::move(memberAnns);
     }
 }
 
@@ -1736,6 +1912,12 @@ Expr Parser::parseReflectExpr() {
         typeArgs.push_back(consumeType());
         consume(TokenType::COMMA, "expected ',' then a trait name in '@implements(T, Trait)'");
         typeArgs.push_back(consume(TokenType::IDENTIFIER, "expected a trait name in '@implements'"));
+    } else if (n == "hasAnnotation") {
+        kind = ReflectKind::HasAnnotation;
+        if (!isTypeName()) throw error(peek(), "expected a type name in '@hasAnnotation'");
+        typeArgs.push_back(consumeType());
+        consume(TokenType::COMMA, "expected ',' then an annotation name in '@hasAnnotation(T, Ann)'");
+        typeArgs.push_back(consume(TokenType::IDENTIFIER, "expected an annotation name in '@hasAnnotation'"));
     } else if (n == "compileError") {
         kind = ReflectKind::CompileError;
         valueArgs.push_back(box(parseExpression()));

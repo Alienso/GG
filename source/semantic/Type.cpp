@@ -324,6 +324,8 @@ bool integerLiteralFits(unsigned long long magnitude, TypeKind t) {
         case TypeKind::U16: return magnitude <= 65535ULL;
         case TypeKind::U32: return magnitude <= 4294967295ULL;
         case TypeKind::U64: return true;   // any unsigned long long fits u64
+        // char is a 32-bit Unicode code point (unsigned) — same range as u32.
+        case TypeKind::Char: return magnitude <= 4294967295ULL;
         default:            return false;
     }
 }

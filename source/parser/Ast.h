@@ -185,7 +185,9 @@ enum class ReflectKind {
     TypeName, FieldCount, HasField, Field, CompileError,
     // Phase 2 scalar queries (fold to constants like the above):
     VariantCount, AlignOf, OffsetOf, Implements,
-    IsInteger, IsFloat, IsClass, IsEnum, IsPrimitive
+    IsInteger, IsFloat, IsClass, IsEnum, IsPrimitive,
+    // Annotations: `@hasAnnotation(T, Ann)` → bool (does the type or any member carry `Ann`).
+    HasAnnotation
 };
 struct ReflectExpr {
     Token                              at;         // the '@' token, for diagnostics
@@ -355,6 +357,18 @@ struct ImportStmt {
     Token path;      // STRING token — the file path (lexeme is the raw content, quotes stripped by lexer)
 };
 
+// One applied annotation: `@Name(arg, …)` prefixed on a declaration. Compile-time metadata only —
+// no runtime representation. `args` are compile-time-constant expressions (validated in semantics);
+// empty for a marker (`@Skip`). Move-only (owns the arg Exprs).
+struct AnnotationApp {
+    Token                              name;   // the annotation type name (`Rename`)
+    std::vector<std::unique_ptr<Expr>> args;   // positional const args (`"user_name"`) — for semantics
+    // Raw source tokens of each positional arg, captured at parse time. `f.get(Ann).field` splices
+    // the tokens of the arg at that field's position back into the expanded code (no Expr→token
+    // reconstruction needed). Parallel to `args`.
+    std::vector<std::vector<Token>>    argTokens{};
+};
+
 struct FieldDecl {
     bool  isPublic  = false;
     bool  isStatic  = false;   // `static T name;` — class-level storage, not per-instance
@@ -364,6 +378,7 @@ struct FieldDecl {
     // Constant initializer for a static field (`static i32 count = 0;`), run in a
     // pre-main initializer. nullptr for instance fields and uninitialised statics.
     std::unique_ptr<Expr> initializer;
+    std::deque<AnnotationApp> annotations{};   // `@Name(...)` prefixes (compile-time reflection)
 };
 
 struct MethodDecl {
@@ -380,6 +395,7 @@ struct MethodDecl {
     // Return slot (sret): `method(params) -> RetType slot { }`. See FunctionDeclStmt.
     bool                   hasReturnSlot = false;
     std::string            returnSlotName{};   // default-init: omitting it in aggregate init is fine
+    std::deque<AnnotationApp> annotations{};  // `@Name(...)` prefixes
 };
 
 struct ClassDeclStmt {
@@ -391,6 +407,15 @@ struct ClassDeclStmt {
     // because MethodDecl contains BlockStmt (with unique_ptr) and Token
     // (const string members) — making it neither copyable nor noexcept-moveable.
     std::deque<MethodDecl> methods;
+    std::deque<AnnotationApp> annotations{};  // `@Name(...)` prefixes on the class
+};
+
+// A compile-time annotation type: `annotation Name { <const fields> }`. Purely reflective — it
+// emits NO IR (no struct, no ctor); it is collected into the annotation registry and read only by
+// `@`-position applications + `f.has`/`f.get`/`@hasAnnotation`. Fields carry the annotation's data.
+struct AnnotationDeclStmt {
+    Token                 name;
+    std::deque<FieldDecl> fields;   // e.g. `str key;` — const-typed, no methods
 };
 
 // A single enum variant: the name plus the constructor arguments used to
@@ -398,6 +423,7 @@ struct ClassDeclStmt {
 struct EnumVariant {
     Token                              name;
     std::vector<std::unique_ptr<Expr>> args;   // empty for fieldless variants
+    std::deque<AnnotationApp>         annotations{};  // `@Name(...)` prefixes on the variant
 };
 
 struct EnumDeclStmt {
@@ -443,7 +469,8 @@ struct Stmt {
         ClassDeclStmt,
         EnumDeclStmt,
         TraitDeclStmt,
-        ImplDeclStmt
+        ImplDeclStmt,
+        AnnotationDeclStmt
     >;
     std::unique_ptr<Variant> node;
 };

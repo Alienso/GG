@@ -32,6 +32,7 @@ inline std::string irTypeName(const Type& t) {
         case TypeKind::Bool:   return "i1";
         case TypeKind::Char:   return "i32";
         case TypeKind::Ptr:    return "ptr";
+        case TypeKind::Str:    return "{ ptr, i64 }";   // compile-time string view: { data, byte-length }
         case TypeKind::Array:  return "[" + std::to_string(t.arraySize) + " x " + irTypeName(Type{t.elementKind}) + "]";
         case TypeKind::Object: return "%" + t.className;
         case TypeKind::Enum:   return "ptr";   // enum value — a pointer to a global singleton variant

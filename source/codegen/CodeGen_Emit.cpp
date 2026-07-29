@@ -343,7 +343,14 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
         return "%" + t;
     }
 
-    // If both types map to the same LLVM IR type (e.g. string ↔ ptr, i32 ↔ u32,
+    // `str` → `ptr` decay: extract the data pointer (field 0) from the { ptr, i64 } view.
+    if (from.kind == TypeKind::Str && to.kind == TypeKind::Ptr) {
+        std::string t = freshTemp();
+        emit("%" + t + " = extractvalue { ptr, i64 } " + value + ", 0");
+        return "%" + t;
+    }
+
+    // If both types map to the same LLVM IR type (e.g. i32 ↔ u32,
     // char ↔ u32) no cast instruction is needed — bits are already identical.
     if (irTypeName(from) == irTypeName(to)) return value;
 

@@ -28,9 +28,11 @@ does it in ~8 s (≈11×), cutting that rebuild loop from ~88 s to ~12 s. It fal
 linker silently if `ld.lld` isn't found; force the default with `-DGG_USE_LLD=OFF`.
 **Test-suite runtime is a non-issue** (~5 s for the whole suite; the slowest single case is ~30 ms —
 each test's cost is the temp-file round-trip in the `parseString`/`analyzeString` helpers, not
-computation). If test *build* time ever needs more: the compiler sources (`${GG_SOURCES}`) are
-currently compiled **twice** (once for `GG`, once for `GG_tests`) — factoring them into a
-`gg_core` static library would halve that (helps clean / header-change builds, not the link).
+computation). The compiler sources (`${GG_SOURCES}`) build **once** into a `gg_core` STATIC library
+that both `GG` and `GG_tests` link — previously they were compiled twice (once per executable), so a
+clean / header-change build did double the work. `GG` additionally compiles only `main.cpp` +
+`source/GG.cpp`; `GG_tests` only its `tests/*.cpp`. Warning flags are applied to `gg_core` (PRIVATE)
+and each executable; sanitizer flags propagate to the executables via `gg_core`'s PUBLIC link options.
 
 ## compile.ps1 — compile a .gg file to a native Windows x86-64 executable
 
@@ -824,7 +826,8 @@ codegen gain **no new type-kind and no new branch** beyond the inference site.
   (`analyzeExpr`, not `analyzeWithExpected`); the inferred type **is** its type. Integer literals →
   `i32`, decimals → `f64` (the literal-default rule). Rejects: no initializer, `void`, bare `null`
   (needs an explicit nullable annotation), a lambda literal (unspellable — pass it to a `Call`-bound
-  generic), and an inferred raw `ptr`/`ptr<T>` unless `--unsafe-ptr` (e.g. `var s = "lit";` → `ptr`).
+  generic), and an inferred raw `ptr`/`ptr<T>` unless `--unsafe-ptr`. (A string literal infers `str`,
+  which is safe/ungated — see the `str` invariant; only a genuine `ptr` initializer is gated.)
   `static var` still enforces the scalar-primitive + constant-initializer static-local rules against
   the inferred type. The synthesized type token is recorded in `SemanticResult::inferredVarType`
   (node → `Token`, via `synthTypeToken(Type,line)` in `Type.cpp`) — the inverse of the type-token
@@ -870,8 +873,9 @@ CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@
   (member accesses, `Enum::V`, literals) → **semantic and codegen need almost no reflection logic**,
   only: scalar-query arms (`analyzeReflect`/`genReflect`) that fold each `@`-query to a constant like
   `sizeof`, plus trivial guard arms for the transient nodes. `@compileError` errors in `analyzeReflect`.
-- **Scalar folds (codegen)**: `genReflect` computes each query's constant — `@typeName` a private
-  C-string; counts/offsets/alignment from `cgClasses_`/`enumRegistry_`/`dbgSizeAlign` (the same
+- **Scalar folds (codegen)**: `genReflect` computes each query's constant — `@typeName` a `str` view
+  (`{ptr,i64}`) over a private NUL-terminated constant; counts/offsets/alignment from
+  `cgClasses_`/`enumRegistry_`/`dbgSizeAlign` (the same
   natural-alignment layout used by DWARF); predicates from the base type name vs `cgClasses_`/
   `cgEnumNames_`/`typeKindFromName`; `@implements` from `implementedTraits_` (surfaced onto
   `SemanticResult` — trait info is otherwise private to semantics). No `comptime if` yet, so a
@@ -899,6 +903,40 @@ CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@
   function return type, or parameter of type `ptr`/`ptr<T>` unless `CompilerOptions::allowRawPtr`
   is true. `extern` declarations are always exempt.
 - `compile.ps1` always passes `--unsafe-ptr`; test helpers default to `allowRawPtr = true`.
+
+### `str` — compile-time string-literal type (Phase 1)
+`str` is the type of a **string literal** — an immutable view over static (rodata) bytes, lowered to
+a `{ ptr, i64 }` value (`TypeKind::Str`; IR `{ ptr, i64 }`, modeled on the nullable-primitive inline
+value type). It is a **safe** type (no `--unsafe-ptr` gate), trivially copyable, with no ownership /
+refcount. `String` (the heap class) is unchanged and distinct.
+- **Representation**: field 0 `data` = a **NUL-terminated** pointer into static bytes (so `.data` is a
+  valid C-string); field 1 `len` = the **byte** length (excludes the NUL; codepoint counting stays a
+  `String` concern). For a literal both are compile-time-known.
+- **Accessors** (`analyzeMemberAccess`/`genMemberAccess`): `s.data` → `ptr` (`extractvalue …, 0`),
+  `s.len` → `u64` (`extractvalue …, 1`). Any other member is an error.
+- **Decay** `str → ptr` is `Silent` (`canImplicitlyCast`), emitted as `extractvalue …, 0` in
+  `emitCast`; it is the mechanism that lets a literal flow to a `ptr`/`extern` parameter (`puts("hi")`)
+  and threads through `buildArgString`'s per-arg cast. The **reverse `ptr → str` is forbidden** (a raw
+  pointer has no known length).
+- **Lexer/parser**: `str` keyword → `TokenType::STR` (in `isTypeName`/`isTypeKeyword`); `str*` (a
+  borrow of `str`) is a parse error. **Type plumbing**: `typeFromToken`/`typeName`/`typeKindFromName`/
+  `primitiveTokenType` handle `Str`; `mangleType` falls through to `"str"`; `synthTypeToken(Str)` →
+  the `STR` keyword token (so `var s = "x"` round-trips). `analyzeLiteral(STRING)` returns `Str`
+  (was `Ptr`), so **string literals are now safe** and `var s = "lit"` is ungated.
+- **`String(str)`**: the stdlib constructor takes a `str` and uses `literal.len` (no `strlen` scan) +
+  `literal.data`. All CRT bindings stay `ptr` and receive `String`'s `ptr` buffer, so `crt/*.gg` is
+  unaffected.
+- **Debug info**: `dbgSizeAlign(Str)` = `{16, 8}`; `dbgTypeOf` approximates it as an opaque pointer
+  (Phase 1 — a precise composite is deferred; debug is off by default).
+- **Reflection strings are `str`** (Phase 2): `@typeName(T)` returns a `str` (was a bare `ptr`) — so
+  `@typeName(T).len` and `.data` work; `f.name`/`v.name` were already `str` (they lower to string
+  literals). `analyzeReflect(TypeName)` → `Str`; `genReflect(TypeName)` materializes the `{ptr,i64}`
+  view over its private NUL-terminated constant.
+- **Deferred, rejected with a clean semantic error (never miscompiled)**: `==`/`!=` on `str`
+  (`classifyEquality` guards it before the numeric fall-through), relational ops (numeric check),
+  `str + str` (numeric check), and `str?` (`resolveTypeToken` rejects it alongside `ptr?`/`void?`).
+  Also deferred: `str` indexing/slicing/concat. A `str` value-object **field** works (POD `{ptr,i64}`,
+  memberwise-copied). Tests: `tests/str_tests.cpp` (`[str]`), `e2e/str_test.gg`.
 
 ### Destructors
 - Declared as `~ClassName()` (no params, implicitly void). At most one per class.
@@ -1009,6 +1047,16 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1001 test cases / 1883 assertions** (as of **the `str` compile-time string-literal type, Phases 1 & 2** —
+a string literal is typed `str` (an immutable `{ ptr, i64 }` view over static bytes) instead of a
+raw `ptr`: `.data` decays to a NUL-terminated `ptr` for FFI, `.len` is the O(1) byte length, `str`
+is safe/ungated and implicitly decays to `ptr` (the reverse is forbidden), and `String`'s constructor
+now takes `str` (using `.len`, no `strlen`). Modeled on the nullable-primitive inline value type; CRT
+bindings stay `ptr` and are untouched. **Phase 2** retrofitted reflection: `@typeName(T)` now returns
+a `str` (was a bare `ptr`), so `@typeName(T).len`/`.data` work (`f.name`/`v.name` were already `str`).
+Still deferred (all rejected with a clean semantic error, never miscompiled): `str` `==`/relational/
+concat and `str?`. See the "`str`" invariant; `tests/str_tests.cpp` (`[str]`, 16 cases) +
+`[reflect]` (`@typeName` view), `e2e/str_test.gg` + `e2e/reflect_test.gg`. Prior baseline was
 **985 test cases / 1858 assertions** (as of **compile-time reflection, Phase 2** — enum + type-level
 queries on top of Phase 1: `inline for (v in @variants(E)) { … }` unrolls once per variant (bare `v`
 → the singleton `E::VARIANT`, usable as a value — `v.method()`/`v.field` work; `v.name` → the

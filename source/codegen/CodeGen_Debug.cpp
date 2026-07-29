@@ -126,6 +126,7 @@ std::pair<long long, long long> CodeGen::dbgSizeAlign(const Type& t) {
         case TypeKind::I64: case TypeKind::U64: case TypeKind::F64: return {8, 8};
         case TypeKind::Ptr: case TypeKind::Reference: case TypeKind::Enum:
         case TypeKind::TypedPtr: case TypeKind::TypeParam:          return {8, 8};
+        case TypeKind::Str:                                        return {16, 8};  // { ptr, i64 }
         case TypeKind::Object: {
             auto it = cgClasses_.find(t.className);
             if (it == cgClasses_.end()) return {8, 8};
@@ -174,6 +175,12 @@ int CodeGen::dbgTypeOf(const Type& t) {
         // Pointer-shaped types: reference/enum/ptr become an opaque pointer (address only).
         case TypeKind::Reference: case TypeKind::Enum:
         case TypeKind::Ptr: case TypeKind::TypedPtr: case TypeKind::TypeParam:
+            id = dbgAdd("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)");
+            break;
+
+        // `str` view: approximate as an opaque pointer for now (Phase 1 — a precise { ptr, i64 }
+        // composite is deferred; debug info is off by default and this keeps it valid).
+        case TypeKind::Str:
             id = dbgAdd("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)");
             break;
 

@@ -1,0 +1,46 @@
+// e2e/str_test.gg — the `str` compile-time string-literal type: a { ptr, i64 } view over static
+// bytes. `.len` is the byte length (O(1), comptime-known for literals); `.data` decays to a
+// NUL-terminated `ptr` for FFI. `str` is safe (no --unsafe-ptr) and implicitly decays to `ptr`.
+// Returns a unique number on the first failing check; 0 on success.
+
+import "../stdlib/crt/cstring.gg";   // strlen(ptr) -> u64
+import "../stdlib/String.gg";        // String(str)
+
+// str as a parameter and a return type.
+fn label() -> str { return "hello"; }
+fn width(str s) -> u64 { return s.len; }
+
+fn main() -> i32 {
+    // .len is the BYTE length.
+    str h = "hello";
+    if (h.len != 5) { return 1; }
+
+    // Multibyte: "café" is 5 bytes (é is 2 UTF-8 bytes), not 4 codepoints.
+    str c = "café";
+    if (c.len != 5) { return 2; }
+
+    // Empty literal.
+    str e = "";
+    if (e.len != 0) { return 3; }
+
+    // str -> ptr decay for FFI: strlen over .data agrees with .len (ASCII, no embedded NUL).
+    if (strlen(h.data) != 5) { return 4; }
+
+    // Passing a literal directly to a `ptr` parameter decays via its data pointer.
+    if (strlen("abcd") != 4) { return 5; }
+
+    // str parameter + return.
+    str t = label();
+    if (t.len != 5)      { return 6; }
+    if (width(t) != 5)   { return 7; }
+    if (width("xy") != 2){ return 8; }
+
+    // String(str): the stdlib String constructs from a `str` (using .len, no strlen scan).
+    String s("hello");
+    if (s.byteLength() != 5) { return 9; }
+    String cs("café");
+    if (cs.byteLength() != 5) { return 10; }   // 5 bytes
+    if (cs.length()     != 4) { return 11; }   // 4 codepoints
+
+    return 0;
+}

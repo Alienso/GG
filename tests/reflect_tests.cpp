@@ -224,6 +224,17 @@ TEST_CASE("Reflect - inline for over an empty class expands to nothing", "[refle
     REQUIRE(ir.find("getelementptr %E") == std::string::npos);   // no field access emitted
 }
 
+TEST_CASE("Reflect - @typeName yields a `str` view (has .len / .data)", "[reflect][str]") {
+    // Phase 2: @typeName returns `str` (was a bare ptr), so `.len` and `.data` work on it.
+    auto ir = codegenString(R"(
+        class Point { i32 x; i32 y; }
+        fn main() -> i32 { str s = @typeName(Point); u64 n = s.len; return 0; }
+    )");
+    REQUIRE(ir.find("c\"Point\\00\"")            != std::string::npos);
+    REQUIRE(ir.find("insertvalue { ptr, i64 }")  != std::string::npos);   // the str view
+    REQUIRE(ir.find("extractvalue { ptr, i64 }") != std::string::npos);   // s.len read
+}
+
 TEST_CASE("Reflect - @typeName works on primitives and enums", "[reflect]") {
     auto ir = codegenString(R"(
         enum Color { RED, GREEN }

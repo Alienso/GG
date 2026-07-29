@@ -321,11 +321,17 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
                 + std::to_string(totalBytes) + " x i8] c\""
                 + content + "\\00\", align 1");
 
-            std::string tempName = freshTemp();
-            emit("%" + tempName + " = getelementptr inbounds ["
+            // A string literal is a `str` view: { ptr data, i64 byteLen }. `data` points at the
+            // NUL-terminated static bytes (so `.data` is a valid C-string); `byteLen` excludes the NUL.
+            std::string dataPtr = freshTemp();
+            emit("%" + dataPtr + " = getelementptr inbounds ["
                 + std::to_string(totalBytes) + " x i8], ptr "
                 + globalName + ", i32 0, i32 0");
-            return "%" + tempName;
+            std::string t0 = freshTemp(), t1 = freshTemp();
+            emit("%" + t0 + " = insertvalue { ptr, i64 } poison, ptr %" + dataPtr + ", 0");
+            emit("%" + t1 + " = insertvalue { ptr, i64 } %" + t0 + ", i64 "
+                + std::to_string(byteCount) + ", 1");
+            return "%" + t1;
         }
 
         default:
@@ -1584,14 +1590,21 @@ std::string CodeGen::genReflect(const ReflectExpr& r) {
                 else if (tok.type == TokenType::IDENTIFIER) name = tok.lexeme;   // class / enum
                 else                                        name = typeName(typeFromToken(tok.type));
             }
-            int totalBytes = static_cast<int>(name.size()) + 1;   // + null terminator
+            // `@typeName` yields a `str` view: { ptr data, i64 byteLen } over a private NUL-terminated
+            // constant (same representation a string literal lowers to).
+            int byteLen    = static_cast<int>(name.size());
+            int totalBytes = byteLen + 1;   // + null terminator
             std::string globalName = "@.str." + std::to_string(stringCounter++);
             module.globals.push_back(globalName + " = private unnamed_addr constant ["
                 + std::to_string(totalBytes) + " x i8] c\"" + name + "\\00\", align 1");
-            std::string tempName = freshTemp();
-            emit("%" + tempName + " = getelementptr inbounds [" + std::to_string(totalBytes)
+            std::string dataPtr = freshTemp();
+            emit("%" + dataPtr + " = getelementptr inbounds [" + std::to_string(totalBytes)
                 + " x i8], ptr " + globalName + ", i32 0, i32 0");
-            return "%" + tempName;
+            std::string t0 = freshTemp(), t1 = freshTemp();
+            emit("%" + t0 + " = insertvalue { ptr, i64 } poison, ptr %" + dataPtr + ", 0");
+            emit("%" + t1 + " = insertvalue { ptr, i64 } %" + t0 + ", i64 "
+                + std::to_string(byteLen) + ", 1");
+            return "%" + t1;
         }
         case ReflectKind::FieldCount: {
             std::string cls = baseName(r.typeArgs.empty() ? "" : r.typeArgs[0].lexeme);

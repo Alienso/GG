@@ -97,13 +97,23 @@ set(GG_SOURCES
         source/ImportResolver.h       source/ImportResolver.cpp
 )
 
+# ---- Core compiler library ----
+# The compiler sources are shared between the GG executable and the test suite. Building them
+# once as a STATIC library — instead of listing ${GG_SOURCES} in both targets — means each
+# translation unit is compiled a single time (previously twice), halving the compile work for a
+# clean or header-change build. Both targets link the resulting archive.
+add_library(gg_core STATIC ${GG_SOURCES})
+target_compile_options(gg_core PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})
+# Sanitizer flags must also reach whatever links gg_core; PUBLIC link options propagate them to
+# the GG and GG_tests executables (no-op when sanitizers are off).
+target_link_options(gg_core PUBLIC ${GG_SANITIZER_FLAGS})
+
 # ---- Main executable ----
 add_executable(GG main.cpp
         source/GG.cpp  source/GG.h
-        ${GG_SOURCES}
 )
 target_compile_options(GG PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})
-target_link_options(GG    PRIVATE ${GG_SANITIZER_FLAGS})
+target_link_libraries(GG PRIVATE gg_core)
 
 # ---- Catch2 (downloaded and built automatically on first configure) ----
 include(FetchContent)
@@ -147,11 +157,10 @@ add_executable(GG_tests
         tests/nullable_tests.cpp
         tests/var_infer_tests.cpp
         tests/reflect_tests.cpp
-        ${GG_SOURCES}
+        tests/str_tests.cpp
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})
-target_link_options(GG_tests    PRIVATE ${GG_SANITIZER_FLAGS})
-target_link_libraries(GG_tests PRIVATE Catch2::Catch2WithMain)
+target_link_libraries(GG_tests PRIVATE gg_core Catch2::Catch2WithMain)
 target_include_directories(GG_tests PRIVATE ${CMAKE_SOURCE_DIR})
 # Expose the repo root so stdlib_tests.cpp can locate the stdlib/ directory.
 target_compile_definitions(GG_tests PRIVATE GG_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

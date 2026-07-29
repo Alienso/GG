@@ -337,24 +337,15 @@ TEST_CASE("var - 'static var' rejects a non-primitive inferred type", "[var][sta
 // Raw-pointer gate — an inferred ptr obeys --unsafe-ptr
 // ------------------------------------------------------------
 
-TEST_CASE("var - inferring a raw ptr is rejected without --unsafe-ptr", "[var][semantic]") {
-    StderrCapture cap;
+TEST_CASE("var - a string literal infers `str` (safe, not gated by --unsafe-ptr)", "[var][semantic]") {
+    // A string literal is a `str` view, not a raw `ptr`, so `var s = "..."` is allowed even
+    // without --unsafe-ptr. (Before the `str` type, a string literal inferred a raw `ptr` and this
+    // was gated behind --unsafe-ptr; the `str` type makes string literals safe by default.)
     auto result = analyzeString(R"(
         fn main() -> i32 {
             var s = "literal";
             return 0;
         }
     )", CompilerOptions{});   // allowRawPtr = false
-    REQUIRE(result.hadError);
-    REQUIRE(cap.contains("raw pointer"));
-}
-
-TEST_CASE("var - inferring a raw ptr is allowed with --unsafe-ptr", "[var][semantic]") {
-    auto result = analyzeString(R"(
-        fn main() -> i32 {
-            var s = "literal";
-            return 0;
-        }
-    )");   // defaultTestOptions() => allowRawPtr = true
     REQUIRE_FALSE(result.hadError);
 }

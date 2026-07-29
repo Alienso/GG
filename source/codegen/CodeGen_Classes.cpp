@@ -91,6 +91,15 @@ std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma, const Type& res
 
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
+    // `str` view: extract `.data` (field 0, ptr) or `.len` (field 1, i64) from the { ptr, i64 } value.
+    if (objType.kind == TypeKind::Str) {
+        int idx = (ma.field.lexeme == "len") ? 1 : 0;
+        std::string ir = (idx == 1) ? "i64" : "ptr";
+        std::string t = freshTemp();
+        emit("%" + t + " = extractvalue { ptr, i64 } " + objPtr + ", " + std::to_string(idx));
+        (void)ir;
+        return "%" + t;
+    }
     if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference
         && objType.kind != TypeKind::Enum) return "0";
     // Static field read through an instance: obj.staticField → the shared global.

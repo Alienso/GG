@@ -11,6 +11,7 @@ static bool isTypeKeyword(TokenType t) {
         case TokenType::U8:  case TokenType::U16: case TokenType::U32: case TokenType::U64:
         case TokenType::F32: case TokenType::F64:
         case TokenType::BOOL: case TokenType::CHAR_TYPE: case TokenType::VOID: case TokenType::PTR:
+        case TokenType::STR:
             return true;
         default:
             return false;
@@ -939,6 +940,7 @@ bool Parser::isTypeName() const {
         case TokenType::CHAR_TYPE:
         case TokenType::VOID:
         case TokenType::PTR:
+        case TokenType::STR:
             return true;
         case TokenType::SELF:
             return true;   // valid only inside trait/impl bodies; semantic enforces that
@@ -1004,10 +1006,11 @@ Token Parser::consumeTypeCore() {
     // be a mangled generic instantiation, e.g. `Vec$i32*`).
     if (check(TokenType::STAR)) {
         bool primitiveInner = isTypeKeyword(base.type)
-                              && base.type != TokenType::PTR && base.type != TokenType::VOID;
+                              && base.type != TokenType::PTR && base.type != TokenType::VOID
+                              && base.type != TokenType::STR;   // `str` is a view, not a borrowable lvalue
         if (!(classLike || primitiveInner))
             throw error(peek(), "'*' borrow is only allowed on class types, `Self`, or a primitive "
-                                "like `i32`; `ptr` and `void` cannot be borrowed");
+                                "like `i32`; `ptr`, `void`, and `str` cannot be borrowed");
         advance();  // consume '*'
         std::string inner = base.type == TokenType::SELF ? "Self" : lexeme;
         return Token{ TokenType::IDENTIFIER, "ref:" + inner, line };

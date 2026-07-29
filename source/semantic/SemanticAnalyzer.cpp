@@ -723,6 +723,10 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) {
                 error(typeToken, "'" + base + "?' is not allowed; `ptr` and `void` cannot be nullable");
                 return Type{TypeKind::Error};
             }
+            if (prim == TypeKind::Str) {
+                error(typeToken, "'str?' is not allowed; `str` is not yet nullable (use 'String')");
+                return Type{TypeKind::Error};
+            }
             return makeNullable(Type{prim});
         }
         Token inner{TokenType::IDENTIFIER, base, typeToken.line};

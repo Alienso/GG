@@ -70,6 +70,11 @@ fn main() -> i32 {
     if (@implements(Point, Eq))         { ok = ok + 1; }
     if (@implements(Color, Eq) == false){ ok = ok + 1; }
 
-    if (ok == 18) { return 0; }
+    // @typeName is a `str` (Phase 2): its .len is the name's byte length.
+    str pn = @typeName(Point);
+    if (pn.len == 5)                    { ok = ok + 1; }   // "Point"
+    if (@typeName(i32).len == 3)        { ok = ok + 1; }   // "i32"
+
+    if (ok == 20) { return 0; }
     return 1;
 }

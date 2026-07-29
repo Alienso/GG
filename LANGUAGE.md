@@ -91,6 +91,26 @@ Float literals require a decimal point: `1.0`, `3.14`, `-0.5`.
 Valid element types for `ptr<T>`: any primitive (`i32`, `f64`, …), `void` (opaque),
 object (`ptr<Point>`), or reference (`ptr<Point&>`).
 
+### String literals — the `str` type
+
+A string literal like `"hello"` has type **`str`**: an immutable view over static (read-only) bytes.
+It is **safe** (no `--unsafe-ptr` needed) and lowers to a `{ pointer, byte-length }` pair — there is
+no allocation or copying. `str` is distinct from the heap-allocated, growable `String` class.
+
+```gg
+str s = "café";       // a view over 5 static bytes (é is 2 UTF-8 bytes)
+s.len                 // 5  — the byte length (u64), O(1)
+s.data                // the underlying pointer (ptr), NUL-terminated, for FFI/CRT calls
+```
+
+- `s.len` is the **byte** length (codepoint counting is a `String` operation).
+- `s.data` gives a NUL-terminated `ptr`; a `str` also **implicitly decays to `ptr`**, so a literal can
+  be passed straight to a `ptr`/`extern` parameter: `puts("hi")` works. (The reverse — a raw `ptr` to
+  a `str` — is **not** allowed, since a pointer carries no length.)
+- Build a heap `String` from a literal with `String("...")` (its constructor takes a `str`).
+- v1 limits: no indexing / slicing / concatenation / `==` on `str` yet, and `str?` is unsupported —
+  use `String` for those.
+
 ### Class types
 
 | Form        | Semantics |
@@ -149,7 +169,7 @@ reassignable one. An initializer is **required** — there is nothing to infer f
 var i = 5;              // i32   (integer literals infer i32)
 var f = 2.5;            // f64   (decimals infer f64)
 var b = true;           // bool
-var name = "gg";        // (raw ptr — requires --unsafe-ptr; wrap in String otherwise)
+var name = "gg";        // str  (a string literal; safe — see the `str` type above)
 
 var p = Point(3, 4);    // Point — value object (copied like `Point q = p;`)
 var r = new Point(1);   // Point& — owning heap reference (co-owned + released like the explicit form)

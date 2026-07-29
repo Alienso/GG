@@ -119,6 +119,10 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
     if (f == TypeKind::TypedPtr && t == TypeKind::Ptr)      return CastResult::Silent;
     if (f == TypeKind::Ptr      && t == TypeKind::TypedPtr) return CastResult::Silent;
 
+    // `str` decays to a raw `ptr` (its NUL-terminated `.data` pointer) for FFI / CRT calls and
+    // any `ptr` context. The reverse (ptr → str) is forbidden: a raw pointer has no known length.
+    if (f == TypeKind::Str && t == TypeKind::Ptr)           return CastResult::Silent;
+
     // Any integer → float (silent widening)
     if (isInteger(f) && isFloat(t))          return CastResult::Silent;
 
@@ -233,6 +237,7 @@ Type typeFromToken(TokenType tt) {
         case TokenType::CHAR_TYPE:   return Type{TypeKind::Char};
         case TokenType::VOID:        return Type{TypeKind::Void};
         case TokenType::PTR:         return Type{TypeKind::Ptr};
+        case TokenType::STR:         return Type{TypeKind::Str};
         default:                     return Type{TypeKind::Error};
     }
 }
@@ -258,6 +263,7 @@ std::string typeName(const Type& t) {
         case TypeKind::Bool:   return "bool";
         case TypeKind::Char:   return "char";
         case TypeKind::Ptr:    return "ptr";
+        case TypeKind::Str:    return "str";
         case TypeKind::Array:  return typeName(Type{t.elementKind}) + "[" + std::to_string(t.arraySize) + "]";
         case TypeKind::Object: return t.className;
         case TypeKind::Enum:   return t.className;
@@ -336,6 +342,7 @@ TypeKind typeKindFromName(const std::string& name) {
     if (name == "bool") return TypeKind::Bool;
     if (name == "char") return TypeKind::Char;
     if (name == "ptr")  return TypeKind::Ptr;
+    if (name == "str")  return TypeKind::Str;
     if (name == "void") return TypeKind::Void;
     return TypeKind::Error;
 }
@@ -423,6 +430,7 @@ static TokenType primitiveTokenType(TypeKind k) {
         case TypeKind::Bool: return TokenType::BOOL;
         case TypeKind::Char: return TokenType::CHAR_TYPE;
         case TypeKind::Ptr:  return TokenType::PTR;
+        case TypeKind::Str:  return TokenType::STR;
         case TypeKind::Void: return TokenType::VOID;
         default:             return TokenType::IDENTIFIER;
     }

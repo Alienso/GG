@@ -29,6 +29,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"char",   TokenType::CHAR_TYPE},
     {"void",   TokenType::VOID},
     {"ptr",    TokenType::PTR},
+    {"str",    TokenType::STR},
 
     // Keywords
     {"extern",   TokenType::EXTERN},

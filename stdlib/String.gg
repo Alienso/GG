@@ -22,12 +22,14 @@ class String {
     private ptr data;   // owned, null-terminated UTF-8 byte buffer
     private u64 size;   // byte length (excluding the null terminator)
 
-    // Construct from a null-terminated string literal, copying it into an owned buffer.
-    String(ptr literal) {
-        this.size = strlen(literal);
+    // Construct from a `str` literal, copying its bytes into an owned buffer. The byte length is
+    // known from the view (`literal.len`), so no strlen scan is needed; `literal.data` is the
+    // NUL-terminated source pointer.
+    String(str literal) {
+        this.size = literal.len;
         u64 allocSize = this.size + 1;          // +1 for the null terminator
         this.data = malloc(allocSize);
-        memcpy(this.data, literal, allocSize);
+        memcpy(this.data, literal.data, allocSize);
     }
 
     ~String() {

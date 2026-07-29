@@ -18,6 +18,9 @@ enum class TypeKind {
     F32, F64,
     Bool, Char,
     Ptr,    // opaque pointer — maps to LLVM's ptr; used for FFI / CRT bindings
+    Str,    // compile-time string literal: an immutable view over static bytes — { ptr, u64 len }.
+            // A string literal has this type; `.data` decays to a (NUL-terminated) ptr, `.len` is
+            // the byte length. Trivially copyable, no ownership/refcount (like a nullable primitive).
     Array,  // fixed-size stack array: element type + count stored in Type struct
     Object, // class instance — value, lives with its owner; className stores the class name
     Enum,   // enum value — a pointer to a global singleton variant; className stores the enum name

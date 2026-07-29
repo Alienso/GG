@@ -65,8 +65,8 @@ static std::string reflBaseClassName(std::string s) {
 Type SemanticAnalyzer::analyzeReflect(const ReflectExpr& r) {
     switch (r.kind) {
         case ReflectKind::TypeName:
-            // A compile-time string, represented like a normal string literal (ptr to bytes).
-            return Type{TypeKind::Ptr};
+            // A compile-time string — a `str` view (like a string literal), so `.len` / `.data` work.
+            return Type{TypeKind::Str};
 
         case ReflectKind::FieldCount:
         case ReflectKind::HasField:
@@ -175,7 +175,7 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
             return Type{TypeKind::I32};
         }
         case TokenType::STRING:
-            return Type{TypeKind::Ptr};
+            return Type{TypeKind::Str};   // a string literal is a `str` view (decays to `ptr` for FFI)
         case TokenType::CHAR:
             return Type{TypeKind::Char};
         default:
@@ -616,6 +616,12 @@ Type SemanticAnalyzer::classifyEquality(const Type& leftType, const Type& rightT
             return Type{TypeKind::Error};
         }
         return Type{TypeKind::Bool};
+    }
+    // `str` has no equality yet (Phase 1). Reject cleanly rather than fall through to the numeric
+    // compare below, which would emit a bogus `icmp` on the { ptr, i64 } view.
+    if (leftType.kind == TypeKind::Str || rightType.kind == TypeKind::Str) {
+        error(at, "'==' / '!=' is not supported on 'str' yet — build a 'String' to compare (" + what + ")");
+        return Type{TypeKind::Error};
     }
     // Primitives (numeric widen to a common type; bool/char match exactly).
     bool compatible = (leftType.kind == rightType.kind)
@@ -1689,6 +1695,15 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
 
     Type objectType = analyzeExpr(*memberAccess.object);
     if (isError(objectType)) return Type{TypeKind::Error};
+
+    // `str` view: `.data` → the (NUL-terminated) byte pointer (`ptr`), `.len` → byte length (`u64`).
+    if (objectType.kind == TypeKind::Str) {
+        if (memberAccess.field.lexeme == "data") return Type{TypeKind::Ptr};
+        if (memberAccess.field.lexeme == "len")  return Type{TypeKind::U64};
+        error(memberAccess.field, "'str' has no member '" + memberAccess.field.lexeme
+              + "' (only '.data' and '.len')");
+        return Type{TypeKind::Error};
+    }
 
     // Nullable receiver: `x.f` on a `T?` is an error unless it's a `?.` safe access (which narrows
     // the receiver and makes the whole access nullable).

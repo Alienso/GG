@@ -16,9 +16,10 @@ namespace fs = std::filesystem;
 // Public entry point
 // ============================================================
 
-Program ImportResolver::resolve(const std::string& rootFilePath) {
+Program ImportResolver::resolve(const std::string& rootFilePath, const ModuleSearchConfig& config) {
     processedPaths.clear();
     sharedGenerics_ = GenericRegistry{};
+    config_ = config;
 
     // Pass 1: pre-register every generic template name across all files so that
     // use sites are recognised regardless of which file declares the template.
@@ -40,6 +41,39 @@ Program ImportResolver::resolve(const std::string& rootFilePath) {
     fs::path rootCanonical = fs::weakly_canonical(fs::path(rootFilePath), rootEc);
     monoParser.monomorphize(program, rootEc ? rootFilePath : rootCanonical.string());
     return program;
+}
+
+// ============================================================
+// Import-path resolution (std/ prefix, file-relative, search roots)
+// ============================================================
+
+std::string ImportResolver::resolveImportPath(const fs::path& importerDir,
+                                               const std::string& rawPath) const {
+    std::error_code ec;
+    auto isFile = [&](const fs::path& p) { return fs::exists(p, ec) && fs::is_regular_file(p, ec); };
+
+    // 1. Reserved logical prefix `std/` → the compiler's standard library.
+    //    Resolved here even when the target is missing, so a bad stdlib import
+    //    reports against the stdlib directory rather than the importer.
+    if (!config_.stdlibDir.empty()) {
+        static const std::string prefix = "std/";
+        if (rawPath.rfind(prefix, 0) == 0)
+            return (fs::path(config_.stdlibDir) / rawPath.substr(prefix.size())).string();
+    }
+
+    // 2. File-relative — the original, backward-compatible behavior.
+    fs::path relative = importerDir / rawPath;
+    if (isFile(relative)) return relative.string();
+
+    // 3. Configured search roots, in order.
+    for (const std::string& root : config_.searchRoots) {
+        fs::path candidate = fs::path(root) / rawPath;
+        if (isFile(candidate)) return candidate.string();
+    }
+
+    // 4. Nothing matched — hand back the file-relative candidate so the caller's
+    //    existing "cannot find imported file" error names the most likely path.
+    return relative.string();
 }
 
 void ImportResolver::prescanTemplates(const std::string& filePath,
@@ -64,7 +98,7 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
         if (tokens[i].type == TokenType::IMPORT && tokens[i + 1].type == TokenType::STRING) {
             std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
-            std::string absPath = (parentDir / rawPath).string();
+            std::string absPath = resolveImportPath(parentDir, rawPath);
             prescanTemplates(absPath, visitedPaths, seedParser);
         }
     }
@@ -108,7 +142,7 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
             && i + 1 < tokens.size()
             && tokens[i + 1].type == TokenType::STRING) {
             std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
-            std::string absPath = (parentDir / rawPath).string();
+            std::string absPath = resolveImportPath(parentDir, rawPath);
             auto imported = collectClassNames(absPath, visitedPaths);
             names.insert(imported.begin(), imported.end());
         }
@@ -127,6 +161,10 @@ Program ImportResolver::processFile(const std::string& filePath) {
     fs::path canonical = fs::weakly_canonical(fs::path(filePath), errorCode);
     if (errorCode || !fs::exists(canonical)) {
         std::cerr << "Error: cannot find imported file '" << filePath << "'\n";
+        if (!config_.stdlibDir.empty())
+            std::cerr << "  (std/ resolves to: " << config_.stdlibDir << ")\n";
+        for (const std::string& root : config_.searchRoots)
+            std::cerr << "  (search root: " << root << ")\n";
         return Program{};
     }
 
@@ -159,7 +197,7 @@ Program ImportResolver::processFile(const std::string& filePath) {
             // Resolve the import path relative to the current file's directory.
             const auto& importStmt   = std::get<ImportStmt>(*declaration.node);
             std::string relativePath = stripQuotes(importStmt.path.lexeme);
-            std::string absolutePath = (parentDirectory / relativePath).string();
+            std::string absolutePath = resolveImportPath(parentDirectory, relativePath);
 
             Program imported = processFile(absolutePath);
             for (Stmt& importedDecl : imported.declarations)

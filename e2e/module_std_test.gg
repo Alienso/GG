@@ -1,0 +1,12 @@
+// e2e/module_std_test.gg — the reserved `std/` import prefix resolves to the compiler's
+// standard library regardless of this file's location on disk (no `../stdlib` walk).
+// Returns 0 on success.
+
+import "std/String.gg";
+
+fn main() -> i32 {
+    String s("café");
+    if (s.byteLength() != 5) { return 1; }   // é is 2 bytes → 5 bytes total
+    if (s.length()     != 4) { return 2; }   // 4 codepoints
+    return 0;
+}

@@ -101,21 +101,25 @@ class String {
                 if (len == 1) {
                     return lead as char;
                 }
+                // Widen each byte to i32 BEFORE the shifts: GG has no integer promotion,
+                // so a u8 operand keeps the arithmetic 8-bit and any shift >= 8 (or a
+                // 2-byte lead >= U+00C0) silently overflows to 0. Casting first keeps the
+                // whole decode in i32 width.
                 if (len == 2) {
-                    i32 cp = ((lead & 31) << 6)
-                           |  (bytes[i + 1] & 63);
+                    i32 cp = (((lead as i32) & 31) << 6)
+                           |  ((bytes[i + 1] as i32) & 63);
                     return cp as char;
                 }
                 if (len == 3) {
-                    i32 cp = ((lead & 15) << 12)
-                           | ((bytes[i + 1] & 63) << 6)
-                           |  (bytes[i + 2] & 63);
+                    i32 cp = (((lead as i32) & 15) << 12)
+                           | (((bytes[i + 1] as i32) & 63) << 6)
+                           |  ((bytes[i + 2] as i32) & 63);
                     return cp as char;
                 }
-                i32 cp = ((lead & 7) << 18)
-                       | ((bytes[i + 1] & 63) << 12)
-                       | ((bytes[i + 2] & 63) << 6)
-                       |  (bytes[i + 3] & 63);
+                i32 cp = (((lead as i32) & 7) << 18)
+                       | (((bytes[i + 1] as i32) & 63) << 12)
+                       | (((bytes[i + 2] as i32) & 63) << 6)
+                       |  ((bytes[i + 3] as i32) & 63);
                 return cp as char;
             }
 

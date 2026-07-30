@@ -12,7 +12,8 @@
 
 namespace fs = std::filesystem;
 
-GG::GG(std::vector<std::string>& inputPaths, CompilerOptions opts) : paths(inputPaths), options(opts) {}
+GG::GG(std::vector<std::string>& inputPaths, CompilerOptions opts, ModuleSearchConfig moduleCfg)
+    : paths(inputPaths), options(opts), moduleConfig(std::move(moduleCfg)) {}
 
 int GG::run() {
     const fs::path buildDir = fs::current_path() / "build";
@@ -30,7 +31,7 @@ int GG::run() {
             // compile never leaves a stale or empty .ll behind for the linker to pick up
             // (which previously surfaced as a baffling `undefined symbol: WinMain`).
             ImportResolver resolver;
-            Program ast = resolver.resolve(filePath);
+            Program ast = resolver.resolve(filePath, moduleConfig);
 
             SemanticResult result = semanticAnalyzer.analyze(ast, filePath, options);
             if (result.hadError) { exitCode = 1; continue; }   // errors already reported

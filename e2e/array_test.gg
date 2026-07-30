@@ -1,7 +1,7 @@
 // e2e/array_test.gg — exercises the growable Array<T> (std::vector-like).
 // Returns a unique number on the first failing check; 0 on success.
 
-import "../stdlib/Array.gg";
+import "std/Array.gg";
 
 fn main() -> i32 {
     mut Array<i32> a{};

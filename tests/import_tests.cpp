@@ -127,3 +127,95 @@ TEST_CASE("ImportResolver - missing file produces empty program", "[import]") {
     // No declarations from the missing file.
     REQUIRE(result.declarations.empty());
 }
+
+// ============================================================
+// ImportResolver — module search roots (the `std/` prefix + GG_PATH-style roots)
+// ============================================================
+
+// Create a subdirectory under the temp dir and write a file into it.
+static std::string writeTempFileIn(const std::string& subdir, const std::string& filename,
+                                    const std::string& source) {
+    fs::path dir = fs::temp_directory_path() / subdir;
+    fs::create_directories(dir);
+    std::string path = (dir / filename).string();
+    std::ofstream(path) << source;
+    return path;
+}
+
+TEST_CASE("ImportResolver - the `std/` prefix resolves against the configured stdlib dir", "[import]") {
+    // A fake stdlib laid out under a dir whose name is NOT next to the importer, so only the
+    // configured `std/` anchor can find it (file-relative resolution would fail).
+    fs::path fakeStd = fs::temp_directory_path() / "gg_fake_std";
+    fs::create_directories(fakeStd);
+    std::ofstream((fakeStd / "Widget.gg").string()) << "fn widget() -> i32 { return 42; }";
+
+    std::string mainPath = writeTempFileIn("gg_std_prefix_app", "main.gg",
+        "import \"std/Widget.gg\";\nfn main() -> i32 { return widget(); }");
+
+    ModuleSearchConfig cfg;
+    cfg.stdlibDir = fakeStd.string();
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+
+    // widget() + main() present; the `std/` import was found via the anchor, not file-relative.
+    REQUIRE(result.declarations.size() == 2);
+}
+
+TEST_CASE("ImportResolver - a search root resolves a bare import path", "[import]") {
+    fs::path libRoot = fs::temp_directory_path() / "gg_search_root_lib";
+    fs::create_directories(libRoot);
+    std::ofstream((libRoot / "gadget.gg").string()) << "fn gadget() -> i32 { return 5; }";
+
+    std::string mainPath = writeTempFileIn("gg_search_root_app", "main.gg",
+        "import \"gadget.gg\";\nfn main() -> i32 { return gadget(); }");
+
+    ModuleSearchConfig cfg;
+    cfg.searchRoots = { libRoot.string() };
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+
+    REQUIRE(result.declarations.size() == 2);
+}
+
+TEST_CASE("ImportResolver - file-relative resolution takes precedence over search roots", "[import]") {
+    // A `helper.gg` exists BOTH next to the importer and under a search root, with different
+    // bodies. File-relative must win — proving back-compat with existing relative imports.
+    fs::path rootDir = fs::temp_directory_path() / "gg_precedence_root";
+    fs::create_directories(rootDir);
+    std::ofstream((rootDir / "helper.gg").string()) << "fn helper() -> i32 { return 99; }";
+
+    // Local sibling helper.gg — the one that should be chosen.
+    writeTempFileIn("gg_precedence_app", "helper.gg", "fn helper() -> i32 { return 1; }");
+    std::string mainPath = writeTempFileIn("gg_precedence_app", "main.gg",
+        "import \"helper.gg\";\nfn main() -> i32 { return helper(); }");
+
+    ModuleSearchConfig cfg;
+    cfg.searchRoots = { rootDir.string() };
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+
+    // Exactly one helper() + one main() — the local sibling, not the root copy (would be a
+    // duplicate definition otherwise).
+    REQUIRE(result.declarations.size() == 2);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(result);
+    REQUIRE_FALSE(sem.hadError);   // no duplicate-definition error → only the sibling was merged
+}
+
+TEST_CASE("ImportResolver - a missing `std/` import reports against the stdlib dir", "[import]") {
+    StderrCapture capture;
+    std::string mainPath = writeTempFileIn("gg_std_missing_app", "main.gg",
+        "import \"std/Nope.gg\";\nfn main() -> i32 { return 0; }");
+
+    ModuleSearchConfig cfg;
+    cfg.stdlibDir = (fs::temp_directory_path() / "gg_fake_std").string();
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+
+    REQUIRE(capture.contains("Error"));
+    REQUIRE(capture.contains("std/ resolves to"));
+}

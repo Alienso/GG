@@ -451,6 +451,35 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
 3. **Monomorphize once**: a single `monoParser` expands all pending instantiations,
    appending concrete mangled declarations to the unified `Program`.
 
+Each of the three passes (`prescanTemplates`, `collectClassNames`, `processFile`) resolves an
+`import "..."` path through the **one** shared `resolveImportPath` helper, so they always agree on
+which file an import names.
+
+### Module / import resolution — search roots + the `std/` anchor
+`import "path"` is resolved by `ImportResolver::resolveImportPath(importerDir, rawPath)` against a
+`ModuleSearchConfig { stdlibDir, searchRoots }` (in `ImportResolver.h`), in this order (first
+existing wins):
+1. **Reserved `std/` prefix** → `<stdlibDir>/<rest>`. `std/` always names the compiler's standard
+   library regardless of the importer's location on disk — so `import "std/String.gg"` works from
+   anywhere (no `../stdlib` walk). Resolved under `stdlibDir` **even when the target is missing**, so
+   a bad stdlib import reports against the stdlib dir. Disabled if `stdlibDir` is empty.
+2. **File-relative** — `importerDir/rawPath` (the original, backward-compatible behavior; all
+   pre-existing relative imports resolve exactly as before, and take precedence over search roots).
+3. **`searchRoots`**, in order — `<root>/rawPath`.
+4. Fallback: the file-relative candidate (so the existing "cannot find imported file" error names the
+   most likely path; the error also lists the `std/` target + roots that were tried).
+- **`stdlibDir` auto-detection** (`main.cpp`, `findStdlibDir(argv0)`): honors `$GG_STDLIB` first,
+  else walks **up from the GG executable's directory** for a `stdlib/` folder (confirmed by its
+  `crt/` subdir). `searchRoots` come from `$GG_PATH` (`;`-separated, `findSearchRoots`). Both are
+  computed in `main`, passed via the `GG(paths, options, ModuleSearchConfig)` ctor →
+  `resolver.resolve(file, config)`. The default `resolve(file)` (no config) is file-relative only,
+  so the resolver **unit tests are unaffected** (they use temp files + relative imports).
+- The stdlib's own internal imports stay file-relative (`import "crt/cmem.gg"` — siblings, robust);
+  `e2e/` + `samples/` were migrated from `../stdlib/...` to `std/...`. **v1 scope**: this is axis-A
+  (resolution) only — symbols are still flattened into one flat-global `Program` (no per-module
+  namespacing; that's the deferred axis B). No manifest / dependency versioning yet.
+  Tests: `tests/import_tests.cpp` (`[import]`), `e2e/module_std_test.gg`.
+
 ### SemanticAnalyzer — 3 passes
 1. `collectClasses`  — build `classRegistry` (fields, methods, destructor).
 2. `collectFunctions` — hoist top-level function signatures into global scope.
@@ -1140,6 +1169,19 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1050 test cases / 1961 assertions** (as of **module resolution — import search roots + the `std/`
+anchor** (axis A). `import "..."` now resolves through one shared `ImportResolver::resolveImportPath`
+against a `ModuleSearchConfig`: a reserved **`std/` prefix** maps to the compiler's standard library
+(auto-detected by walking up from the GG executable for a `stdlib/` dir, or `$GG_STDLIB`), so
+`import "std/String.gg"` works from anywhere instead of a location-dependent `../stdlib` walk;
+**file-relative** resolution stays the backward-compatible default (all pre-existing relative imports
+unchanged, and it takes precedence over search roots); extra **`$GG_PATH`** roots are tried last.
+Config is computed in `main.cpp` and threaded via the `GG(paths, options, ModuleSearchConfig)` ctor;
+the default `resolve(file)` is file-relative-only, so resolver unit tests are unaffected. `e2e/` +
+`samples/` migrated to `std/...`; stdlib-internal imports stay sibling-relative. Symbols are still
+flat-global (per-module namespacing = the deferred axis B; no manifest/versioning yet). See the
+"Module / import resolution" invariant; `tests/import_tests.cpp` (`[import]`, +4 cases),
+`e2e/module_std_test.gg`. Prior baseline was
 **1046 test cases / 1955 assertions** (as of **impl specialization — concrete overrides blanket**
 — a concrete `impl Trait for Class<i32>` and the blanket `impl<T> Trait for Class<T>` may now coexist
 ("most specific wins"): the concrete impl is used for `Class<i32>`, the blanket for every other

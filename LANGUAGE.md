@@ -1427,13 +1427,27 @@ bounds add no runtime cost.
 
 ### Importing another GG file
 ```gg
-import "stdlib/io.gg";
-import "../other_module.gg";
+import "std/String.gg";       // the standard library — resolves anywhere
+import "helpers/util.gg";     // relative to THIS file's directory
+import "../other_module.gg";  // relative paths still work
 ```
-Paths are **relative to the importing file**. Imported declarations (functions, classes,
-generic templates) are merged into the program and become available throughout.
-Imports are **not** re-exported — if `a.gg` imports `b.gg` and `c.gg` imports `a.gg`,
-`c.gg` does not automatically see `b.gg`'s declarations.
+An import path resolves in this order (first match wins):
+
+1. **`std/` prefix** — the reserved name of the **standard library**. `import "std/String.gg"`
+   always finds the compiler's stdlib regardless of where the importing file lives on disk, so you
+   never write a fragile `../../stdlib/...` chain. The stdlib location is found automatically
+   (relative to the `GG` compiler executable); override it with the `GG_STDLIB` environment
+   variable.
+2. **File-relative** — resolved against the **importing file's** directory (the original behavior;
+   every existing relative import keeps working, and a local file wins over a search root).
+3. **Search roots** — any directories listed in the `GG_PATH` environment variable (`;`-separated),
+   tried in order.
+
+Imported declarations (functions, classes, generic templates) are merged into the program and
+become available throughout. Imports are **not** re-exported — if `a.gg` imports `b.gg` and `c.gg`
+imports `a.gg`, `c.gg` does not automatically see `b.gg`'s declarations. There is **no per-module
+namespacing** yet: all imported symbols share one flat global scope (a name clash across files is a
+redefinition), and there is no project manifest or dependency-versioning system.
 
 ### Calling C functions (`extern`)
 ```gg

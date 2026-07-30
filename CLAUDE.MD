@@ -507,6 +507,59 @@ Rejects the "value-object → reference borrow" footgun: passing a **stack value
   Target args must each be a bare impl type-param (no nested/concrete args) — else a parse error.
   A bare `T` inside a **non**-generic `impl Trait for Foo<T>` (missing the `impl<T>` header) is an
   "unknown type" error that points at the `impl<T>` fix (`throwTypeExpected` + `inImplBlock_`).
+  - **Specialization — concrete overrides blanket** ("most specific wins"): a concrete
+    `impl Trait for Class<i32>` and the blanket `impl<T> Trait for Class<T>` may coexist; the
+    concrete one is used for `Class<i32>`, the blanket for every other instantiation. Implemented by
+    a **skip** in `runMonomorphization`: before the worklist loop it collects every explicit concrete
+    impl's `Trait@MangledClass` key (`ImplDeclStmt::traitName` + the `consumeType`-mangled
+    `ImplDeclStmt::typeName`) from `program.declarations`, then skips instantiating a blanket impl
+    (its `GenericImplTemplate::traitName`) for any `Class$args` a concrete impl already covers —
+    otherwise both would emit `Class$args::method` and collide. **Order-independent** (the set is
+    built up-front from all user-written impls) and **per-trait** (the key includes the trait, so a
+    concrete `impl A for Box<i32>` doesn't suppress a blanket `impl B for Box<T>`). GG expresses only
+    **two tiers** (fully-concrete vs. fully-blanket — partial specialization like `impl<T> for
+    Box<Vec<T>>` isn't a thing), so there is no ambiguity lattice; whole-impl replacement only (an
+    impl must satisfy the whole trait). Works for multi-param generics (`Pair$i32$f64` keys) and
+    operator traits (`Add`, via the normal desugar). **`Call` special-case**: a concrete `impl Call`
+    canonicalizes its trait to `Call$…$ret$…` while the blanket stores the raw `Call`, so the
+    key-collect step **also** registers a raw-`Call@class` alias for any `Call$…` concrete impl, so
+    the concrete still suppresses the blanket. Two identical *concrete* impls remain a real duplicate
+    error (specialization only relaxes blanket-vs-concrete). Tests: `tests/trait_tests.cpp`
+    (`[specialization]`), `e2e/impl_specialization_test.gg`.
+
+### Generic type-argument deduction — `f(x)` ⇒ `f<T>(x)` (parser-side)
+A generic **free function** called **without** explicit `<…>` infers its type parameters from the
+argument types, so `valid(u)` behaves like `valid<User>(u)`. **Purely additive** — a no-`<…>` call to
+a template was already an error (only mangled instantiations are ever defined), so there is no prior
+meaning to break. Inference runs **in the parser** (where monomorphization lives), reusing the
+`scopes_` name→type-token stack the parser **already maintains for every in-scope local/param/field**
+(populated by `recordLocal` on every var decl + the param seed; previously only read for lambda
+capture). `inferGenericTypeArgs` (`Parser.cpp`), called from the `name(args)` primary-parse branch
+(after the existing single-`Call`-bound lambda-inference block, which still returns first):
+- **Matching**: scans the template's raw parameter tokens (`GenericTemplate::tokens`; params are not
+  pre-parsed) for parameters whose type is a **top-level** type parameter — head token is a type-param
+  name followed only by sigils `& * ?` then the param name (so `T`/`T&`/`T*`/`T?` match; `Array<T>&`
+  does **not**). Builds paramPos → type-param-name.
+- **Reading an arg's type** (`genericArgBaseName` strips a trailing `?`, a `ref:` borrow prefix, and a
+  trailing `&`): an **in-scope identifier** (local/param via `scopes_`, or an instance field via
+  `classFieldScope_`) → its recorded type's base name; a `Class(...)` **constructor CallExpr** (callee
+  in `classNames`/`gen_->classNames`) → the class; a **`NewExpr`** → its class.
+- **All-or-nothing**: every type parameter must be deduced; otherwise a clear parse error ("cannot
+  infer type argument(s) for generic function 'f'; specify them explicitly, e.g. f<Type>(...)").
+  On success, mangles + `recordInstantiation` + emits the mangled `CallExpr` exactly like the explicit
+  `f<…>(…)` path, so it reaches the **same** monomorphized instantiation.
+- **v1 limits** (all → the clear error, never a miscompile): only **free functions** (not methods);
+  only **positional** calls (a named-arg call isn't inference-matched); type params that appear only
+  **nested** (`Array<T>`), only in the **return type/body** (`zero<T>() -> T out`), or are supplied a
+  **literal**/arbitrary-expression argument are not inferred. A **`var`-typed local** argument is not
+  inferable either — `recordLocal` stores the `var` *sentinel* (the real type is deduced later, in
+  semantics, after monomorphization), and `baseFrom` maps that sentinel to "" so the call gets the
+  clean error rather than a bogus `f$var` instantiation (same root cause as var-in-lambda-capture).
+  A repeated type param (`f<T>(T&, T&)`) infers from the **first** occurrence; a mismatched later
+  argument is caught by normal overload resolution. Explicit `<…>` always works.
+- Tests: `tests/generic_infer_tests.cpp` (`[geninfer]`), `e2e/generic_infer_test.gg`;
+  `e2e/annotation_test.gg` uses `valid(u)`/`sumLive(u)` (inferred) alongside `renameKeyBytes<User>()`
+  (explicit — `T` only in the body).
 
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
@@ -1087,6 +1140,33 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1046 test cases / 1955 assertions** (as of **impl specialization — concrete overrides blanket**
+— a concrete `impl Trait for Class<i32>` and the blanket `impl<T> Trait for Class<T>` may now coexist
+("most specific wins"): the concrete impl is used for `Class<i32>`, the blanket for every other
+instantiation. Previously the two collided as a duplicate `Class$i32::method`. Implemented by a skip
+in `runMonomorphization` — before expanding the worklist it collects every explicit concrete impl's
+`Trait@MangledClass` key, then skips instantiating the blanket for a class a concrete impl already
+covers. Order-independent and per-trait; GG expresses only two tiers (no partial specialization), so
+there's no ambiguity. A double-check QA pass added coverage — multi-param generics, operator traits
+(`Add`), the two-identical-concrete duplicate guard — and fixed a **`Call`-trait corner**: a concrete
+`impl Call` canonicalizes to `Call$…` while the blanket stores raw `Call`, so a raw-`Call@class` alias
+key is now also registered so the concrete still suppresses the blanket (previously they collided).
+See the generic-impls invariant; `tests/trait_tests.cpp` (`[specialization]`, 8 cases),
+`e2e/impl_specialization_test.gg`. Prior baseline was
+**1038 test cases / 1937 assertions** (as of **generic type-argument deduction** — a generic free
+function called without explicit `<…>` infers its type parameters from the argument types
+(`valid(u)` ⇒ `valid<User>(u)`). Runs entirely in the parser, reusing the `scopes_` name→type-token
+stack it already maintains for every in-scope local/param/field; v1 matches a **top-level** type-param
+parameter (`T`/`T&`/`T*`/`T?`) against a positional argument whose type is syntactically known (an
+in-scope identifier, a `Class(...)` constructor call, or `new Class(...)`), all-or-nothing, else a
+clear "cannot infer … specify explicitly" error. Purely additive (a no-`<…>` template call was already
+an error). A double-check QA pass added edge coverage — repeated type param (`f<T>(T&,T&)`),
+bare-instance-field argument, named callable-object → `Call`-bound inference, mismatched-repeated-arg
+and named-arg errors — and fixed two bugs in the process: a **`var`-typed local argument** produced a
+bogus `f$var` instantiation (now a clean error, via a `var`-sentinel guard in `baseFrom`) and the
+scope walk **skipped past a shadowing `var` binding** to an outer same-named local (now stops at the
+innermost binding). See the "Generic type-argument deduction" invariant; `tests/generic_infer_tests.cpp`
+(`[geninfer]`, 14 cases), `e2e/generic_infer_test.gg`. Prior baseline was
 **1024 test cases / 1921 assertions** (as of a **QA edge-case pass over annotations** — added
 field-type coverage (`f.get` splicing `char`/`bool` const values), target coverage (`@hasAnnotation`
 seeing a **method-carried** and a **class-level** annotation), and more error cases

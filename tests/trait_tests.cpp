@@ -649,3 +649,134 @@ TEST_CASE("Generic impl - a nested target type argument is rejected", "[trait][g
     )");
     REQUIRE(cap.contains("name each type parameter directly"));
 }
+
+// ============================================================
+// Impl specialization — concrete overrides blanket ("most specific wins")
+// ============================================================
+// A concrete `impl Trait for Box<i32>` and the blanket `impl<T> Trait for Box<T>` may coexist:
+// the concrete one is used for Box<i32>, the blanket for every other instantiation. GG can only
+// express two tiers (fully-concrete vs fully-blanket), so there is no ambiguity to resolve.
+
+TEST_CASE("Impl specialization - concrete and blanket coexist (no duplicate error)", "[trait][impl][specialization]") {
+    // Previously this collided ("Box$i32::tag already defined"); now the blanket is skipped for
+    // Box<i32> because a concrete impl covers it. Exactly one @Box$i32_tag is emitted.
+    auto ir = codegenString(R"(
+        trait Tag { fn tag() -> i32; }
+        class Box<T> { mut T v; Box(T x) { this.v = x; } }
+        impl<T> Tag for Box<T>   { fn tag() -> i32 { return 0; } }
+        impl    Tag for Box<i32> { fn tag() -> i32 { return 1; } }
+        fn main() -> i32 { Box<i32>& a = new Box<i32>(5); return a.tag(); }
+    )");
+    size_t first = ir.find("define i32 @Box$i32_tag(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @Box$i32_tag(", first + 1) == std::string::npos);   // exactly one definition
+    REQUIRE(ir.find("ret i32 1") != std::string::npos);                  // the concrete body
+}
+
+TEST_CASE("Impl specialization - blanket still applies to other instantiations", "[trait][impl][specialization]") {
+    // The concrete impl covers Box<i32>; Box<f64> still gets the blanket.
+    auto ir = codegenString(R"(
+        trait Tag { fn tag() -> i32; }
+        class Box<T> { mut T v; Box(T x) { this.v = x; } }
+        impl<T> Tag for Box<T>   { fn tag() -> i32 { return 0; } }
+        impl    Tag for Box<i32> { fn tag() -> i32 { return 1; } }
+        fn main() -> i32 {
+            Box<i32>& a = new Box<i32>(5);
+            Box<f64>& b = new Box<f64>(2.0);
+            return a.tag() + b.tag();
+        }
+    )");
+    REQUIRE(ir.find("define i32 @Box$i32_tag(") != std::string::npos);   // concrete
+    REQUIRE(ir.find("@Box$f64_tag(") != std::string::npos);   // blanket instantiation
+}
+
+TEST_CASE("Impl specialization - order independent (concrete declared before blanket)", "[trait][impl][specialization]") {
+    auto ir = codegenString(R"(
+        trait Tag { fn tag() -> i32; }
+        class Box<T> { mut T v; Box(T x) { this.v = x; } }
+        impl    Tag for Box<i32> { fn tag() -> i32 { return 1; } }
+        impl<T> Tag for Box<T>   { fn tag() -> i32 { return 0; } }
+        fn main() -> i32 { Box<i32>& a = new Box<i32>(5); return a.tag(); }
+    )");
+    size_t first = ir.find("define i32 @Box$i32_tag(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @Box$i32_tag(", first + 1) == std::string::npos);
+}
+
+TEST_CASE("Impl specialization - only the matching trait is specialized", "[trait][impl][specialization]") {
+    // A concrete `impl Tag for Box<i32>` must NOT suppress the blanket `impl<T> Show for Box<T>`
+    // (different trait). Box<i32> still needs its Show from the blanket.
+    auto ir = codegenString(R"(
+        trait Tag  { fn tag() -> i32; }
+        trait Show { fn show() -> i32; }
+        class Box<T> { mut T v; Box(T x) { this.v = x; } }
+        impl<T> Tag  for Box<T>   { fn tag() -> i32 { return 0; } }
+        impl<T> Show for Box<T>   { fn show() -> i32 { return 9; } }
+        impl    Tag  for Box<i32> { fn tag() -> i32 { return 1; } }
+        fn main() -> i32 { Box<i32>& a = new Box<i32>(5); return a.tag() + a.show(); }
+    )");
+    REQUIRE(ir.find("define i32 @Box$i32_tag(")  != std::string::npos);   // concrete Tag
+    REQUIRE(ir.find("@Box$i32_show(") != std::string::npos);   // blanket Show still instantiated
+}
+
+TEST_CASE("Impl specialization - multi-parameter generic", "[trait][impl][specialization]") {
+    auto ir = codegenString(R"(
+        trait Tag { fn tag() -> i32; }
+        class Pair<A, B> { mut A a; mut B b; Pair(A x, B y) { this.a = x; this.b = y; } }
+        impl<A, B> Tag for Pair<A, B>     { fn tag() -> i32 { return 0; } }
+        impl       Tag for Pair<i32, f64> { fn tag() -> i32 { return 3; } }
+        fn main() -> i32 {
+            Pair<i32, f64>& p = new Pair<i32, f64>(1, 2.0);
+            Pair<i32, i32>& q = new Pair<i32, i32>(1, 2);
+            return p.tag() + q.tag();
+        }
+    )");
+    REQUIRE(ir.find("define i32 @Pair$i32$f64_tag(") != std::string::npos);   // concrete
+    REQUIRE(ir.find("define i32 @Pair$i32$i32_tag(") != std::string::npos);   // blanket instantiation
+}
+
+TEST_CASE("Impl specialization - operator trait (Add) concrete overrides blanket", "[trait][impl][specialization]") {
+    auto ir = codegenString(R"(
+        class Vec<T> { mut T x; Vec(T v) { this.x = v; } }
+        impl<T> Add for Vec<T>   { fn add(Vec<T>& o) -> i32 { return 0; } }
+        impl    Add for Vec<i32> { fn add(Vec<i32>& o) -> i32 { return 42; } }
+        fn main() -> i32 {
+            Vec<i32>& a = new Vec<i32>(1);
+            Vec<i32>& b = new Vec<i32>(2);
+            return a + b;
+        }
+    )");
+    size_t first = ir.find("define i32 @Vec$i32_add(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @Vec$i32_add(", first + 1) == std::string::npos);   // exactly one (concrete)
+    REQUIRE(ir.find("ret i32 42") != std::string::npos);                            // the concrete body
+}
+
+TEST_CASE("Impl specialization - Call trait concrete overrides blanket", "[trait][impl][specialization]") {
+    // The concrete `impl Call for Fn<i32>` canonicalizes to `Call$…`; the blanket stores raw `Call`.
+    // A raw-`Call@class` alias key lets the concrete still suppress the blanket (no duplicate `call`).
+    auto ir = codegenString(R"(
+        class Fn<T> { mut T base; Fn(T b) { this.base = b; } }
+        impl<T> Call for Fn<T>   { fn call(i32 x) -> i32 { return 0; } }
+        impl    Call for Fn<i32> { fn call(i32 x) -> i32 { return 7; } }
+        fn main() -> i32 { Fn<i32>& f = new Fn<i32>(1); return f(5); }
+    )");
+    size_t first = ir.find("define i32 @Fn$i32_call(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @Fn$i32_call(", first + 1) == std::string::npos);   // exactly one (concrete)
+    REQUIRE(ir.find("ret i32 7") != std::string::npos);
+}
+
+TEST_CASE("Impl specialization - two concrete impls for the same type still collide", "[trait][impl][specialization]") {
+    // Specialization relaxes blanket-vs-concrete only; two identical concrete impls are a real
+    // duplicate and must still error.
+    StderrCapture cap;
+    analyzeString(R"(
+        trait Tag { fn tag() -> i32; }
+        class Box<T> { mut T v; Box(T x) { this.v = x; } }
+        impl Tag for Box<i32> { fn tag() -> i32 { return 1; } }
+        impl Tag for Box<i32> { fn tag() -> i32 { return 2; } }
+        fn main() -> i32 { Box<i32>& a = new Box<i32>(5); return a.tag(); }
+    )");
+    REQUIRE(cap.contains("already defined"));
+}

@@ -159,6 +159,7 @@ add_executable(GG_tests
         tests/reflect_tests.cpp
         tests/str_tests.cpp
         tests/annotation_tests.cpp
+        tests/generic_infer_tests.cpp
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})
 target_link_libraries(GG_tests PRIVATE gg_core Catch2::Catch2WithMain)

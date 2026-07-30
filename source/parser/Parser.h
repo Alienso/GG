@@ -47,6 +47,7 @@ struct GenericImplTemplate {
     std::string                           targetClass;       // e.g. "Array"
     std::vector<std::string>              targetParamAtPos;  // target arg position → impl type-param name
     std::vector<Token>                    tokens;            // `impl <Trait> for <Class<…>> { … }` (header `<…>` stripped)
+    std::string                           traitName;         // the trait this blanket impl provides (for specialization skip)
 };
 struct GenericRegistry {
     std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
@@ -196,6 +197,19 @@ private:
                                   const std::vector<std::vector<Token>>& args) const;
     void recordInstantiation(const std::string& templateName, const std::string& mangled,
                              std::vector<std::vector<Token>> args);
+    // Generic type-argument DEDUCTION for a `f(args)` call written WITHOUT explicit `<…>`.
+    // Infers each type parameter of the template `fnName` from the call arguments' types, so
+    // `f(x)` works like `f<T>(x)`. v1 handles the common shape: a type parameter appearing as a
+    // top-level parameter type (`T`, `T&`, `T*`, `T?`) matched against a positional argument whose
+    // type is syntactically known — an in-scope identifier, a `Class(...)`/`Class{...}` constructor
+    // call, or `new Class(...)`. Fills `out` (one token-slice per type param, in order) and returns
+    // true iff EVERY type parameter was deduced; false otherwise (caller then errors).
+    bool inferGenericTypeArgs(const std::string& fnName,
+                              const std::vector<std::unique_ptr<Expr>>& args,
+                              std::vector<std::vector<Token>>& out);
+    // The base type name a deduced argument contributes (strips a trailing `?`, a `ref:` borrow
+    // prefix, and a trailing `&`): `User&` / `ref:User` / `User?` → `User`; `i32` → `i32`.
+    [[nodiscard]] static std::string genericArgBaseName(const Token& typeToken);
     void runMonomorphization(Program& program);
 
     // ---- Compile-time reflection expansion (runs at the end of runMonomorphization) ----

@@ -1344,6 +1344,37 @@ i32 m = maxT<i32>(10, 20);
 i64 n = maxT<i64>(1000, 2000);
 ```
 
+### Type-argument deduction
+
+A generic function called **without** the explicit `<…>` deduces its type parameters from the
+argument types, when it can:
+
+```gg
+class Box { mut i32 v; Box(i32 x) { this.v = x; } }
+fn unwrap<T>(T& b) -> i32 { return b.v; }
+
+fn main() -> i32 {
+    mut Box b = Box(7);
+    return unwrap(b);          // T deduced as Box — same as unwrap<Box>(b)
+}
+```
+
+Deduction works when a type parameter appears **directly** as a parameter's type (`T`, `T&`, `T*`,
+`T?`) and the matching argument's type is known from its syntax — an in-scope variable, a
+`Class(...)` constructor call, or `new Class(...)`. It is **all-or-nothing**: if any type parameter
+cannot be deduced, the call is an error asking you to write the type arguments explicitly. Cases
+that still need explicit `<…>`:
+
+```gg
+fn zero<T>() -> T out { }        // T is only in the return type — nothing to deduce from
+var z = zero<i32>();             // → must write it
+
+fn echo<T>(T x) -> i32 { ... }
+echo(5);                         // error: a bare literal has no syntactic type — write echo<i32>(5)
+```
+
+Explicit type arguments always work; deduction is just a convenience for the common case.
+
 ### Cross-file generics
 Templates defined in imported files are available at use sites:
 ```gg
@@ -1501,6 +1532,24 @@ fn main() -> i32 {
 - **Forgetting the header is a common mistake:** `impl Index for Buffer<T>` (no `impl<T>`) leaves
   `T` undeclared and errors with a note pointing you to the `impl<T>` form.
 - A concrete impl on a single instantiation still works too: `impl Index for Buffer<i32> { … }`.
+
+**Specialization — a concrete impl overrides the blanket one.** A blanket `impl<T> Trait for Box<T>`
+and a concrete `impl Trait for Box<i32>` may coexist; the most specific one wins:
+
+```gg
+trait Tag { fn tag() -> i32; }
+class Box<T> { mut T v; Box(T x) { this.v = x; } }
+
+impl<T> Tag for Box<T>   { fn tag() -> i32 { return 0; } }   // blanket
+impl    Tag for Box<i32> { fn tag() -> i32 { return 1; } }   // concrete — used for Box<i32>
+
+// Box<i32> uses the concrete impl (tag() == 1); Box<f64>, Box<Point>, … use the blanket (== 0).
+```
+
+The concrete impl is used for exactly that instantiation; the blanket covers all others. Declaration
+order doesn't matter. Because GG only has two tiers (a fully-concrete impl vs. a fully-generic one —
+there's no partial specialization like `impl<T> for Box<Vec<T>>`), there's never any ambiguity about
+which is "more specific."
 
 ### Operator overloading
 

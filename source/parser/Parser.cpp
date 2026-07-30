@@ -388,7 +388,7 @@ bool Parser::tryCaptureImplTemplate() {
 
     gen_->implTemplates.push_back(GenericImplTemplate{
         std::move(typeParams), std::move(bounds), std::move(targetClass),
-        std::move(targetParamAtPos), std::move(captured) });
+        std::move(targetParamAtPos), std::move(captured), tokens[p].lexeme });
     current = k;   // past the closing '}'
     return true;
 }
@@ -479,11 +479,119 @@ void Parser::recordInstantiation(const std::string& templateName, const std::str
     gen_->worklist.push_back(GenericInstantiation{ templateName, mangled, std::move(args) });
 }
 
+std::string Parser::genericArgBaseName(const Token& t) {
+    std::string s = t.lexeme;
+    if (!s.empty() && s.back() == '?') s.pop_back();          // nullable suffix
+    if (s.rfind("ref:", 0) == 0) s = s.substr(4);             // `T*` borrow → "ref:T"
+    else if (!s.empty() && s.back() == '&') s.pop_back();     // `T&` owning reference
+    return s;
+}
+
+bool Parser::inferGenericTypeArgs(const std::string& fnName,
+                                  const std::vector<std::unique_ptr<Expr>>& args,
+                                  std::vector<std::vector<Token>>& out) {
+    auto it = gen_->templates.find(fnName);
+    if (it == gen_->templates.end() || it->second.typeParams.empty()) return false;
+    const GenericTemplate& tmpl = it->second;
+    std::unordered_set<std::string> tparams(tmpl.typeParams.begin(), tmpl.typeParams.end());
+
+    // 1. Scan the template's parameter list (raw tokens; params are not pre-parsed) to find, for
+    //    each parameter position, whether its type is a bare type parameter (`T` / `T&` / `T*` /
+    //    `T?`). Record paramPos → type-param name for those.
+    const std::vector<Token>& toks = tmpl.tokens;
+    size_t lp = 0;
+    while (lp < toks.size() && toks[lp].type != TokenType::LEFT_PAREN) ++lp;
+    if (lp == toks.size()) return false;
+
+    std::unordered_map<size_t, std::string> paramTypeParam;   // paramPos → type-param name
+    size_t depth = 1, i = lp + 1, paramPos = 0, groupStart = i;
+    auto analyzeGroup = [&](size_t s, size_t e) {
+        if (s >= e) return;
+        size_t j = s;
+        if (toks[j].lexeme == "mut") ++j;                      // optional `mut`
+        if (j >= e || toks[j].type != TokenType::IDENTIFIER) return;   // primitives are keywords, skip
+        if (!tparams.count(toks[j].lexeme)) return;            // not a bare type parameter
+        const std::string tp = toks[j].lexeme;
+        ++j;
+        while (j < e && (toks[j].type == TokenType::AMPERSAND || toks[j].type == TokenType::STAR
+                         || toks[j].type == TokenType::QUESTION)) ++j;   // trailing sigils
+        if (j < e && toks[j].type == TokenType::IDENTIFIER)    // then the param name → a match
+            paramTypeParam.emplace(paramPos, tp);
+    };
+    for (; i < toks.size() && depth > 0; ++i) {
+        TokenType tt = toks[i].type;
+        if (tt == TokenType::LEFT_PAREN || tt == TokenType::LESS) ++depth;
+        else if (tt == TokenType::GREATER) { if (depth > 1) --depth; }
+        else if (tt == TokenType::RIGHT_PAREN) {
+            if (--depth == 0) { analyzeGroup(groupStart, i); break; }
+        } else if (tt == TokenType::COMMA && depth == 1) {
+            analyzeGroup(groupStart, i);
+            groupStart = i + 1;
+            ++paramPos;
+        }
+    }
+
+    // 2. For each type parameter (in order), read the type off its matched positional argument.
+    for (const std::string& tp : tmpl.typeParams) {
+        size_t pos = SIZE_MAX;
+        for (const auto& [p, name] : paramTypeParam) if (name == tp) { pos = std::min(pos, p); }
+        if (pos == SIZE_MAX || pos >= args.size() || !args[pos]) return false;
+        const Expr* n = args[pos].get();
+        std::string base;
+        // A binding's recorded type token whose kind is a usable base name. A `var`-typed local
+        // records the `var` SENTINEL (its real type is only deduced later, in semantics, after
+        // monomorphization), so it is NOT inferable here — treat it as un-inferable so the call
+        // gets the clean "specify explicitly" error rather than a bogus `f$var` instantiation.
+        auto baseFrom = [](const Token& t) -> std::string {
+            return t.type == TokenType::VAR ? std::string{} : genericArgBaseName(t);
+        };
+        if (const auto* id = std::get_if<IdentifierExpr>(n->node.get())) {
+            const Token* found = nullptr;
+            for (size_t k = scopes_.size(); k-- > 0 && !found; ) {   // innermost binding wins (shadowing)
+                auto sit = scopes_[k].find(id->name.lexeme);
+                if (sit != scopes_[k].end()) found = &sit->second;
+            }
+            if (!found) {                                            // else an enclosing instance field
+                auto fit = classFieldScope_.find(id->name.lexeme);
+                if (fit != classFieldScope_.end()) found = &fit->second;
+            }
+            if (found) base = baseFrom(*found);                      // empty for a `var` binding → un-inferable
+        } else if (const auto* c = std::get_if<CallExpr>(n->node.get())) {
+            if (classNames.count(c->callee.lexeme) || gen_->classNames.count(c->callee.lexeme))
+                base = c->callee.lexeme;                       // a `Class(...)` constructor call
+        } else if (const auto* ne = std::get_if<NewExpr>(n->node.get())) {
+            base = ne->className.lexeme;                       // `new Class(...)`
+        }
+        if (base.empty()) return false;                        // un-inferable argument
+        out.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, base, 0 } });
+    }
+    return true;
+}
+
 void Parser::runMonomorphization(Program& program) {
     // Every queued instantiation's mangled name is a concrete class name during
     // re-parse (the per-file parsers that recorded them are gone, so seed here).
     for (const auto& mangled : gen_->instantiated) classNames.insert(mangled);
     for (const auto& lname : gen_->lambdaClassNames) classNames.insert(lname);  // generated lambda classes
+
+    // Impl specialization — a CONCRETE `impl Trait for Class<i32>` overrides the BLANKET
+    // `impl<T> Trait for Class<T>` for that exact type ("most specific wins", the only tier GG can
+    // express since partial specialization isn't a thing here). Collect every explicit concrete
+    // impl's `Trait@MangledClass` key (the user-written impls are already parsed into the program;
+    // their `Class<i32>` target was mangled to `Class$i32` by consumeType) so that below we skip
+    // instantiating a blanket impl for a class a concrete impl already covers — otherwise both would
+    // emit `Class$i32::method` and collide as a duplicate.
+    std::unordered_set<std::string> concreteImplKeys;
+    for (const Stmt& s : program.declarations)
+        if (const auto* im = std::get_if<ImplDeclStmt>(s.node.get())) {
+            concreteImplKeys.insert(im->traitName.lexeme + "@" + im->typeName.lexeme);
+            // A concrete `impl Call for X` canonicalizes its trait to the signature-mangled
+            // `Call$…$ret$…`, whereas a blanket `impl<T> Call for X<T>` stores the RAW `Call` in its
+            // template. Register a raw-`Call@class` alias so the concrete still suppresses the
+            // blanket for that class (any concrete `call` on a class collides with a blanket `call`).
+            if (im->traitName.lexeme.rfind("Call$", 0) == 0)
+                concreteImplKeys.insert("Call@" + im->typeName.lexeme);
+        }
 
     while (!gen_->worklist.empty()) {
         GenericInstantiation inst = std::move(gen_->worklist.back());
@@ -546,6 +654,9 @@ void Parser::runMonomorphization(Program& program) {
                 const GenericImplTemplate& impl = gen_->implTemplates[ti];
                 if (impl.targetClass != inst.templateName) continue;
                 if (impl.targetParamAtPos.size() != inst.args.size()) continue;  // arity mismatch
+
+                // Specialization: a concrete `impl Trait for Class$args` overrides this blanket one.
+                if (concreteImplKeys.count(impl.traitName + "@" + inst.mangledName)) continue;
 
                 std::string key = std::to_string(ti) + "@" + inst.mangledName;
                 if (!gen_->implInstantiated.insert(key).second) continue;        // already done
@@ -2478,6 +2589,26 @@ Expr Parser::parsePrimary() {
                                                   std::move(args), std::move(argNames) });
                     }
                 }
+            }
+
+            // Generic type-argument DEDUCTION: a generic function called without explicit `<…>`
+            // (and not the lambda case above) infers its type parameters from the argument types,
+            // so `f(x)` behaves like `f<T>(x)`. Only attempted for a purely positional call.
+            if (gen_->funcNames.count(name.lexeme)) {
+                bool positional = true;
+                for (const Token& an : argNames) if (!an.lexeme.empty()) { positional = false; break; }
+                std::vector<std::vector<Token>> inferred;
+                if (positional && inferGenericTypeArgs(name.lexeme, args, inferred)) {
+                    std::string mangled = mangleInstantiation(name.lexeme, inferred);
+                    recordInstantiation(name.lexeme, mangled, std::move(inferred));
+                    return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
+                                              std::move(args), std::move(argNames) });
+                }
+                // A generic function with no explicit `<…>` whose type arguments we could not deduce:
+                // a clear error beats the confusing "unknown function" a bare template name causes
+                // later (only mangled instantiations are ever defined).
+                throw error(name, "cannot infer type argument(s) for generic function '" + name.lexeme
+                            + "'; specify them explicitly, e.g. " + name.lexeme + "<Type>(...)");
             }
             return makeExpr(CallExpr{ name, std::move(args), std::move(argNames) });
         }

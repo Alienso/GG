@@ -1,0 +1,33 @@
+// e2e/impl_specialization_test.gg — impl specialization: a CONCRETE `impl Trait for Class<i32>`
+// overrides the BLANKET `impl<T> Trait for Class<T>` for that exact type ("most specific wins"),
+// while the blanket still applies to every other instantiation. Also checks order independence
+// (a concrete impl declared BEFORE its blanket). Returns 0 on success.
+
+trait Tag { fn tag() -> i32; }
+
+class Box<T> { mut T v; Box(T x) { this.v = x; } }
+impl<T> Tag for Box<T>   { fn tag() -> i32 { return 0; } }   // blanket
+impl    Tag for Box<i32> { fn tag() -> i32 { return 1; } }   // concrete — more specific
+
+// Order independence: the concrete impl appears BEFORE the blanket here.
+class Cell<T> { mut T v; Cell(T x) { this.v = x; } }
+impl    Tag for Cell<i32> { fn tag() -> i32 { return 7; } }   // concrete (declared first)
+impl<T> Tag for Cell<T>   { fn tag() -> i32 { return 5; } }   // blanket
+
+fn main() -> i32 {
+    Box<i32>& a = new Box<i32>(5);
+    Box<f64>& b = new Box<f64>(2.0);
+    Cell<i32>& c = new Cell<i32>(1);
+    Cell<f64>& d = new Cell<f64>(3.0);
+
+    if (a.tag() == 1) {              // concrete wins for Box<i32>
+        if (b.tag() == 0) {          // blanket still applies to Box<f64>
+            if (c.tag() == 7) {      // concrete wins for Cell<i32> (declared before its blanket)
+                if (d.tag() == 5) {  // blanket applies to Cell<f64>
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}

@@ -50,11 +50,11 @@ fn main() -> i32 {
     u.age = 30;
 
     mut i32 ok = 0;
-    if (sumLive<User>(u) == 37)         { ok = ok + 1; }   // 7 + 30 (cache @Skip'd)
-    if (valid<User>(u))                 { ok = ok + 1; }   // age 30 ∈ [0,150]
+    if (sumLive(u) == 37)               { ok = ok + 1; }   // <User> inferred from u; 7 + 30 (cache @Skip'd)
+    if (valid(u))                       { ok = ok + 1; }   // <User> inferred from u; age 30 ∈ [0,150]
     u.age = 200;
-    if (valid<User>(u) == false)        { ok = ok + 1; }   // 200 > 150
-    if (renameKeyBytes<User>() == 7)    { ok = ok + 1; }   // "user_id"
+    if (valid(u) == false)              { ok = ok + 1; }   // 200 > 150
+    if (renameKeyBytes<User>() == 7)    { ok = ok + 1; }   // explicit: T only in body, not inferable
     if (@hasAnnotation(User, Skip))     { ok = ok + 1; }   // type-level query
 
     if (ok == 5) { return 0; }

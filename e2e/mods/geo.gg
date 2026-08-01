@@ -1,0 +1,15 @@
+module geo;
+
+enum Kind { SMALL, BIG }
+
+trait Area { fn area() -> i32; }
+
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } fn sum() -> i32 { return this.x + this.y; } }
+
+impl Area for Point { fn area() -> i32 { return this.x * this.y; } }
+
+class Box<T> { mut T v; Box(T x) { this.v = x; } fn get() -> T { return this.v; } }
+
+fn make(i32 a, i32 b) -> i32 out { out = a + b; }
+
+fn classify(i32 n) -> Kind { if (n > 10) { return Kind.BIG; } return Kind.SMALL; }

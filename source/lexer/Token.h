@@ -39,6 +39,7 @@ enum class TokenType {
     SWITCH, CASE, DEFAULT, YIELD, NULL_LITERAL, ANNOTATION,
     QUESTION_DOT, QUESTION_COLON,   // note: `!!` (unwrap) is parsed as two BANG tokens, not one token
     INLINE, IN,   // `inline for (x in @fields(T))` — compile-time reflection unroll
+    MODULE,       // `module geo;` — declares a file's namespace (see module namespacing)
 
     // Type keywords — signed integers.
     I8, I16, I32, I64,

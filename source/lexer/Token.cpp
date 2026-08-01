@@ -65,7 +65,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"yield",   TokenType::YIELD},
     {"inline",  TokenType::INLINE},
     {"in",      TokenType::IN},
-    {"annotation", TokenType::ANNOTATION}
+    {"annotation", TokenType::ANNOTATION},
+    {"module",  TokenType::MODULE}
 };
 
 TokenType lookupKeyword(const std::string& text) {

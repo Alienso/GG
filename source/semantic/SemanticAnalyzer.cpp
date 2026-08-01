@@ -267,6 +267,14 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
         if (!std::holds_alternative<EnumDeclStmt>(*stmt.node)) continue;
         const auto& en = std::get<EnumDeclStmt>(*stmt.node);
 
+        // A duplicate type name within the same (module-qualified) namespace is an error. With
+        // module namespacing this also distinguishes `a.Foo` from `b.Foo` (different keys → no
+        // clash); previously a duplicate silently first-won and later misfired in codegen.
+        if (classRegistry.count(en.name.lexeme)) {
+            error(en.name, "type '" + en.name.lexeme + "' is already defined");
+            continue;
+        }
+
         EnumInfo einfo{ {}, {}, en.name };
         for (const EnumVariant& v : en.variants) {
             if (!einfo.variantSet.insert(v.name.lexeme).second) {
@@ -286,6 +294,10 @@ void SemanticAnalyzer::collectClasses(const Program& program) {
     for (const Stmt& stmt : program.declarations) {
         if (!std::holds_alternative<ClassDeclStmt>(*stmt.node)) continue;
         const auto& cls = std::get<ClassDeclStmt>(*stmt.node);
+        if (classRegistry.count(cls.name.lexeme)) {
+            error(cls.name, "class '" + cls.name.lexeme + "' is already defined");
+            continue;
+        }
         ClassInfo info = buildClassInfo(cls.name.lexeme, cls.fields, cls.methods,
                                         /*allowDestructor=*/true);
         classRegistry.emplace(cls.name.lexeme, std::move(info));

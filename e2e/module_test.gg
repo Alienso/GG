@@ -1,0 +1,29 @@
+// Module namespacing (axis B). Two modules each define `Point`; they coexist. Bare `Point` resolves
+// to geo.Point via `import geo.Point;`; phys.Point is referenced by its fully-qualified name (Java
+// disambiguation). Also exercises a module enum, a trait impl on a module class, a module generic by
+// FQN, a qualified free-function call, and a global stdlib type used from a module-consuming file.
+// Returns 0 on success.
+import "mods/geo.gg";
+import "mods/phys.gg";
+import "std/String.gg";
+import geo.Point;
+import geo.Kind;
+
+fn main() -> i32 {
+    Point p(3, 4);                         // bare → geo.Point
+    phys.Point q(7);                       // FQN → phys.Point (distinct type)
+    if (p.sum() != 7)   { return 1; }
+    if (q.sum() != 700) { return 2; }
+    if (p.area() != 12) { return 3; }      // trait method on a module class
+    if (geo.make(10, 20) != 30) { return 4; }   // qualified free-function call
+
+    geo.Box<i32> b(9);                     // module generic by FQN → geo.Box$i32
+    if (b.get() != 9) { return 5; }
+
+    Kind k = geo.classify(20);             // qualified fn returning a module enum
+    if (k != Kind.BIG) { return 6; }       // enum variant compare, bare Kind (imported)
+
+    String s("hi");                        // global stdlib type, unqualified, inside module consumer
+    if (s.length() != 2) { return 7; }
+    return 0;
+}

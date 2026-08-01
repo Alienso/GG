@@ -1,0 +1,2 @@
+module phys;
+class Point { mut i32 mass; Point(i32 m) { this.mass = m; } fn sum() -> i32 { return this.mass * 100; } }

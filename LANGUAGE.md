@@ -1445,9 +1445,55 @@ An import path resolves in this order (first match wins):
 
 Imported declarations (functions, classes, generic templates) are merged into the program and
 become available throughout. Imports are **not** re-exported — if `a.gg` imports `b.gg` and `c.gg`
-imports `a.gg`, `c.gg` does not automatically see `b.gg`'s declarations. There is **no per-module
-namespacing** yet: all imported symbols share one flat global scope (a name clash across files is a
-redefinition), and there is no project manifest or dependency-versioning system.
+imports `a.gg`, `c.gg` does not automatically see `b.gg`'s declarations. There is no project manifest
+or dependency-versioning system yet.
+
+### Modules & namespaces
+
+By default every declaration lives in one flat global namespace, so two files that each declare
+`class Foo` collide. Opt into a **namespace** by declaring a module at the top of a file:
+
+```gg
+// file geo.gg
+module geo;                       // this file's top-level names live under `geo`
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } }
+fn origin() -> i32 { return 0; }
+```
+
+Reference a module's symbols the **Java way** — load the file, then either import the name to use it
+bare, or write it fully-qualified:
+
+```gg
+// file app.gg
+import "geo.gg";          // load the file (as usual)
+import geo.Point;         // bring `Point` into scope unqualified (note: dotted name, no quotes)
+
+fn main() -> i32 {
+    Point p(1, 2);        // bare — resolves to geo.Point via the import
+    geo.Point q(3, 4);    // fully-qualified — always works once the file is loaded
+    return geo.origin();  // qualified free-function call
+}
+```
+
+- A file with **no** `module` declaration is in the global namespace (unchanged behaviour); all
+  existing code keeps working.
+- A **fully-qualified** name (`geo.Point`) works anywhere once the defining file is loaded — the
+  `import geo.Point;` is only a convenience that lets you drop the prefix.
+- If two imported modules both export `Point`, the **bare** name is ambiguous and is a compile
+  error — write `geo.Point` / `phys.Point` to disambiguate (Java-style; there is no import alias).
+- Two modules may declare the same type name freely: `geo.Point` and `phys.Point` are distinct.
+- `import geo.Point;` (a *symbol* import, dotted) is separate from `import "geo.gg";` (a *file* load,
+  a string path). A symbol import does **not** load the file — the file must still be `import "…"`-ed
+  somewhere in the build.
+
+A class field, method, or local **may** share a name with a module-level function (`fn size()` and a
+field `size` coexist fine). The rare exceptions that are rejected — rename one to resolve: a field or
+enum variant named identically to a **type** in the same module, and a local named identically to a
+top-level **function** when used in a `<` comparison.
+
+**v1 limitations:** module names are single-segment (`module geo;`, not dotted `module a.b;`); there
+is no `import geo.*;` wildcard, no import aliasing, and no module-private visibility (a module only
+namespaces — all its symbols remain accessible). Don't name a local variable the same as a module.
 
 ### Calling C functions (`extern`)
 ```gg

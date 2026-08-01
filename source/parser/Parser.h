@@ -63,6 +63,17 @@ struct GenericRegistry {
     // Canonical Call$… trait name → its (parameter type tokens, return type token), so an untyped
     // lambda argument can infer its parameter/return types from the callee's `Call(…)` bound.
     std::unordered_map<std::string, std::pair<std::vector<Token>, Token>> callTraitSigs;
+
+    // ---- Module namespacing (shared across files) ----
+    // module name → simple top-level decl names it declares, split by kind because they qualify
+    // differently: a TYPE name (class/enum/trait/annotation) is qualified in every position, while a
+    // FUNCTION name is qualified only in call/generic position (`(`/`<`) so a field/local named like
+    // a free function is not mistakenly rewritten. `extern` and `main` are never recorded. Populated
+    // per file in Parser::parse and, for a multi-file build, up-front by ImportResolver so a file can
+    // qualify references to a sibling file's same-module symbols. "" is the global namespace.
+    std::unordered_map<std::string, std::unordered_set<std::string>> moduleTypes;
+    std::unordered_map<std::string, std::unordered_set<std::string>> moduleFuncs;
+    std::unordered_set<std::string>                                  moduleNames;  // every declared module name
 };
 
 class Parser {
@@ -85,12 +96,42 @@ public:
     // `filename` labels monomorphization parse errors (reported at the use-site line).
     void monomorphize(Program& program, const std::string& filename = "");
 
+    // ---- Module namespacing (public statics so ImportResolver can reuse them) ----
+    // Scan a file's tokens for its `module NAME;` (→ outModule) and every `import a.B;` symbol
+    // import (→ outBindings simpleName→qualified; a name imported from >1 module → outAmbiguous).
+    static void scanModuleDirectives(const std::vector<Token>& toks, std::string& outModule,
+                                     std::unordered_map<std::string, std::string>& outBindings,
+                                     std::unordered_set<std::string>& outAmbiguous);
+    // Record a file's top-level decl names (excluding extern + `main`) into types[module] /
+    // funcs[module] (by kind) and add `module` to names. Registers the module even with no members.
+    static void scanModuleMembers(const std::vector<Token>& toks, const std::string& module,
+                                  std::unordered_map<std::string, std::unordered_set<std::string>>& types,
+                                  std::unordered_map<std::string, std::unordered_set<std::string>>& funcs,
+                                  std::unordered_set<std::string>& names);
+    // Rewrite a token stream so every name carries its module prefix (mirrors generic mangling):
+    // fold a fully-qualified `mod.Name` (mod ∈ moduleNames) into one `"mod.Name"` token, then
+    // qualify each bare reference/decl name. A TYPE name is qualified in any position; a FUNCTION
+    // name only in call/generic position (`(`/`<`); a method/enum-member decl name (preceded by
+    // `fn` inside a body) and any name after `.`/`::`, plus `main`, are left untouched.
+    static std::vector<Token> qualifyTokens(
+        const std::vector<Token>& toks, const std::string& module,
+        const std::unordered_map<std::string, std::string>& bindings,
+        const std::unordered_set<std::string>& ambiguous,
+        const std::unordered_map<std::string, std::unordered_set<std::string>>& types,
+        const std::unordered_map<std::string, std::unordered_set<std::string>>& funcs,
+        const std::unordered_set<std::string>& moduleNames);
+
 private:
     std::vector<Token>             tokens;
     size_t                         current = 0;
     std::string                    filename;               // source filename for error messages
     std::unordered_set<std::string> classNames;   // class names registered during parse
     bool                           insideFunction = false;  // true when parsing a function/method body
+
+    // ---- Module namespacing (per file) ----
+    std::string                                  currentModule_;    // this file's module ("" = global)
+    std::unordered_map<std::string, std::string> importBindings_;   // simple name → qualified target (`import a.B;`)
+    std::unordered_set<std::string>              ambiguousImports_; // names imported from >1 module (must qualify)
 
     // ---- Generics (monomorphization) ----
     // Generic state lives in a registry that may be shared across files. By default

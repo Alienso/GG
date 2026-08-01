@@ -480,6 +480,60 @@ existing wins):
   namespacing; that's the deferred axis B). No manifest / dependency versioning yet.
   Tests: `tests/import_tests.cpp` (`[import]`), `e2e/module_std_test.gg`.
 
+### Module namespacing — `module` + Java-style `import a.B` (axis B)
+Per-module namespaces so two files may each declare `class Foo` without colliding (the deferred
+axis-B counterpart to the `std/` resolver above). A file declares `module geo;`; its top-level names
+are qualified with that prefix (`geo.Foo`, `geo.Foo_method`, `geo.Vec$i32`). **Java model**:
+`import geo.Point;` lets you write bare `Point`; two imported modules that both export `Point` make
+the bare name ambiguous, resolved by the fully-qualified `geo.Point` at the use site.
+- **Key design — qualify the name STRING in the parser, as a whole-token rewrite** (mirrors generic
+  monomorphization, which turns `Vec<i32>` into the bare className `Vec$i32`). Because `mangleType`
+  returns `t.className` verbatim and codegen builds every `%`/`@` symbol from the className string,
+  baking the module prefix into the name early means **semantic and codegen need no changes** — the
+  qualified name flows through as an ordinary className. The rewrite (`Parser::qualifyTokens`) runs
+  in `parse()` after reading the file's directives, before the parse loop:
+  1. **Fold FQNs**: `IDENT(mod) '.' IDENT(Name)` where `mod` ∈ `moduleNames` → one `"mod.Name"`
+     token. So a fully-qualified reference becomes a single identifier — never three tokens — and
+     `consumeTypeCore`/`isTypeName`/`parsePrimary`/decl builders are **untouched** (they see one
+     already-qualified token). This is also why ctor/dtor "just work": the class name **and** the
+     ctor/dtor names (which equal it) are qualified together, so `name == className` still holds.
+  2. **Qualify bare names — context-aware** (so a field/local named like a module free function
+     isn't mistaken for it): the module tables are split into **types** (class/enum/trait/annotation)
+     and **funcs**, because they qualify differently. A **TYPE** name is qualified in **any** position
+     (decl, ctor/dtor, param/field type, return type, cast, `new`, generic base, …). A **FUNCTION**
+     name is qualified **only in call/generic position** (next token `(` or `<`) — so `size;` /
+     `size = …` (a field or local named `size`) is left bare while `size(` / `size<…>` (a call) is
+     qualified. Target resolved via `bindings[X]` (an `import a.B;`, kind taken from `B`'s home
+     module) else the current module's own type/func sets. **Never qualified**: a name after `.`/`::`
+     (member field / `Type::member` / enum variant access), a **method or enum-member decl name** (a
+     bare name right after `fn` at brace depth > 0), an already-qualified name, `main`, and `extern`.
+     Ambiguous imports (`X` from two modules) are left bare → a hard compile error at use.
+- **Separator = `.`** (`geo.Foo`) — a legal unquoted LLVM identifier char, matching the FQN spelling.
+- **Per-module symbol table** — `GenericRegistry::moduleMembers` (module → simple top-level decl
+  names) + `moduleNames`, shared across files. `ImportResolver` fills them in a new **pass 0**
+  (`scanModules`, before all parsing) so a file can qualify references to a sibling file's
+  same-module symbols and fold FQNs written before the defining file is parsed;
+  `prescanTemplates` + `collectClassNames` qualify each file's tokens (`qualifyFileTokens`) so the
+  names they register match what the parser produces. Static helpers `Parser::scanModuleDirectives`
+  / `scanModuleMembers` / `qualifyTokens` are reused by both.
+- **Backward-compatible**: a file with no `module` is in the global module `""`; qualification is
+  **skipped entirely** when no module is in play, so module-less programs' tokens — and thus IR —
+  are byte-identical to before. `main` and `extern` are never qualified (entry / C-ABI symbols).
+- **Duplicate diagnostic** (`collectClasses`): a duplicate type within one module now errors
+  ("class/type … already defined"), closing the old silent first-wins gap; cross-module same names
+  are distinct keys → no error.
+- **v1 scope / limits** (all → a clean error, never a miscompile): single-segment module names only
+  (`module geo;`, not `module a.b;`); no `import a.*;` wildcard, no import aliasing, no module-private
+  visibility (namespacing only). `import a.B;` does **not** load a file — the defining file must
+  still be `import "…"`-loaded. An ambiguous bare name errors with a generic message (use the FQN).
+  A local named identically to a module name would shadow the FQN fold (module wins; don't do it).
+  Residual name-collision edges (all → a clean error, never a miscompile, all niche): a **field or
+  enum-variant named identically to a module TYPE** (types qualify in any position, but the field's
+  `.`-access does not → "no field/variant"); a **local named identically to a top-level function**
+  used in a `<` comparison (`count < 9` parses `<` as generic-call position → "cannot use function as
+  value"). Rename one. Tests: `tests/module_tests.cpp` (`[module]`), `e2e/module_test.gg`
+  (+ `e2e/mods/*.gg`).
+
 ### SemanticAnalyzer — 3 passes
 1. `collectClasses`  — build `classRegistry` (fields, methods, destructor).
 2. `collectFunctions` — hoist top-level function signatures into global scope.
@@ -1169,6 +1223,31 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1062 test cases / 1985 assertions** (as of a **QA pass over module namespacing** — the initial
+whole-token rewrite was context-free, so a **member declaration** whose name collided with a
+module-level symbol was qualified while its `.`-access was not, wrongly rejecting valid code: a class
+**field** or **method** named like a module free function (`size`, `area`, `count`) failed with
+"no field/method". Fixed by making qualification **context-aware**: the module table is split into
+**types** (qualified in any position) and **funcs** (qualified only in call/generic position `(`/`<`),
+and a **method / enum-member decl name** (right after `fn` inside a body) is never qualified — so a
+field/local named like a free function is left bare and matches its access. Generic free functions
+stay namespaced (the `<` case); the residual edges (field/variant named like a TYPE; a local named
+like a top-level fn used in a `<` comparison) are niche and error cleanly, never miscompile. See the
+"Module namespacing" invariant; `tests/module_tests.cpp` (`[module]`, +3 cases → 12). Prior baseline
+was **1059 test cases / 1979 assertions** (as of **module namespacing — `module` + Java-style
+`import a.B`** (axis B). A file declares `module geo;` and its top-level names are qualified with that
+prefix (`geo.Foo`), so two files may each declare `class Foo` without colliding. `import geo.Point;`
+drops the qualifier (bare `Point`); two imported modules both exporting `Point` → the bare name is
+ambiguous, disambiguated by the fully-qualified `geo.Point`. Implemented as a **whole-token rewrite
+in the parser** (`Parser::qualifyTokens`, mirroring generic monomorphization): fold `mod.Name` into
+one token, then prefix bare decl/ctor/dtor/reference names — so semantic + codegen are unchanged (the
+qualified name flows through as an ordinary className, emitting `%geo.Point`/`@geo.Point_method`). A
+new ImportResolver **pass 0** (`scanModules`) builds the shared `moduleMembers`/`moduleNames` tables
+before parsing. `main`/`extern` are never qualified; module-less programs are byte-identical (IR
+regression-safe). Adds a duplicate-type-in-module diagnostic (closes the old silent first-wins gap).
+v1 limits: single-segment module names, no wildcard/alias import, no module-private visibility; a
+symbol `import` doesn't load a file. See the "Module namespacing" invariant; `tests/module_tests.cpp`
+(`[module]`, +9 cases), `e2e/module_test.gg`. Prior baseline was
 **1050 test cases / 1961 assertions** (as of **module resolution — import search roots + the `std/`
 anchor** (axis A). `import "..."` now resolves through one shared `ImportResolver::resolveImportPath`
 against a `ModuleSearchConfig`: a reserved **`std/` prefix** maps to the compiler's standard library

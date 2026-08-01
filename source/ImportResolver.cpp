@@ -21,6 +21,13 @@ Program ImportResolver::resolve(const std::string& rootFilePath, const ModuleSea
     sharedGenerics_ = GenericRegistry{};
     config_ = config;
 
+    // Pass 0: scan every file for its `module NAME;` + top-level decl names, populating the shared
+    // (module → member names) table + the set of module names. This must precede all parsing so any
+    // file can qualify references to a sibling file's same-module symbols and fold fully-qualified
+    // names (`geo.Point`) written before the defining file is parsed.
+    std::unordered_set<std::string> modVisited;
+    scanModules(rootFilePath, modVisited);
+
     // Pass 1: pre-register every generic template name across all files so that
     // use sites are recognised regardless of which file declares the template.
     Parser seedParser({}, &sharedGenerics_);
@@ -76,6 +83,48 @@ std::string ImportResolver::resolveImportPath(const fs::path& importerDir,
     return relative.string();
 }
 
+std::vector<Token> ImportResolver::qualifyFileTokens(const std::vector<Token>& tokens) const {
+    std::string module;
+    std::unordered_map<std::string, std::string> bindings;
+    std::unordered_set<std::string> ambiguous;
+    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous);
+    if (module.empty() && sharedGenerics_.moduleNames.empty())
+        return tokens;   // no modules in play — leave tokens (and thus scanned names) unchanged
+    return Parser::qualifyTokens(tokens, module, bindings, ambiguous,
+                                 sharedGenerics_.moduleTypes, sharedGenerics_.moduleFuncs,
+                                 sharedGenerics_.moduleNames);
+}
+
+void ImportResolver::scanModules(const std::string& filePath,
+                                 std::unordered_set<std::string>& visitedPaths) {
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
+    if (ec || !fs::exists(canonical)) return;
+
+    std::string canonicalStr = canonical.string();
+    if (visitedPaths.count(canonicalStr)) return;
+    visitedPaths.insert(canonicalStr);
+
+    std::vector<std::string> paths{ canonicalStr };
+    Lexer lexer(paths);
+    lexer.lex();
+    const auto& tokens = lexer.tokens()[0];
+
+    // Record this file's module + its top-level decl names into the shared tables.
+    std::string module;
+    std::unordered_map<std::string, std::string> bindings;
+    std::unordered_set<std::string> ambiguous;
+    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous);
+    Parser::scanModuleMembers(tokens, module, sharedGenerics_.moduleTypes,
+                              sharedGenerics_.moduleFuncs, sharedGenerics_.moduleNames);
+
+    fs::path parentDir = canonical.parent_path();
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type == TokenType::IMPORT && tokens[i + 1].type == TokenType::STRING)
+            scanModules(resolveImportPath(parentDir, stripQuotes(tokens[i + 1].lexeme)), visitedPaths);
+    }
+}
+
 void ImportResolver::prescanTemplates(const std::string& filePath,
                                       std::unordered_set<std::string>& visitedPaths,
                                       Parser& seedParser) {
@@ -92,7 +141,9 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
     lexer.lex();
     const auto& tokens = lexer.tokens()[0];
 
-    seedParser.prescanTemplateNames(tokens);
+    // Register template names under their qualified module names (pass 0 has populated the tables),
+    // so a cross-file use site `geo.Vec<i32>` resolves to the same `geo.Vec` template.
+    seedParser.prescanTemplateNames(qualifyFileTokens(tokens));
 
     fs::path parentDir = canonical.parent_path();
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
@@ -123,7 +174,9 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
     std::vector<std::string> paths{ canonicalStr };
     Lexer lexer(paths);
     lexer.lex();
-    const auto& tokens = lexer.tokens()[0];
+    // Qualify so the collected class/enum names carry their module prefix (`geo.Point`), matching
+    // what the parser produces; file-import STRING tokens are preserved by qualification.
+    const std::vector<Token> tokens = qualifyFileTokens(lexer.tokens()[0]);
 
     std::unordered_set<std::string> names;
     fs::path parentDir = canonical.parent_path();

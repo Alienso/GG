@@ -50,6 +50,14 @@ private:
 
     Program processFile(const std::string& filePath);
 
+    // Pass 0 (module namespacing): transitively scan every file for its `module NAME;` + top-level
+    // decl names, populating sharedGenerics_.moduleMembers / moduleNames before any parsing.
+    void scanModules(const std::string& filePath, std::unordered_set<std::string>& visitedPaths);
+
+    // Apply module qualification (fold FQNs + prefix bare names) to a lexed file's tokens using the
+    // shared module tables — so names scanned/registered here match what the parser produces.
+    std::vector<Token> qualifyFileTokens(const std::vector<Token>& tokens) const;
+
     // Maps an import path (as written) requested from `importerDir` to a concrete
     // filesystem path, honouring the `std/` prefix and searchRoots (see the
     // ModuleSearchConfig comment). Returns the file-relative candidate as a fallback

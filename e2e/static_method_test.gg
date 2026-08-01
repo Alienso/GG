@@ -3,7 +3,7 @@
 // ClassName::method(args) or obj.method(args). It may read/write static fields.
 
 class Counter {
-    static i32 total = 0;
+    mut static i32 total = 0;
     i32 id;
 
     Counter(i32 id) {

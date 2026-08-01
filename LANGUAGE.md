@@ -955,7 +955,8 @@ class Counter {
 }
 ```
 
-`static` fields are always mutable (they never take `mut`). Enum fields are always
+`static` fields are **const by default** too — `mut static` makes one reassignable, plain
+`static` is a named constant (see [Static members](#static-members)). Enum fields are always
 immutable (`mut` is not allowed on them).
 
 **Transitive const.** Writing a `mut` field from *outside* the class also requires the
@@ -1021,11 +1022,12 @@ scope-resolution operator `ClassName::member`, **or** through any instance
 
 ```gg
 class Counter {
-    static i32 count = 0;        // one shared slot for the whole program
-    static i32 limit;            // zero-initialised if no initialiser given
+    mut static i32 count = 0;    // `mut static` — one shared, reassignable slot for the program
+    mut static i32 limit;        // zero-initialised if no initialiser given
+    static i32 MAX = 1000;       // const static — a named constant (immutable)
 
     Counter() {
-        Counter::count = Counter::count + 1;   // mutate the shared field
+        Counter::count = Counter::count + 1;   // mutate the shared `mut` field
     }
 
     // Static method — no implicit `this`; cannot touch instance fields.
@@ -1039,14 +1041,18 @@ fn main() {
     Counter b;
     i32 n = Counter::howMany();   // 2  — via the class
     i32 m = a.howMany();          // 2  — via an instance (same call)
-    Counter::limit = 100;         // static fields are mutable
+    Counter::limit = 100;         // OK — `limit` is a mut static
+    i32 cap = Counter::MAX;       // read the constant
+    // Counter::MAX = 2000;       // ERROR — MAX is a const static (declare `mut static` to write)
 }
 ```
 
 Rules:
 - **Static fields** are real globals, **not** part of the struct layout, and are
-  **mutable**. An optional constant initialiser (`static i32 count = 0;`) runs once
-  before `main`.
+  **const by default** like every other binding — write `mut static` to make one
+  reassignable, or leave it `static` for a named constant. Writing a non-`mut` static
+  (via `Class::field`, an instance, or implicit `this`) is a compile error. An optional
+  constant initialiser (`static i32 count = 0;`) runs once before `main`.
 - **Static methods** have **no implicit `this`** — using `this` inside one is an error,
   and they cannot read or write instance fields. They may freely access static fields.
 - Calling an **instance** method via `ClassName::method(...)` is an error ("not static").

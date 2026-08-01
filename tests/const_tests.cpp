@@ -699,8 +699,10 @@ TEST_CASE("Const - nested field write through a const root is an error", "[mut][
 // Static fields are class-level, not part of the instance — a write through an instance
 // is NOT subject to the transitive-const receiver check.
 TEST_CASE("Const - static field write through a const instance is allowed", "[mut][const][semantic]") {
+    // A `mut static` is writable through even a const instance binding: static fields are
+    // class-level, so the transitive-const receiver check does not apply to them.
     auto result = analyzeString(R"(
-        class Counter { static i32 total; }
+        class Counter { mut static i32 total; }
         fn main() -> i32 {
             Counter c;
             c.total = 5;

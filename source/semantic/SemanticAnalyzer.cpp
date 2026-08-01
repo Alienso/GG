@@ -188,7 +188,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
                 continue;
             }
             info.staticFields.emplace(fd.name.lexeme,
-                ClassInfo::StaticField{fd.isPublic, fieldType, fd.name});
+                ClassInfo::StaticField{fd.isPublic, fd.isMut, fieldType, fd.name});
             continue;
         }
         info.fieldOrder.push_back(fd.name.lexeme);

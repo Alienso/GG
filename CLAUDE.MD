@@ -150,8 +150,9 @@ unchanged**. `mut` token mirrors `static`. Flags: `VarDeclExpr::isMut`, `ParamDe
   `mut T&` argument (`analyzeCallArgs`, via `paramMut`) — warns unless the source is an explicit
   cast. References only (value copies are independent). `expr as mut T` (parser: `parseCast`
   accepts `mut` + `consumeType`) marks `CastExpr::isMut`, producing a mutable place / silencing.
-- **Not gated**: array/`ptr<T>` element writes (`a[i] = v`), `static` fields (stay mutable),
-  enum fields (always immutable — parser rejects `mut` on them, as it does on methods).
+- **Not gated**: array/`ptr<T>` element writes (`a[i] = v`); enum fields (always immutable — parser
+  rejects `mut` on them, as it does on methods). `static` fields **are** now gated — const-by-default
+  like every binding, `mut static` to opt in (see the static-members invariant).
 - Parser: `mut`/`static` accepted in either order on locals (`parseExpression`) and members
   (`parseMemberList` gained an `isEnum` param); params via the `parseParam()` helper.
 
@@ -548,7 +549,18 @@ Rejects the "value-object → reference borrow" footgun: passing a **stack value
   field** (`this.f = q` or implicit `f = q`, where `f`'s type is `Reference` — a value-object field
   store is a deep copy, *not* an escape; a **local shadowing a reference field** is a rebind, not a
   store — declared-local names are excluded). Local rebinds are tracked as alias edges; escape is
-  reachability from the param to a return/ref-store site.
+  reachability from the param to a return/ref-store site. **Return-slot clone exception**: an
+  assignment into a **non-reference** return alias (`fn dup(T& v) -> T out { out = v; return out; }`,
+  object/primitive/enum slot) is a **clone** into the caller's storage, not an alias — so it records
+  **no** alias edge (`computeParamEscapes` takes the slot name via `objectSlotName`, computed by the
+  `nonRefSlotName` helper), and a borrowed param filled into it does not escape. **Gated on
+  `returnType.kind != Reference`, NOT `== Object`** — critical because the escape summary is computed
+  in `buildClassInfo`, where a method returning its **own** class resolves to a non-`Object`
+  placeholder (the class isn't in `classRegistry` yet), so an `== Object` gate silently missed every
+  method self-return; a **reference/borrow** alias (`-> T&`/`-> T*`) always decodes to `Reference`
+  from token syntax, and there `out = v` is a rebind that returns the borrow — so a stack-value
+  argument is still rejected. The ref-field-store escape path (`this.f = v`, a `MemberAssignExpr`) is
+  untouched, so a genuine store alongside a clone is still caught.
 - **Check** (in `resolveOverload`'s arg loop + `analyzeMethodCall`): gated on the argument being an
   `Object` coerced to a `Reference` param whose `paramEscapes[k]` is set — so reference→reference
   passing, value-field copies, and pure-borrow readers/operators are never touched (zero false
@@ -1133,8 +1145,12 @@ callee never runs the slot's dtor (ownership → caller). Call sites: `genVarDec
 `emitSlotCall(init, ptrName)` (writes straight into the variable's alloca — no clone/ctor); other
 positions (`genCall`/`genMethodCall`) materialize a temp via `materializeSlotTemp` + `emitSretCall`.
 Works on generics — the alias/slot type may be a type parameter (`fn zero<T>() -> T out`);
-generic-class arrow methods ride the verbatim class-body capture + re-parse. Using a value-return
-call as a nested sub-expression argument is deferred.
+generic-class arrow methods ride the verbatim class-body capture + re-parse. **A value-return call
+used as a nested sub-expression argument works** (`takeRef(make(1,2))`, `combine(make(1,1),
+make(2,2))`, a discarded temp, a method call on the result): `genCall`/`genMethodCall` materialize a
+`slottmp.addr` via `materializeSlotTemp` + `emitSretCall` and yield its address, so it borrows into a
+`Class&` param like any other value object; the temp is dtor-scoped and released at the full-expression
+boundary. (Only the *variable-init* position uses the zero-copy `emitSlotCall` in-place path.)
 
 ### Enums (Java-style)
 - Declared with `enum Name { VARIANT, ... }` or with a body:
@@ -1174,13 +1190,25 @@ mirroring private fields/methods. Same-file calls are silent.
 
 ### Static members (class-level)
 Roadmap: (1) **static fields** ✅ done, (2) **static methods** ✅ done, (3) **static local
-variables** (C-style) ✅ done, (4) polish (const statics, access enforcement, file-scope
-linkage) — **intentionally deferred** (no-op per project decision: no `const` keyword,
-private access stays a warning, static fields keep external linkage).
+variables** (C-style) ✅ done, (4) polish — **const statics** ✅ done (see below); access
+enforcement + file-scope linkage still **intentionally deferred** (private access stays a warning;
+static fields keep external linkage, a no-op until separate compilation exists).
 - **Static fields** — `static T name;` or `static T name = const;` inside a class.
   Shared class-level storage, **not** part of the struct layout. Accessed via the
   scope-resolution operator `ClassName::field` **or** through an instance `obj.field`
-  (both resolve to the same global). Static fields are mutable (unlike enum fields).
+  (both resolve to the same global).
+- **const-by-default static fields** — a static field is **immutable unless `mut static`**, like
+  every other binding (`static i32 MAX = 100;` is a named constant; `mut static i32 count = 0;` is a
+  reassignable counter). Enforced purely in semantics via `ClassInfo::StaticField::isMut` (populated
+  from `FieldDecl::isMut`; the parser already accepts `mut`/`static` in either order on fields). A
+  write to a non-`mut` static is an error at every write form — `Class::field =` (`analyzeMemberAssign`
+  type-name branch), `obj.field =` (instance branch), and implicit-`this` `=` / `+=` / `++`/`--`
+  (`analyzeAssign` / `analyzeCompoundAssign` / `incDecTargetOk`, via the new `currentStaticField`
+  helper). Reads and the declaration initializer are always allowed. **Codegen is unchanged** — const
+  is compile-time only; the emitted `@Class$field = global …` is byte-identical (a const static is
+  *not* an LLVM `constant`, matching how instance const fields are handled). `Class::field +=` /
+  `Class::field++` (compound/increment through `::`) don't parse — a pre-existing parser limit, so
+  there's no ungated write path. Static fields still keep **external** linkage (deferred).
 - **Static methods** — `static T method(...)` inside a class. Class-level: **no
   implicit `this`** (using `this` in a static body is an error). Called as
   `ClassName::method(args)` **or** through an instance `obj.method(args)` (both lower
@@ -1223,6 +1251,40 @@ private access stays a warning, static fields keep external linkage).
 `methods` deque.
 
 ## Test baseline
+**1081 test cases / 2015 assertions** (as of **const-by-default static fields** — a static field is now
+**immutable unless `mut static`**, closing the one gap in GG's const-by-default model (static fields
+were previously always mutable). Enforced purely in semantics: `ClassInfo::StaticField` gained
+`isMut` (from `FieldDecl::isMut`; the parser already accepted `mut`/`static` in either order on
+fields), and every static write form is gated against it — `Class::field =`, `obj.field =`, and
+implicit-`this` `=`/`+=`/`++`/`--` (new `currentStaticField` helper). `static i32 MAX = 100;` is a
+named constant; `mut static i32 count = 0;` a reassignable counter. **Codegen unchanged** — const is
+compile-time only, the emitted global is byte-identical. Migrated the always-mutable statics in the
+suite + six e2e files (counters/totals → `mut static`). This is item 4's "const statics"; access
+enforcement + file-scope linkage remain deferred. A QA pass confirmed the tricky edges: a const
+static is **not** writable in a constructor (the instance-const-field `inConstructor` allowance does
+not leak to statics), const gating survives monomorphization (a generic class's static, via instance
+access), and `static mut`/`mut static` both work. See the static-members invariant;
+`tests/static_tests.cpp` (`[static]`, +12 cases), `e2e/static_field_test.gg`. Prior baseline was
+**1069 test cases / 1996 assertions** (as of a **sret nested-argument confirmation + escape-analysis
+return-slot-clone fix**, with a **QA follow-up that caught a method-path bug in the first fix** — the
+CLAUDE.md note "using a value-return call as a nested sub-expression argument is deferred" was
+**stale**: `takeRef(make(1,2))`, `combine(make(),make())`, doubly-nested calls, a discarded temp, and
+a method call on an sret result all already work via the `genCall`/`genMethodCall` `materializeSlotTemp`
++ `emitSretCall` value path (only variable-init uses the zero-copy in-place `emitSlotCall`). The
+confirmation surfaced a **real, separate** escape-analysis false positive: `fn dup(T& v) -> T out
+{ out = v; return out; }` (a borrowed param cloned into an object return slot) wrongly reported the
+value-object argument as escaping — the syntactic scan treated `out = v` as an alias edge, and
+`return out` then made `v` "escape." Fixed by recording **no** alias edge for an assignment into a
+return slot. **The QA pass then found the first fix gated on `returnType.kind == Object`, which
+silently missed every *method* self-return** — the escape summary is computed in `buildClassInfo`,
+where the method's own class isn't in `classRegistry` yet, so its slot type resolves to a non-`Object`
+placeholder (free functions, collected later, worked by accident). Re-gated on `returnType.kind !=
+Reference` (via the `nonRefSlotName` helper): object/primitive/enum slots clone (skip the edge),
+while reference/borrow slots (`-> T&`/`-> T*`, which decode to `Reference` from token syntax) keep the
+edge and still reject a stack-value argument; the ref-field-store escape path is untouched. See the
+sret + escape-analysis invariants; `tests/return_slot_tests.cpp` (`[return-slot]`, +7 cases: nested-arg
+codegen, free-fn/method/impl-method clone accepted, reference-slot/borrow-slot/ref-field-store still
+rejected), `e2e/return_slot_test.gg`. Prior baseline was
 **1062 test cases / 1985 assertions** (as of a **QA pass over module namespacing** — the initial
 whole-token rewrite was context-free, so a **member declaration** whose name collided with a
 module-level symbol was qualified while its `.`-access was not, wrongly rejecting valid code: a class

@@ -80,12 +80,128 @@ TEST_CASE("Static - access via ClassName::field type-checks", "[static][semantic
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Static - write via ClassName::field is allowed (mutable)", "[static][semantic]") {
+TEST_CASE("Static - write via ClassName::field is allowed on a mut static", "[static][semantic]") {
     auto result = analyzeString(R"(
-        class Counter { static i32 count = 0; }
+        class Counter { mut static i32 count = 0; }
         fn f() { Counter::count = 5; }
     )");
     REQUIRE_FALSE(result.hadError);
+}
+
+// ── const-by-default for static fields ──────────────────────────────────────
+// A static field is immutable unless declared `mut static` (like every other binding). Reads are
+// always fine; every write form on a const static is an error.
+
+TEST_CASE("Static - a const static field rejects write via ClassName::field", "[static][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 1; }
+        fn f() { C::K = 5; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a const static field rejects an instance write", "[static][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 1; }
+        fn f(C& c) { c.K = 5; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a const static field rejects an implicit-this write", "[static][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 1; fn static bump() { K = 2; } }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a const static field rejects compound assignment", "[static][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 1; fn static bump() { K += 1; } }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a const static field rejects ++/--", "[static][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 1; fn static bump() { K++; } }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a const static field may be read freely", "[static][const][semantic]") {
+    auto result = analyzeString(R"(
+        class C { static i32 K = 42; }
+        fn f() -> i32 { return C::K; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Static - a mut static field allows every write form", "[static][const][semantic]") {
+    auto result = analyzeString(R"(
+        class C { mut static i32 K = 0; fn static all() { K = K + 1; K += 2; K++; } }
+        fn f() { C::K = 9; C::all(); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Static - `static mut` order also opts into mutability", "[static][const][semantic]") {
+    // `mut`/`static` may appear in either order on a field (the parser accepts both).
+    auto result = analyzeString(R"(
+        class C { static mut i32 K = 0; }
+        fn f() { C::K = 5; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Static - a const static cannot be written in a constructor (no inConstructor bypass)", "[static][const][semantic]") {
+    // Instance const fields may be set via `this.f =` in the ctor, but a static field is class-level
+    // (the ctor runs per-instance), so that allowance must NOT extend to const statics.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class C { static i32 K = 0; i32 id; C(i32 x) { id = x; K = 1; } }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - const gating survives monomorphization (generic class static)", "[static][const][generic][semantic]") {
+    // A generic class's static field is const-by-default in every instantiation; the check fires on
+    // the monomorphized class, reached here through instance access (`b.shared = …`).
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Box<T> { static i32 shared = 0; mut T v; Box(T x) { v = x; } }
+        fn f() { Box<i32> b(1); b.shared = 5; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable static field"));
+}
+
+TEST_CASE("Static - a mut generic class static is writable", "[static][const][generic][semantic]") {
+    auto result = analyzeString(R"(
+        class Box<T> { mut static i32 shared = 0; mut T v; Box(T x) { v = x; } }
+        fn f() -> i32 { Box<i32> b(1); b.shared = 5; return b.shared; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Static - a const static field lowers to a plain (unchanged) global", "[static][const][codegen]") {
+    // const-ness is a compile-time check only — the emitted global is byte-identical.
+    auto ir = codegenString(R"(
+        class C { static i32 K = 7; }
+        fn f() -> i32 { return C::K; }
+    )");
+    REQUIRE(ir.find("@C$K = global i32 zeroinitializer") != std::string::npos);
 }
 
 TEST_CASE("Static - read through an instance obj.field type-checks", "[static][semantic]") {
@@ -166,7 +282,7 @@ TEST_CASE("Static - read via :: lowers to a load of the global", "[static][codeg
 
 TEST_CASE("Static - write via :: lowers to a store to the global", "[static][codegen]") {
     auto ir = codegenString(R"(
-        class Counter { static i32 count = 0; }
+        class Counter { mut static i32 count = 0; }
         fn f() { Counter::count = 9; }
     )");
     REQUIRE(ir.find("store i32 9, ptr @Counter$count") != std::string::npos);
@@ -309,7 +425,7 @@ TEST_CASE("Static - call via :: lowers to a call without a receiver", "[static][
 TEST_CASE("Static - method mutating a static field stores to the global", "[static][codegen]") {
     auto ir = codegenString(R"(
         class C {
-            static i32 count = 0;
+            mut static i32 count = 0;
             fn static bump() { C::count = C::count + 1; }
         }
         fn f() { C::bump(); }

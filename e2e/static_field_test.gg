@@ -3,7 +3,8 @@
 // before main and accessible as ClassName::field or obj.field.
 
 class Counter {
-    static i32 total = 10;
+    mut static i32 total = 10;     // `mut static` — reassignable shared counter
+    static i32 LIMIT = 100;        // const static — a named constant (immutable)
     i32 id;
 
     Counter(i32 id) {
@@ -12,11 +13,16 @@ class Counter {
     }
 
     fn getTotal() -> i32 { return Counter::total; }
+    fn static cap() -> i32 { return Counter::LIMIT; }   // read the const static
 }
 
 fn main() -> i32 {
     // Initial value comes from the pre-main initializer.
     if (Counter::total != 10) { return 1; }
+
+    // A const static is readable as a named constant, via the type and an instance.
+    if (Counter::LIMIT != 100) { return 6; }
+    if (Counter::cap() != 100) { return 7; }
 
     Counter& a = new Counter(1);
     Counter& b = new Counter(2);

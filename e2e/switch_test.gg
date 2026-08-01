@@ -21,7 +21,7 @@ class Pair { mut i32 a; mut i32 b; Pair(i32 x, i32 y) { a = x; b = y; } }
 // releases every allocation exactly once (balanced counter ⇒ no leak / double-free).
 class Node {
     mut i32 v;
-    static i32 live = 0;
+    mut static i32 live = 0;
     Node(i32 x) { v = x; Node::live = Node::live + 1; }
     ~Node() { Node::live = Node::live - 1; }
     fn get() -> i32 { return v; }

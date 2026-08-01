@@ -12,7 +12,7 @@
 // counter still tracks the real resource. Expected exit code: 0.
 
 class Ctr {
-    static i32 live;
+    mut static i32 live;
     fn static inc() { Ctr::live = Ctr::live + 1; }
     fn static dec() { Ctr::live = Ctr::live - 1; }
     fn static get() -> i32 { return Ctr::live; }

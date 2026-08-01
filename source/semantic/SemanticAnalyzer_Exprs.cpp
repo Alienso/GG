@@ -198,12 +198,17 @@ const ClassInfo::Field* SemanticAnalyzer::currentInstanceField(const std::string
     return fit == cit->second.fields.end() ? nullptr : &fit->second;
 }
 
-const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) const {
+const ClassInfo::StaticField* SemanticAnalyzer::currentStaticField(const std::string& name) const {
     if (currentClassName.empty()) return nullptr;
     auto cit = classRegistry.find(currentClassName);
     if (cit == classRegistry.end()) return nullptr;
     auto sfit = cit->second.staticFields.find(name);
-    return sfit == cit->second.staticFields.end() ? nullptr : &sfit->second.type;
+    return sfit == cit->second.staticFields.end() ? nullptr : &sfit->second;
+}
+
+const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) const {
+    const ClassInfo::StaticField* sf = currentStaticField(name);
+    return sf ? &sf->type : nullptr;
 }
 
 const std::vector<ClassInfo::Method>* SemanticAnalyzer::currentClassMethods(const std::string& name) const {
@@ -459,7 +464,15 @@ bool SemanticAnalyzer::incDecTargetOk(const Token& op, const std::string& name) 
             return false;
         }
     }
-    // Static field → mutable; not-a-field → analyzeExpr(operand) already reported it.
+    // Implicit `this` static field: `++`/`--` mutates → needs a `mut static` field.
+    if (const ClassInfo::StaticField* sf = currentStaticField(name)) {
+        if (!sf->isMut) {
+            error(op, "cannot mutate immutable static field '" + name
+                  + "'; declare it 'mut static' to allow mutation");
+            return false;
+        }
+    }
+    // not-a-field → analyzeExpr(operand) already reported it.
     return true;
 }
 
@@ -1009,10 +1022,13 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
             checkCast(rhs, f->type, assign.name, "field assignment");
             return f->type;
         }
-        if (const Type* sft = currentStaticFieldType(assign.name.lexeme)) {
-            Type rhs = analyzeWithExpected(*assign.value, *sft);
-            checkCast(rhs, *sft, assign.name, "static field assignment");
-            return *sft;
+        if (const ClassInfo::StaticField* sf = currentStaticField(assign.name.lexeme)) {
+            if (!sf->isMut)
+                error(assign.name, "cannot assign to immutable static field '" + assign.name.lexeme
+                      + "'; declare it 'mut static' to allow reassignment");
+            Type rhs = analyzeWithExpected(*assign.value, sf->type);
+            checkCast(rhs, sf->type, assign.name, "static field assignment");
+            return sf->type;
         }
         error(assign.name, "use of undeclared identifier '" + assign.name.lexeme + "'");
         analyzeExpr(*assign.value);
@@ -1114,8 +1130,11 @@ Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundA
             return f->type;
         }
         lhsType = f->type;
-    } else if (const Type* sft = currentStaticFieldType(compoundAssign.name.lexeme)) {
-        lhsType = *sft;
+    } else if (const ClassInfo::StaticField* sf = currentStaticField(compoundAssign.name.lexeme)) {
+        if (!sf->isMut)
+            error(compoundAssign.name, "cannot modify immutable static field '"
+                  + compoundAssign.name.lexeme + "'; declare it 'mut static' to allow mutation");
+        lhsType = sf->type;
     } else {
         error(compoundAssign.name, "use of undeclared identifier '" + compoundAssign.name.lexeme + "'");
         analyzeExpr(*compoundAssign.value);
@@ -1831,6 +1850,9 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
             if (!sf.isPublic && currentClassName != ident.name.lexeme)
                 warn(memberAssign.field, "static field '" + memberAssign.field.lexeme
                      + "' is private in class '" + ident.name.lexeme + "'");
+            if (!sf.isMut)
+                error(memberAssign.field, "cannot assign to immutable static field '"
+                      + memberAssign.field.lexeme + "'; declare it 'mut static' to allow reassignment");
             Type valueType = analyzeExpr(*memberAssign.value);
             checkCast(valueType, sf.type, memberAssign.field, "static field assignment");
             return sf.type;
@@ -1856,6 +1878,9 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
         if (!sf.isPublic && currentClassName != objectType.className)
             warn(memberAssign.field, "static field '" + memberAssign.field.lexeme
                  + "' is private in class '" + objectType.className + "'");
+        if (!sf.isMut)
+            error(memberAssign.field, "cannot assign to immutable static field '"
+                  + memberAssign.field.lexeme + "'; declare it 'mut static' to allow reassignment");
         Type valueType = analyzeExpr(*memberAssign.value);
         checkCast(valueType, sf.type, memberAssign.field, "static field assignment");
         return sf.type;

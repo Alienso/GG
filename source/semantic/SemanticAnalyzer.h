@@ -55,6 +55,7 @@ struct ClassInfo {
     // A static (class-level) field: shared storage, not part of the struct layout.
     struct StaticField {
         bool  isPublic = false;
+        bool  isMut    = false;   // const-by-default like every other binding; `mut static` opts in
         Type  type;
         Token decl;          // field name token
     };
@@ -332,6 +333,7 @@ private:
     // Implicit-`this` member resolution: a bare name (not shadowed by a local/param/function)
     // may refer to a member of the enclosing class. Returns nullptr when not applicable.
     [[nodiscard]] const ClassInfo::Field* currentInstanceField(const std::string& name) const;
+    [[nodiscard]] const ClassInfo::StaticField* currentStaticField(const std::string& name) const;
     [[nodiscard]] const Type*             currentStaticFieldType(const std::string& name) const;
     [[nodiscard]] const std::vector<ClassInfo::Method>* currentClassMethods(const std::string& name) const;
     // Best-match overload resolution. Analyzes `args` once, ranks candidates by argument

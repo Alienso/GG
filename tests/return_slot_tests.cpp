@@ -299,3 +299,113 @@ TEST_CASE("Unified - a mutating method uses 'mut' before the arrow", "[return-sl
     REQUIRE(m->isMut);
     REQUIRE(m->returnType.type == TokenType::I32);
 }
+
+// ------------------------------------------------------------
+// A value-return (sret) call used as a nested sub-expression argument
+// ------------------------------------------------------------
+// An sret call in a non-binding position materializes a temp (materializeSlotTemp) and yields
+// its address, so it borrows into a `Class&` parameter like any other value object. (Previously
+// documented as deferred; it is fully supported via the genCall/genMethodCall value path.)
+
+TEST_CASE("ReturnSlot - a value-return call is usable as a nested argument", "[return-slot][codegen]") {
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; }
+                      fn sum() -> i32 { return x + y; } }
+        fn make(i32 a, i32 b) -> Point p { p.x = a; p.y = b; return p; }
+        fn takeRef(Point& q) -> i32 { return q.sum(); }
+        fn main() -> i32 { return takeRef(make(10, 20)); }
+    )");
+    // The sret result is materialized into a stack temp, then passed by address to takeRef.
+    REQUIRE(ir.find("call void @make(ptr %slottmp") != std::string::npos);
+    REQUIRE(ir.find("call i32 @takeRef(ptr %slottmp") != std::string::npos);
+}
+
+// ------------------------------------------------------------
+// Escape analysis: filling an object-value return slot from a borrow is a CLONE, not an escape
+// ------------------------------------------------------------
+
+TEST_CASE("ReturnSlot - a borrow copied into an object return slot does not escape (free fn)", "[return-slot][escape][semantic]") {
+    // `out = v` writes a by-value clone into the caller's sret slot; the source object does not
+    // outlive the call, so passing a *stack value* object to `v` must be accepted.
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; }
+                      fn sum() -> i32 { return x + y; } }
+        fn dup(Point& v) -> Point out { out = v; return out; }
+        fn main() -> i32 { Point seed(3, 4); Point copy = dup(seed); return copy.sum(); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ReturnSlot - object-slot clone does not escape in a METHOD (self-typed slot)", "[return-slot][escape][semantic]") {
+    // Regression: the escape summary is computed in buildClassInfo, where the method's own class is
+    // NOT yet in classRegistry — so the slot type resolves to a non-Object placeholder. Gating the
+    // clone exception on `!= Reference` (not `== Object`) is what makes the method path work; a
+    // `== Object` gate silently missed it and wrongly rejected the stack argument.
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; }
+                      fn sum() -> i32 { return x + y; }
+                      fn cloneFrom(Point& v) -> Point out { out = v; return out; }
+                      fn dupThis() -> Point out { out = this; return out; } }
+        fn main() -> i32 {
+            Point a(3, 4); Point b(1, 1);
+            Point c = a.cloneFrom(b);   // clone a stack value into the slot
+            Point d = a.dupThis();      // clone the (stack) receiver into the slot
+            return c.sum() + d.sum();
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ReturnSlot - object-slot clone does not escape in a trait impl method", "[return-slot][escape][trait][semantic]") {
+    auto result = analyzeString(R"(
+        trait Dup { fn dup(Self& v) -> Self out; }
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; }
+                      fn sum() -> i32 { return x + y; } }
+        impl Dup for Point { fn dup(Point& v) -> Point out { out = v; return out; } }
+        fn main() -> i32 { Point p(2, 5); Point q = p.dup(p); return q.sum(); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ReturnSlot - a REFERENCE return slot filled from a borrow still escapes", "[return-slot][escape][semantic]") {
+    // Contrast with the object-slot case: `-> Point& out` rebinds/returns the borrow itself, so a
+    // stack value argument would dangle — the escape check must still reject it.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+        fn leak(Point& v) -> Point& out { out = v; return out; }
+        fn main() -> i32 { Point seed(3, 4); Point& r = leak(seed); return r.x; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("escapes"));
+}
+
+TEST_CASE("ReturnSlot - a BORROW return slot filled from a borrow still escapes", "[return-slot][escape][semantic]") {
+    // A `-> Point* out` borrow slot returns a view of the argument; a stack value would dangle.
+    // Borrows decode to Reference from token syntax, so the `!= Reference` gate keeps the edge.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        fn borrowOut(Point& v) -> Point* out { out = v; return out; }
+        fn main() -> i32 { Point s(5); Point* b = borrowOut(s); return b.x; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("escapes"));
+}
+
+TEST_CASE("ReturnSlot - a ref-field store still escapes even alongside an object-slot clone", "[return-slot][escape][semantic]") {
+    // The clone exception removes ONLY the whole-object `slot = v` alias edge. A genuine escape via
+    // a reference-field store (`this.item = v`) on the same parameter must still be caught.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Holder { mut Point& item; Holder() {}
+                       fn stash(Point& v) mut -> Point out { this.item = v; out = v; return out; } }
+        fn main() -> i32 {
+            mut Holder& h = new Holder(); Point s(5);
+            Point r = h.stash(s); return r.x;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("escapes"));
+}

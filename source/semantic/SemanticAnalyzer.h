@@ -271,9 +271,14 @@ private:
     // Escape analysis (SemanticAnalyzer_Escape.cpp). Fills the per-parameter (and, for methods,
     // `this`) escape bits used to reject passing a stack value object to a parameter that the
     // callee returns or stores. `computeThis` requests the receiver bit (instance methods only).
+    // `objectSlotName` names a non-reference return slot (object/primitive/enum value alias): an
+    // assignment `slot = p` there is a *clone* into the caller's storage, not an alias, so it must
+    // NOT propagate escape back to `p`. A reference/borrow return alias passes "" (its `slot = v`
+    // is a real rebind that returns the borrow). See `nonRefSlotName` in the .cpp.
     void computeParamEscapes(const std::vector<ParamDecl>& params, const BlockStmt& body,
                              bool computeThis, const std::unordered_set<std::string>& fieldNames,
-                             std::vector<bool>& paramEscapesOut, bool& thisEscapesOut);
+                             std::vector<bool>& paramEscapesOut, bool& thisEscapesOut,
+                             const std::string& objectSlotName = "");
 
     // Statement analysis
     void analyzeStmt(const Stmt& stmt);

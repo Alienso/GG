@@ -8,6 +8,10 @@ class Point {
     mut i32 y;
     Point(i32 a, i32 b) { x = a; y = b; }
     fn sum() -> i32 { return x + y; }
+    // Object return slot filled by cloning a borrowed param (self-typed slot) and the receiver —
+    // both accepted with stack values (escape analysis treats the slot store as a deep copy).
+    fn cloneFrom(Point& v) -> Point out { out = v; return out; }
+    fn twin() -> Point out { out = this; return out; }
 }
 
 // Free function with a return slot.
@@ -58,6 +62,14 @@ class Wrap<T> {
     fn build() -> Point p { p.x = seed; p.y = seed + 1; return p; }
 }
 
+// Borrow readers/combiners — exercise a value-return (sret) call passed as a nested argument.
+fn takeRef(Point& q) -> i32 { return q.sum(); }
+fn combine(Point& x, Point& y) -> Point r { r.x = x.x + y.x; r.y = x.y + y.y; return r; }
+
+// An object return slot filled by CLONING a borrowed parameter — the source (a stack value) does
+// not escape, so a stack argument is accepted (escape analysis treats `out = v` as a deep copy).
+fn dupRef(Point& v) -> Point out { out = v; return out; }
+
 fn main() -> i32 {
     // Free function.
     Point a = make(3, 4);
@@ -89,6 +101,24 @@ fn main() -> i32 {
     Wrap<i32>& wr = new Wrap<i32>(100);
     Point m = wr.build();
     if (m.sum() != 201) { return 8; }      // 100 + 101
+
+    // A value-return (sret) call used directly as a nested argument (materialized temp borrowed in).
+    if (takeRef(make(10, 20)) != 30) { return 9; }
+
+    // Doubly nested: sret call feeding an sret call feeding a ref-taker.
+    if (takeRef(combine(make(1, 1), make(2, 2))) != 6) { return 10; }
+
+    // Object return slot filled by cloning a borrowed STACK value — accepted, and independent.
+    Point src(5, 6);
+    Point cp = dupRef(src);
+    if (cp.sum() != 11) { return 11; }
+
+    // Method clone from a stack-value param, and clone of a stack receiver.
+    Point host(0, 0);
+    Point mc = host.cloneFrom(src);   // 11
+    if (mc.sum() != 11) { return 12; }
+    Point tw = src.twin();            // 11
+    if (tw.sum() != 11) { return 13; }
 
     return 0;
 }

@@ -7,6 +7,17 @@
 #include <functional>
 
 namespace {
+    // The escape-analysis "clone slot" name (or "" if there is none): the name of a return alias
+    // whose `slot = param` assignment is a by-value COPY into the caller's storage, not an alias —
+    // so escape analysis must not propagate escape back through it. That is every return slot
+    // EXCEPT a reference/borrow one (`-> T& out` / `-> T* out`), where `slot = v` is a genuine
+    // rebind that returns the borrow. Deciding on `!= Reference` (rather than `== Object`) is
+    // important: at collection time a method returning its own not-yet-registered class resolves to
+    // a non-Object type, whereas a reference return always decodes to Reference from token syntax.
+    inline std::string nonRefSlotName(bool hasReturnSlot, const Type& returnType,
+                                      const std::string& slotName) {
+        return (hasReturnSlot && returnType.kind != TypeKind::Reference) ? slotName : std::string();
+    }
     // Length of the trailing run of defaulted parameters — the number of arguments a purely
     // POSITIONAL call may omit (positional binding is left-to-right, so only a trailing run of
     // defaults is droppable). Defaults may now sit anywhere; a named call can skip a defaulted
@@ -245,7 +256,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         set.back().paramHasDefault = paramHasDefaultOf(md.params);
         bool te = false;
         computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
-                            set.back().paramEscapes, te);
+                            set.back().paramEscapes, te, nonRefSlotName(md.hasReturnSlot, returnType, md.returnSlotName));
         set.back().thisEscapes = te;
     }
     return info;
@@ -512,7 +523,8 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
             set.back().paramHasDefault = paramHasDefaultOf(md.params);
             bool te = false;
             computeParamEscapes(md.params, md.body, /*computeThis=*/!md.isStatic, refFieldNames,
-                                set.back().paramEscapes, te);
+                                set.back().paramEscapes, te,
+                                nonRefSlotName(md.hasReturnSlot, ret, md.returnSlotName));
             set.back().thisEscapes = te;
         }
 
@@ -713,7 +725,8 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
                     bool te = false;
                     static const std::unordered_set<std::string> noFields;
                     computeParamEscapes(function.params, function.body, /*computeThis=*/false,
-                                        noFields, set.back().paramEscapes, te);
+                                        noFields, set.back().paramEscapes, te,
+                                        nonRefSlotName(function.hasReturnSlot, returnType, function.returnSlotName));
                 }
             }
 

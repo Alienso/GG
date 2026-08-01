@@ -32,6 +32,7 @@ struct EscapeScan {
     std::unordered_set<std::string>                  escaping;    // names used in an escaping position
     const std::unordered_set<std::string>*           fields = nullptr;  // enclosing class's reference-field names
     std::unordered_set<std::string>                  declaredLocals;    // local names that shadow fields
+    std::string                                      objectSlot;        // non-reference return-slot alias name (or "")
 };
 
 // The reference source named by an expression, if it is a bare name or `this`; else "".
@@ -58,8 +59,15 @@ void scanExpr(const Expr& e, EscapeScan& s) {
         // `field = <ident>` (implicit-`this` reference-field store) escapes; `local = <ident>` is a
         // rebind, which just makes `local` alias that name (matters only if `local` later escapes).
         // A local of the same name shadows the field, so a declared local is always a rebind.
+        // EXCEPTION: `objectSlot = <ident>` is a *clone* into the caller's sret storage, not an
+        // alias — the slot takes a by-value deep copy (primitives copied, reference fields
+        // retained), so the source object does not outlive the call. No alias edge ⇒ a borrowed
+        // param filled into an object-value return alias does not escape.
         if (s.fields && s.fields->count(a->name.lexeme) && !s.declaredLocals.count(a->name.lexeme))
             markEscape(*a->value, s);
+        else if (!(s.objectSlot.empty()) && a->name.lexeme == s.objectSlot) {
+            // clone into the sret slot — deliberately record no alias edge
+        }
         else {
             std::string src = refName(*a->value);
             if (!src.empty()) s.aliasEdges.emplace_back(src, a->name.lexeme);
@@ -171,9 +179,11 @@ bool reaches(const std::string& start, const EscapeScan& s) {
 void SemanticAnalyzer::computeParamEscapes(const std::vector<ParamDecl>& params,
                                            const BlockStmt& body, bool computeThis,
                                            const std::unordered_set<std::string>& fieldNames,
-                                           std::vector<bool>& paramEscapesOut, bool& thisEscapesOut) {
+                                           std::vector<bool>& paramEscapesOut, bool& thisEscapesOut,
+                                           const std::string& objectSlotName) {
     EscapeScan s;
     s.fields = &fieldNames;
+    s.objectSlot = objectSlotName;
     for (const auto& sub : body.body) if (sub) scanStmt(*sub, s);
 
     paramEscapesOut.assign(params.size(), false);

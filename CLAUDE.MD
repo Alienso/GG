@@ -446,6 +446,25 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
   → clang            (assembles + links to native .exe)
 ```
 
+### Parser file organization
+The `Parser` class is one contract (`source/parser/Parser.h`) whose implementation is split by
+responsibility across several `.cpp`s (mirroring the `CodeGen_*` / `SemanticAnalyzer_*` split), so no
+single file is oversized. All are pure relocation behind the shared header — a method's physical file
+doesn't affect behavior (members resolve via `Parser.h`):
+- `Parser.cpp` — driver (`parse`), the token cursor (`peek`/`advance`/`match`/`consume`), `error`/
+  `synchronize`, `parseDeclaration`/`parseStatement`/`parseBlock`, and type parsing
+  (`isTypeName`/`consumeType`/`consumeTypeCore`).
+- `Parser_Modules.cpp` — `scanModuleDirectives`/`scanModuleMembers`/`qualifyTokens`.
+- `Parser_Generics.cpp` — template capture (`tryCapture*`), `Call`-bound scanning, type-arg parsing,
+  mangling, deduction, and `runMonomorphization`.
+- `Parser_Reflect.cpp` — `expandReflection*` + `parseInlineForStmt`/`parseReflectExpr`.
+- `Parser_Decl.cpp` — `parseFnDeclaration`/class/enum/trait/impl/`parseMemberList` + params/args.
+- `Parser_Stmt.cpp` — `if`/`while`/`for`/`switch`/`return`/`yield`/`break`/`continue`/expr-stmt.
+- `Parser_Expr.cpp` — the precedence ladder (`parseExpression` … `parsePrimary`) + lambdas.
+- `Parser_internal.h` — two `inline` helpers (`isTypeKeyword`, `argMangle`) shared by the type and
+  generics files. (`callSigTokenType`/`reflectBaseClassName` are file-local `static` in Generics/
+  Reflect respectively.)
+
 ### ImportResolver — 3 passes
 1. **Prescan templates**: walk all files recursively, register every generic template
    name into a shared `GenericRegistry` (so use sites in other files are recognised).

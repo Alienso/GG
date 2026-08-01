@@ -75,6 +75,13 @@ set(GG_SOURCES
         source/lexer/Lexer.cpp  source/lexer/Lexer.h
         source/lexer/Token.cpp  source/lexer/Token.h
         source/parser/Parser.cpp  source/parser/Parser.h
+        source/parser/Parser_internal.h
+        source/parser/Parser_Modules.cpp
+        source/parser/Parser_Generics.cpp
+        source/parser/Parser_Reflect.cpp
+        source/parser/Parser_Decl.cpp
+        source/parser/Parser_Stmt.cpp
+        source/parser/Parser_Expr.cpp
         source/parser/Ast.h
         source/parser/AstPrinter.h  source/parser/AstPrinter.cpp
         source/semantic/Type.h        source/semantic/Type.cpp

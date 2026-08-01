@@ -427,9 +427,11 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
   `#dbg_declare(ptr <alloca>, !<DILocalVariable>, !DIExpression(), !<loc>)` **record** (LLVM-22 form,
   not the old `@llvm.dbg.declare` intrinsic) for each parameter (`arg: N`) and local — hooked in the
   param-spill loop and each `genVarDecl` branch (scalars/refs/enums/`ptr`/objects; arrays and static
-  locals are skipped). `this` is not declared (it's the `%self` value, not an alloca).
+  locals are skipped). `this` is not declared (it's the `%self` value, not an alloca). A `str` value
+  is a precise `DW_TAG_structure_type` (`{ ptr data; u64 len }`, 128 bits) — see the `str` invariant.
 - **v1 limitation**: a single `DIFile` = the main source; lines from imported files map against it
-  (multi-file line attribution deferred).
+  (multi-file line attribution deferred — `Token` carries only a line, not a source-file identity;
+  function-granularity attribution via a per-file `DIFile` map is the intended fix).
 
 ## Architecture summary
 
@@ -1114,8 +1116,10 @@ refcount. `String` (the heap class) is unchanged and distinct.
 - **`String(str)`**: the stdlib constructor takes a `str` and uses `literal.len` (no `strlen` scan) +
   `literal.data`. All CRT bindings stay `ptr` and receive `String`'s `ptr` buffer, so `crt/*.gg` is
   unaffected.
-- **Debug info**: `dbgSizeAlign(Str)` = `{16, 8}`; `dbgTypeOf` approximates it as an opaque pointer
-  (Phase 1 — a precise composite is deferred; debug is off by default).
+- **Debug info**: `dbgSizeAlign(Str)` = `{16, 8}`; `dbgTypeOf` emits a precise
+  `DW_TAG_structure_type` `str` (128 bits) with two members — `data` (a `ptr`, offset 0) and `len`
+  (`u64`, offset 64) — reusing the cached `ptr`/`u64` type nodes (neither refers back to `str`, so no
+  cycle). So a debugger shows `{data=…, len=…}`, not an opaque address. (Debug is off by default.)
 - **Reflection strings are `str`** (Phase 2): `@typeName(T)` returns a `str` (was a bare `ptr`) — so
   `@typeName(T).len` and `.data` work; `f.name`/`v.name` were already `str` (they lower to string
   literals). `analyzeReflect(TypeName)` → `Str`; `genReflect(TypeName)` materializes the `{ptr,i64}`
@@ -1251,6 +1255,13 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1084 test cases / 2026 assertions** (as of **`str` precise DWARF composite** — with `--debug`, a
+`str` local was described as an opaque `DW_TAG_pointer_type` (address only, wrong 8-byte size); it is
+now a precise `DW_TAG_structure_type` `{ ptr data; u64 len }` (128 bits, `len` at offset 64), so a
+debugger shows the fields. ~15 lines in `dbgTypeOf` (`CodeGen_Debug.cpp`), reusing the cached
+`ptr`/`u64` nodes; clang's DWARF verifier accepts it at link. Debug stays off by default (IR
+byte-identical when off). The other deferred debug item — multi-file line attribution (single
+`DIFile`) — remains open. `tests/debug_tests.cpp` (`[debug]`, +1 case). Prior baseline was
 **1081 test cases / 2015 assertions** (as of **const-by-default static fields** — a static field is now
 **immutable unless `mut static`**, closing the one gap in GG's const-by-default model (static fields
 were previously always mutable). Enforced purely in semantics: `ClassInfo::StaticField` gained

@@ -178,11 +178,24 @@ int CodeGen::dbgTypeOf(const Type& t) {
             id = dbgAdd("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)");
             break;
 
-        // `str` view: approximate as an opaque pointer for now (Phase 1 — a precise { ptr, i64 }
-        // composite is deferred; debug info is off by default and this keeps it valid).
-        case TypeKind::Str:
-            id = dbgAdd("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)");
+        // `str` view: a { ptr data; u64 len } value (16 bytes). Describe it as a 2-member struct so
+        // a debugger shows the pointer and the byte length instead of an opaque address. Members
+        // reuse the cached `ptr`/`u64` type nodes; neither refers back to `str`, so no cycle.
+        case TypeKind::Str: {
+            std::string fid = std::to_string(dbgFileId_);
+            int dataPtr = dbgTypeOf(Type{TypeKind::Ptr});
+            int lenTy   = dbgTypeOf(Type{TypeKind::U64});
+            int dataMem = dbgAdd("!DIDerivedType(tag: DW_TAG_member, name: \"data\", file: !" + fid
+                                 + ", baseType: !" + std::to_string(dataPtr)
+                                 + ", size: 64, align: 64, offset: 0)");
+            int lenMem  = dbgAdd("!DIDerivedType(tag: DW_TAG_member, name: \"len\", file: !" + fid
+                                 + ", baseType: !" + std::to_string(lenTy)
+                                 + ", size: 64, align: 64, offset: 64)");
+            int elems   = dbgAdd("!{!" + std::to_string(dataMem) + ", !" + std::to_string(lenMem) + "}");
+            id = dbgAdd("!DICompositeType(tag: DW_TAG_structure_type, name: \"str\", file: !" + fid
+                        + ", size: 128, align: 64, elements: !" + std::to_string(elems) + ")");
             break;
+        }
 
         case TypeKind::Object: {
             auto it = cgClasses_.find(t.className);

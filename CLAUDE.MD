@@ -1113,6 +1113,68 @@ registry and folded away, riding the same reflection-expansion pipeline.
   is true. `extern` declarations are always exempt.
 - `compile.ps1` always passes `--unsafe-ptr`; test helpers default to `allowRawPtr = true`.
 
+### The `Clone` trait — a user deep-copy hook (Array<T> Phase 2)
+A built-in trait `Clone { fn clone(Self& src) mut; }` (a copy constructor): `this` = destination,
+`src` = source; the method deep-copies `src` into `this`. It unblocks storing **buffer-owning value
+objects** (`String`, a nested `Array`) by value in an `Array<T>` (Phase 1 rejected them — memberwise
+clone is shallow over a raw `ptr` → double-free).
+- **Key mechanism — transparent replacement, zero call-site changes**: a `clone` impl method mangles
+  to `@Class_clone` — the *exact* symbol the generated memberwise clone uses and every clone site
+  (value copy, sret slot, `Array` element write) already calls. So a `Clone` impl **replaces** the
+  generated clone, and recursion composes automatically (memberwise clone already calls `@Field_clone`
+  for object fields → the field's own impl when it has one). `Array<Array<Point>>` clones correctly:
+  `@Array$Array$Point_clone` → `@Array$Point_clone` → `@Point_clone`.
+- **C1 recognition** (`SemanticAnalyzer.cpp`): `Clone` added to `isBuiltinTrait` builtins + the
+  `collectImpls` `builtinMethod` map (`{"Clone","clone"}`). Redeclaring `trait Clone` is an error
+  ("built-in").
+- **C2 suppress the generated clone** (`CodeGen.cpp` clone-drain loop): skip `genCloneFunction(cn)`
+  when `implementedTraits_[cn]` contains `Clone` — the impl's method already emits `@Class_clone` with
+  the identical `(dest, src)` ABI. `clonesNeeded_.insert` still fires; it resolves to the user's def.
+- **C3 contract (stdlib follows, not a compiler step)**: `clone` frees/releases `this`'s old state
+  first — a no-op on a zeroed `this` (`free(null)`/`gg_release(null,…)`), so one body serves both
+  copy-**construct** (zeroed dest: Phase-1 element write, copy-init) and copy-**assign** (live dest).
+  Bonus: a general value copy of a `Clone` type now deep-copies (`String a = b;` → independent buffers),
+  fixing the pre-existing shallow-`ptr` footgun.
+- **C4 guard relaxation** (`analyzeIndexAssign`): the owning-`ptr` element guard (Phase 1) is relaxed to
+  reject **unless** the element class impls `Clone` (`implementedTraits[...].count("Clone")`).
+- **C5 stdlib impls**: `impl Clone for String` (fields made `private mut`; frees old buffer, `malloc`s
+  fresh, `memcpy`s `src`) and `impl<T> Clone for Array<T>` (a **generic impl** — monomorphizes with the
+  class; destroys old elements + frees old buffer, then `malloc`s and element-writes each `src` element,
+  routing through `T`'s clone = recursive).
+- Tests: `tests/clone_tests.cpp` (`[clone]`), `e2e/array_clone_test.gg` (`Array<String>` +
+  `Array<Array<Point>>`, independent-buffer + recursion checks, exit 0).
+
+### Owned value-object elements in a `ptr<T>` buffer + `destroy(place)` (Array<T> Phase 1)
+A `ptr<T>` buffer can hold **value objects by value** — deep-cloned in, destroyed exactly once out —
+which is what makes stdlib `Array<Point>` work (primitives-only before). No `comptime if`: codegen
+branches on the concrete element type after monomorphization; primitives are unchanged.
+- **Object element WRITE** (`genIndexAssign`, `CodeGen_Exprs.cpp`): for `elementType.kind == Object`,
+  emit `store %C zeroinitializer, ptr <slot>` then `@C_clone(<slot>, <src>)` (register `clonesNeeded_`).
+  The zero-init makes clone's "release dest's old ref" a null no-op on the **raw** slot, turning
+  copy-assignment into a safe copy-**construct**. Primitive elements keep the scalar store.
+- **Object element READ** (`genIndex`): for an object element, return the `genElementAddress` GEP
+  (objects carry their address), **not** an `emitLoad` — so it borrows/clones correctly and
+  `Index::get(i) -> T*` works.
+- **`destroy(place)`** — a new keyword/intrinsic (`DESTROY`, `DestroyExpr`, mirroring `SizeofExpr` but
+  taking a parsed expression), **gated on `--unsafe-ptr`** (`analyzeDestroy`). Codegen (`genDestroy`)
+  evaluates the operand then emits `@C_dtor(addr)` **iff** `cgClasses_[C].needsDtor`, else nothing —
+  so `destroy(data[i])` on a primitive/no-dtor element is a no-op. Container teardown (`~Array`,
+  `clear`, `pop`, `set`) loops `destroy(...)` since explicit dtor calls are otherwise forbidden.
+  **Double-free guard**: `destroy` on a bare **local object variable** is rejected (it is already
+  auto-destroyed at scope exit) — `destroy` is for `ptr<T>` elements / fields the compiler does not
+  auto-destroy. (A value-object *field* destroy is still caveat-emptor under `--unsafe-ptr`.)
+- **Temp-materialization**: a primitive rvalue may bind to a primitive-borrow (`T*`) **argument** — a
+  hidden slot holds the value and its address is passed (`lowerArgOperand`; `buildArgString`/`emitOne`
+  and `genTraitMethodCall`). So `a.push(5)` / `a[i] = 999` work. A `mut T*` still rejects a temporary
+  (write-through would be lost).
+- **Owning-`ptr` guard** (`analyzeIndexAssign` → `classOwnsRawPtr`): a value object that transitively
+  owns a raw `ptr`/`ptr<T>` field (String, nested `Array`) is **rejected** as a `ptr<T>` element unless
+  it impls `Clone` — memberwise clone is shallow and would double-free. (See the `Clone` trait above.)
+- stdlib `Array.gg`: `push(T* value)`/`set(i32 i, T* value)` (`T&`→`T*`), `pop() -> T out` (clone out +
+  `destroy` the buffer copy = ownership transfer), `clear`/`~Array` destroy loops. `Array<Point>` works;
+  `Array<String>`/`Array<Array<Point>>` work via the Phase-2 `Clone` impls.
+  Tests: `tests/array_object_tests.cpp` (`[array-object]`), `e2e/array_object_test.gg`.
+
 ### `str` — compile-time string-literal type (Phase 1)
 `str` is the type of a **string literal** — an immutable view over static (rodata) bytes, lowered to
 a `{ ptr, i64 }` value (`TypeKind::Str`; IR `{ ptr, i64 }`, modeled on the nullable-primitive inline
@@ -1274,6 +1336,38 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1101 test cases / 2062 assertions** (as of **the `Clone` trait — a user deep-copy hook (Array<T>
+Phase 2)** — a built-in `Clone { fn clone(Self& src) mut; }` (copy constructor) lets buffer-owning
+value objects (`String`, a nested `Array`) be stored **by value** in an `Array<T>`, deep-copied and
+destroyed exactly once. **Key mechanism**: a `clone` impl mangles to `@Class_clone` — the exact symbol
+the generated memberwise clone uses and every clone site already calls — so the impl **transparently
+replaces** the generated clone with zero call-site changes, and recursion composes
+(`@Array$Array$Point_clone`→`@Array$Point_clone`→`@Point_clone`). C1 recognizes `Clone` as built-in;
+C2 suppresses the generated clone for `Clone`-impl classes (drain-loop skip); C3 (contract) frees
+`this`'s old state first — a no-op on a zeroed dest, so one body serves construct + assign (bonus:
+`String a = b;` now deep-copies); C4 relaxes the Phase-1 owning-`ptr` guard to allow `Clone`
+implementors; C5 adds `impl Clone for String` (fields → `private mut`) and generic
+`impl<T> Clone for Array<T>`. Verified by IR (single deep-copy clone per class, recursion for the
+nested case) and a runtime e2e (`Array<String>` + `Array<Array<Point>>` + a direct `String b = a`
+independent-buffer check + an **embedded** `Clone` field `Named{ String name; }`, exit 0). A QA pass
+added the embedded-field path (a class that does *not* impl Clone gets the generated memberwise clone,
+which routes the embedded `Clone` field through the impl's `@Field_clone` on a zero-inited dest — safe)
+and the live-dest copy-assign path. See the "`Clone` trait" invariant; `tests/clone_tests.cpp`
+(`[clone]`, +7 cases), `e2e/array_clone_test.gg`. Prior baseline was
+**1094 test cases / 2046 assertions** (as of **owned value-object elements in `Array<T>` (Phase 1)** —
+a `ptr<T>` buffer can now hold value objects by value: the object-element write zero-inits the slot
+then deep-clones (`@C_clone`, a safe construct on raw memory), the object-element read yields the slot
+address, a new `--unsafe-ptr` `destroy(place)` intrinsic runs a value object's dtor in place (no-op for
+primitive/no-dtor elements), a primitive rvalue temp-materializes into a `T*` argument, and a value
+object that owns a raw `ptr` (String / nested `Array`) is rejected cleanly. stdlib `Array.gg` rewritten
+(`T&`→`T*`, `destroy` teardown loops) so `Array<Point>` works end-to-end; `Array<String>`/
+`Array<Array<T>>` are the deferred Phase-2 (`Clone` trait) case. Codegen branches on the concrete
+element type post-monomorphization — no `comptime if`; primitive `Array<i32>` IR is unchanged. A QA
+pass added recursive-embedded-element (`Array<Line>` → `Line_clone`→`Point_clone`) and operator
+`arr[i] = obj` coverage, and fixed a **`destroy(local)` double-free footgun** (destroying a
+scope-managed local object ran its dtor twice — now rejected). See the "Owned value-object elements"
+invariant; `tests/array_object_tests.cpp` (`[array-object]`, +10 cases), `e2e/array_object_test.gg`.
+Prior baseline was
 **1084 test cases / 2026 assertions** (as of **`str` precise DWARF composite** — with `--debug`, a
 `str` local was described as an opaque `DW_TAG_pointer_type` (address only, wrong 8-byte size); it is
 now a precise `DW_TAG_structure_type` `{ ptr data; u64 len }` (128 bits, `len` at offset 64), so a

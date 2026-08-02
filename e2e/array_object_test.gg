@@ -1,0 +1,106 @@
+// End-to-end test for owned VALUE-OBJECT elements in stdlib Array<T>.
+// Elements are deep-cloned into the buffer on push/set and destroyed exactly once on
+// pop/clear/scope-exit. We prove no leak / no double-free with a live-object counter.
+//
+// The element `Box` is a value object owning a `Node&` reference field, so clone (retain) and
+// dtor (release) are refcount-symmetric — a balanced counter ⇒ every element was cloned and
+// destroyed the right number of times. A nonzero counter = leak; a crash = double-free.
+// Expected exit code: 0.
+
+import "std/Array.gg";
+
+class Ctr {
+    mut static i32 live;
+    fn static inc() { Ctr::live = Ctr::live + 1; }
+    fn static dec() { Ctr::live = Ctr::live - 1; }
+    fn static get() -> i32 { return Ctr::live; }
+}
+
+// A tracked heap resource: ctor bumps the counter, dtor drops it.
+class Node {
+    mut i32 v;
+    Node(i32 x) { v = x; Ctr::inc(); }
+    ~Node() { Ctr::dec(); }
+    fn val() -> i32 { return v; }
+}
+
+// A value object that shares a Node via a reference field (clone retains, dtor releases).
+class Box {
+    mut Node& n;
+    fn get() -> i32 { return n.val(); }
+}
+
+fn makeBox(i32 x) -> Box b {
+    Node& nd = new Node(x);
+    b.n = nd;
+}
+
+// (1) push N (forcing a grow past cap=8), then drop the array at scope exit.
+fn pushAndDrop() -> i32 {
+    mut Array<Box>& v = new Array<Box>();
+    mut i32 i = 0;
+    while (i < 20) { Box e = makeBox(i); v.push(e); i = i + 1; }
+    if (v.size() != 20) { return 91; }
+    return 0;
+}
+
+// (2) push then pop each element (using the returned value), then drop.
+fn pushThenPop() -> i32 {
+    mut Array<Box>& v = new Array<Box>();
+    mut i32 i = 0;
+    while (i < 6) { Box e = makeBox(i * 10); v.push(e); i = i + 1; }
+    mut i32 sum = 0;
+    while (!v.isEmpty()) { Box got = v.pop(); sum = sum + got.get(); }
+    if (sum != 150) { return 92; }   // 0+10+20+30+40+50
+    return 0;
+}
+
+// (3) overwrite live elements with set(i, ...) — the old element must be destroyed once.
+fn overwrite() -> i32 {
+    mut Array<Box>& v = new Array<Box>();
+    v.push(makeBox(1));
+    v.push(makeBox(2));
+    v.set(0, makeBox(100));   // destroys the old element 0, stores a new one
+    if (v.get(0).get() != 100) { return 93; }
+    return 0;
+}
+
+// (4) clear() destroys all elements; reusing (push again) then dropping must also balance.
+fn clearAndReuse() -> i32 {
+    mut Array<Box>& v = new Array<Box>();
+    v.push(makeBox(1));
+    v.push(makeBox(2));
+    v.clear();
+    if (!v.isEmpty()) { return 94; }
+    v.push(makeBox(3));   // re-push into a vacated (stale) slot — must re-construct cleanly
+    if (v.get(0).get() != 3) { return 95; }
+    return 0;
+}
+
+// (5) primitive Array<i32> — non-regression guard (element write = scalar store, destroy = no-op).
+fn primitives() -> i32 {
+    mut Array<i32>& a = new Array<i32>();
+    mut i32 i = 0;
+    while (i < 10) { a.push(i * i); i = i + 1; }   // literal/temporary via temp-materialization
+    if (a.size() != 10) { return 96; }
+    if (a.get(9) != 81) { return 97; }
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 r1 = pushAndDrop();    if (r1 != 0) { return r1; }
+    if (Ctr::get() != 0) { return 1; }
+
+    i32 r2 = pushThenPop();    if (r2 != 0) { return r2; }
+    if (Ctr::get() != 0) { return 2; }
+
+    i32 r3 = overwrite();      if (r3 != 0) { return r3; }
+    if (Ctr::get() != 0) { return 3; }
+
+    i32 r4 = clearAndReuse();  if (r4 != 0) { return r4; }
+    if (Ctr::get() != 0) { return 4; }
+
+    i32 r5 = primitives();     if (r5 != 0) { return r5; }
+
+    return 0;
+}

@@ -42,6 +42,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                 { return analyzeCast(castExpr); },
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
+        [&](const DestroyExpr& destroyExpr)           { return analyzeDestroy(destroyExpr); },
         [&](const ReflectExpr& reflect)               { return analyzeReflect(reflect); },
         [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
         [&](const NullLiteralExpr&)                   { return makeNullType(); },
@@ -209,6 +210,51 @@ const ClassInfo::StaticField* SemanticAnalyzer::currentStaticField(const std::st
 const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) const {
     const ClassInfo::StaticField* sf = currentStaticField(name);
     return sf ? &sf->type : nullptr;
+}
+
+// `destroy(place)` — run a destructor in place on a value object (or `ptr<T>` element). An unsafe
+// low-level container primitive: requires --unsafe-ptr, and yields void. A primitive/enum place is
+// permitted and lowers to a no-op (so container code is uniform across primitive and object T).
+Type SemanticAnalyzer::analyzeDestroy(const DestroyExpr& destroy) {
+    Type placeType = analyzeExpr(*destroy.place);
+    if (!allowRawPtr_)
+        error(destroy.keyword, "'destroy' is an unsafe operation and requires --unsafe-ptr "
+              "(it is a low-level container primitive)");
+    else if (placeType.kind == TypeKind::Reference || placeType.kind == TypeKind::Ptr
+             || placeType.kind == TypeKind::TypedPtr)
+        error(destroy.keyword, "'destroy' expects a value object or ptr<T> element to destroy in "
+              "place, not a reference or raw pointer");
+    // Guard the double-free footgun: a bare local object variable is already destroyed automatically
+    // at scope exit, so `destroy(local)` would run its dtor twice. `destroy` is for buffer elements
+    // (`data[i]`) and fields the compiler does NOT auto-destroy.
+    else if (placeType.kind == TypeKind::Object) {
+        if (const auto* id = std::get_if<IdentifierExpr>(destroy.place->node.get())) {
+            const Symbol* sym = symbolTable.lookup(id->name.lexeme);
+            if (sym && sym->kind == Symbol::Kind::Variable)
+                error(destroy.keyword, "cannot 'destroy' the scope-managed local object '"
+                      + id->name.lexeme + "' — it is destroyed automatically at scope exit, so this "
+                      "would double-free; destroy a ptr<T> element (e.g. data[i]) or a field instead");
+        }
+    }
+    return Type{TypeKind::Void};
+}
+
+// True if `className` (transitively, through embedded value-object fields) owns a raw `ptr`/`ptr<T>`
+// field. Such a value object can't be stored/copied by value in a `ptr<T>` container: memberwise
+// clone is shallow over a raw pointer, so the copy would alias the buffer and double-free. Reference
+// (`Class&`) and enum fields are fine (clone retains / shares them). (Phase 2 relaxes this for types
+// that provide a user `Clone` impl.)
+bool SemanticAnalyzer::classOwnsRawPtr(const std::string& className,
+                                       std::unordered_set<std::string>& seen) const {
+    if (!seen.insert(className).second) return false;   // cycle-safe
+    auto it = classRegistry.find(className);
+    if (it == classRegistry.end()) return false;
+    for (const std::string& fname : it->second.fieldOrder) {
+        const Type& ft = it->second.fields.at(fname).type;
+        if (ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) return true;
+        if (ft.kind == TypeKind::Object && classOwnsRawPtr(ft.className, seen)) return true;
+    }
+    return false;
 }
 
 const std::vector<ClassInfo::Method>* SemanticAnalyzer::currentClassMethods(const std::string& name) const {
@@ -389,10 +435,14 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
         checkArgCast(argTypes[k], (*w.params)[s], at, argLabel);
         if (w.paramMut && s < w.paramMut->size() && (*w.paramMut)[s])
             warnConstToMut(at, *args[k], (*w.params)[s]);
-        if (isPrimitiveBorrow((*w.params)[s]) && !isBorrow(argTypes[k]) && !isLvalueExpr(*args[k]))
-            error(at, argLabel + " expects a '" + typeName((*w.params)[s])
-                  + "' but got a temporary; a borrow needs an addressable value (a variable or an "
-                  "element like `a[i]`)");
+        // A temporary bound to a primitive borrow is materialized into a hidden slot (like C++
+        // binding a temporary to a `const int&`) — safe because a primitive borrow does not escape
+        // and the temp lives for the call. Only a `mut` primitive borrow rejects a temporary, since
+        // a write-through would be lost when the temp dies.
+        bool slotMut = w.paramMut && s < w.paramMut->size() && (*w.paramMut)[s];
+        if (isPrimitiveBorrow((*w.params)[s]) && !isBorrow(argTypes[k]) && !isLvalueExpr(*args[k]) && slotMut)
+            error(at, argLabel + " expects a mutable borrow '" + typeName((*w.params)[s])
+                  + "' but got a temporary; a write through it would be lost — pass a variable");
         if (argTypes[k].kind == TypeKind::Object && (*w.params)[s].kind == TypeKind::Reference
             && w.paramEscapes && s < w.paramEscapes->size() && (*w.paramEscapes)[s])
             error(at, "cannot pass the value object '" + argTypes[k].className + "' as " + argLabel
@@ -1627,6 +1677,19 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
         elementType = Type{objectType.elementKind};
     } else if (objectType.kind == TypeKind::TypedPtr) {
         elementType = typedPtrElement(objectType);
+        // Storing a value object by value deep-copies it (clone). A value object that owns a raw
+        // buffer (String, a nested container) would be shallow-cloned → aliased buffer → double-free.
+        // Reject it cleanly. (Phase 2: allow it when the class provides a user `Clone` impl.)
+        if (elementType.kind == TypeKind::Object) {
+            std::unordered_set<std::string> seen;
+            auto tIt = implementedTraits.find(elementType.className);
+            bool implsClone = tIt != implementedTraits.end() && tIt->second.count("Clone") > 0;
+            if (classOwnsRawPtr(elementType.className, seen) && !implsClone)
+                error(site, "cannot store value objects of type '" + elementType.className
+                      + "' in a 'ptr<T>' buffer: it owns a raw buffer (e.g. String or a nested "
+                        "container), and memberwise copy would alias that buffer. Define an "
+                        "'impl Clone for " + elementType.className + "' to deep-copy it.");
+        }
     } else {
         error(site, "cannot index a value of type " + typeName(objectType)
             + " with '[]'; indexing works on a fixed-size array 'T[N]', a raw pointer 'ptr<T>', "

@@ -361,7 +361,7 @@ void SemanticAnalyzer::checkValueFieldCycles(const Program& program) {
 
 bool SemanticAnalyzer::isBuiltinTrait(const std::string& name) {
     static const std::unordered_set<std::string> builtins = {
-        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index"
+        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index", "Clone"
     };
     return builtins.count(name) > 0;
 }
@@ -466,7 +466,8 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
     // Built-in operator trait → the conventional method name an impl must define.
     static const std::unordered_map<std::string, std::string> builtinMethod = {
         {"Add", "add"}, {"Sub", "sub"}, {"Mul", "mul"}, {"Div", "div"}, {"Rem", "rem"},
-        {"Eq", "eq"}, {"Ord", "cmp"}, {"Neg", "neg"}, {"Index", "get"}
+        {"Eq", "eq"}, {"Ord", "cmp"}, {"Neg", "neg"}, {"Index", "get"},
+        {"Clone", "clone"}   // a user deep-copy hook: `fn clone(Self& src) mut` → replaces @Class_clone
     };
     for (const Stmt& stmt : program.declarations) {
         if (!std::holds_alternative<ImplDeclStmt>(*stmt.node)) continue;

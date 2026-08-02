@@ -27,6 +27,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const CastExpr& castExpr)              const { return exprFirstToken(*castExpr.operand); }
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
+        const Token& operator()(const DestroyExpr& destroyExpr)        const { return destroyExpr.keyword; }
         const Token& operator()(const ReflectExpr& reflect)            const { return reflect.at; }
         const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
         const Token& operator()(const NullLiteralExpr& n)              const { return n.keyword; }

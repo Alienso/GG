@@ -331,6 +331,8 @@ private:
     std::string genCast(const CastExpr& castExpr, const Type& toType);
     std::string genNew(const NewExpr& newExpr, const Type& resolvedType);
     std::string genSizeof(const SizeofExpr& sizeofExpr);
+    std::string genDestroy(const DestroyExpr& destroy);   // destroy(place) — in-place dtor
+    std::string lowerArgOperand(const std::string& val, const Type& argType, const Type& paramType);
     std::string genReflect(const ReflectExpr& reflect);   // @typeName/@fieldCount/@hasField/…
     Type        resolveReflectType(const Token& tok);      // reflection type-arg token → Type
 

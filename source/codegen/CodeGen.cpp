@@ -316,6 +316,14 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             std::vector<std::string> pending(clonesNeeded_.begin(), clonesNeeded_.end());
             for (const std::string& cn : pending) {
                 if (!emitted.insert(cn).second) continue;
+                // A class that `impl`s the built-in `Clone` trait supplies its own `@Class_clone`
+                // (the `clone` impl method, same `(dest, src)` ABI) — don't also emit the generated
+                // memberwise one, or they'd doubly-define the symbol. All clone CALL sites are
+                // unchanged; they resolve to the user's definition.
+                if (implementedTraits_) {
+                    auto it = implementedTraits_->find(cn);
+                    if (it != implementedTraits_->end() && it->second.count("Clone")) continue;
+                }
                 genCloneFunction(cn);
                 progressed = true;
             }

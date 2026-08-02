@@ -366,6 +366,10 @@ private:
     [[nodiscard]] Type analyzeElvis(const ElvisExpr& elvis);
     [[nodiscard]] Type analyzeIndex(const IndexExpr& indexExpr);
     [[nodiscard]] Type analyzeIndexAssign(const IndexAssignExpr& indexAssign);
+    [[nodiscard]] Type analyzeDestroy(const DestroyExpr& destroy);   // destroy(place) — unsafe dtor
+    // True if a class (transitively) owns a raw ptr/ptr<T> field — can't be a by-value ptr<T> element.
+    [[nodiscard]] bool classOwnsRawPtr(const std::string& className,
+                                       std::unordered_set<std::string>& seen) const;
     [[nodiscard]] Type analyzeThis(const ThisExpr& thisExpr);
     [[nodiscard]] Type analyzeMemberAccess(const MemberAccessExpr& memberAccess);
     [[nodiscard]] Type analyzeMemberAssign(const MemberAssignExpr& memberAssign);

@@ -5,13 +5,14 @@
 // as elements are pushed. `[]` reads/writes elements in place via the `Index` trait;
 // `get(i)` hands back a `T*` borrow, so element access is zero-copy.
 //
-// v1 stores elements BY VALUE, so the element type must be a primitive (`Array<i32>`,
-// `Array<f64>`, …). Value objects would need per-element clone/dtor and reference
-// elements would need retain/release, neither of which the raw buffer manages yet, so
-// instantiating `Array<SomeClass>` is a compile error for now (deferred).
+// Elements are stored BY VALUE and deep-copied into the buffer (clone) on push/set, and
+// destroyed exactly once on pop/clear/scope-exit. Works for primitives (`Array<i32>`) and for
+// value objects whose fields are primitive / `Class&` / enum / embedded value objects
+// (`Array<Point>`). A value object that owns a raw buffer (e.g. `String`, or a nested `Array`)
+// is rejected — memberwise clone is shallow over a raw pointer and would double-free.
 //
 // The buffer and its size/capacity are PRIVATE — the interface never exposes a `ptr`.
-// Requires --unsafe-ptr for the internal `ptr<T>` buffer (compile.ps1 passes it).
+// Requires --unsafe-ptr for the internal `ptr<T>` buffer + `destroy` (compile.ps1 passes it).
 
 import "crt/cmem.gg";
 
@@ -27,6 +28,8 @@ class Array<T> {
     }
 
     ~Array() {
+        mut u64 i = 0;
+        while (i < count) { destroy(data[i]); i = i + 1; }   // run each live element's dtor
         free(data);
     }
 
@@ -46,8 +49,8 @@ class Array<T> {
 
     // ---- mutators ----
 
-    // Append `value` to the end, growing the buffer if it is full.
-    fn push(T value) mut {
+    // Append a copy of `value` to the end (deep-cloned for objects), growing if full.
+    fn push(T* value) mut {
         if (count == cap) {
             grow();
         }
@@ -55,15 +58,20 @@ class Array<T> {
         count = count + 1;
     }
 
-    // Remove and return the last element. The caller must ensure the array is not
-    // empty (there is no exception mechanism to signal underflow).
-    fn pop() mut -> T {
+    // Remove and return the last element. The caller must ensure the array is not empty (there is
+    // no exception mechanism to signal underflow). The element is cloned out to the caller and the
+    // buffer copy destroyed — ownership transfer, refcount preserved.
+    fn pop() mut -> T out {
         count = count - 1;
-        return data[count];
+        out = data[count];
+        destroy(data[count]);
+        return out;
     }
 
-    // Drop all elements (retains the allocated capacity).
+    // Destroy all elements (retains the allocated capacity).
     fn clear() mut {
+        mut u64 i = 0;
+        while (i < count) { destroy(data[i]); i = i + 1; }
         count = 0;
     }
 
@@ -75,7 +83,8 @@ class Array<T> {
         }
     }
 
-    // Double the capacity (used when a push overflows the buffer).
+    // Double the capacity (used when a push overflows the buffer). A byte-move `realloc` is safe:
+    // GG value objects are trivially relocatable (no interior self-pointers).
     fn private grow() mut {
         cap  = cap * 2;
         data = realloc(data, cap * sizeof(T));
@@ -88,7 +97,27 @@ impl <T> Index for Array<T> {
     fn get(i32 i) -> T* {
         return data[i];
     }
-    fn set(i32 i, T value) mut {
+    // Overwrite a LIVE element: destroy the old one, then construct the new one in place.
+    fn set(i32 i, T* value) mut {
+        destroy(data[i]);
         data[i] = value;
+    }
+}
+
+// Deep copy — replaces the (unsafe, shallow) generated clone that would alias the buffer. `this` is
+// the destination; release its current contents first (a no-op on a freshly zeroed slot where
+// count=0/data=null), then own a fresh buffer holding a clone of every element. Each element write
+// routes through `T`'s own clone, so it is recursive — `Array<String>`, `Array<Array<Point>>`, … all
+// deep-copy correctly. Enables safe value copies and nesting.
+impl <T> Clone for Array<T> {
+    fn clone(Array<T>& src) mut {
+        mut u64 i = 0;
+        while (i < count) { destroy(data[i]); i = i + 1; }
+        free(data);
+        count = src.count;
+        cap   = src.cap;
+        data  = malloc(cap * sizeof(T));
+        mut u64 j = 0;
+        while (j < src.count) { data[j] = src.data[j]; j = j + 1; }
     }
 }

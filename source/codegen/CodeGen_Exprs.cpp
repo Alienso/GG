@@ -20,6 +20,21 @@ std::string CodeGen::freshAllocaName(const std::string& varName) {
     return ptrName;
 }
 
+// Lower a pre-evaluated argument VALUE into the "<irtype> <value>" operand for a parameter. When a
+// primitive rvalue is passed to a primitive-borrow (`T*`) parameter, materialize a hidden slot
+// holding the value and pass its address (like binding a temporary to a C++ `const int&`).
+std::string CodeGen::lowerArgOperand(const std::string& val, const Type& argType, const Type& paramType) {
+    if (isPrimitiveBorrow(paramType) && !isBorrow(argType)) {
+        Type elem = borrowElementType(paramType);
+        std::string v = emitCast(val, argType, elem);
+        std::string tmp = freshAllocaName("borrowtmp");
+        emitAlloca(tmp, irTypeName(elem));
+        emitStore(irTypeName(elem), v, tmp);
+        return "ptr " + tmp;
+    }
+    return irTypeName(paramType) + " " + emitCast(val, argType, paramType);
+}
+
 std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& args,
                                      const std::vector<Type>* declaredParamTypes,
                                      const std::vector<const Expr*>* defaults,
@@ -33,8 +48,18 @@ std::string CodeGen::buildArgString(const std::vector<std::unique_ptr<Expr>>& ar
     auto emitOne = [&](const Expr& arg, size_t slot) -> std::string {
         Type argType = exprType(arg);
         const Type* pt = paramTypeAt(slot);
-        if (pt && isPrimitiveBorrow(*pt) && !isBorrow(argType))
-            return "ptr " + genBorrowSource(arg);
+        if (pt && isPrimitiveBorrow(*pt) && !isBorrow(argType)) {
+            std::string src = genBorrowSource(arg);
+            if (!src.empty()) return "ptr " + src;
+            // Temporary rvalue → materialize a hidden slot holding the value and pass its address
+            // (safe: a primitive borrow does not escape; the temp lives for the call).
+            Type elem = borrowElementType(*pt);
+            std::string v = emitCast(genExpr(arg), argType, elem);
+            std::string tmp = freshAllocaName("borrowtmp");
+            emitAlloca(tmp, irTypeName(elem));
+            emitStore(irTypeName(elem), v, tmp);
+            return "ptr " + tmp;
+        }
         std::string value = genExpr(arg);
         if (pt) { value = emitCast(value, argType, *pt); argType = *pt; }
         return paramIrType(argType) + " " + value;   // objects pass by address (value is a ptr)
@@ -181,6 +206,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const CastExpr& castExpr)                -> std::string { return genCast(castExpr, resolvedType); },
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
         [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
+        [&](const DestroyExpr& destroyExpr)          -> std::string { return genDestroy(destroyExpr); },
         [&](const ReflectExpr& reflect)              -> std::string { return genReflect(reflect); },
         [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
         [&](const NullLiteralExpr&)                  -> std::string { return "null"; },
@@ -1459,6 +1485,12 @@ std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
     }
     std::string elementIrType;
     std::string elemPtr = genElementAddress(*indexExpr.object, *indexExpr.index, elementIrType);
+    // Object element: yield the slot ADDRESS (objects are manipulated by address, matching the
+    // value-object assign convention) — a load would give an aggregate register value that the
+    // clone/member-access consumers can't use. Primitive/pointer elements load as before.
+    Type elemTy = objType.kind == TypeKind::TypedPtr ? typedPtrElement(objType)
+                                                     : Type{objType.elementKind};
+    if (elemTy.kind == TypeKind::Object) return elemPtr;
     return emitLoad(elementIrType, elemPtr);
 }
 
@@ -1483,11 +1515,24 @@ std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
     std::string elementIrType;
     std::string elemPtr = genElementAddress(*indexAssign.object, *indexAssign.index, elementIrType);
 
-    // Value (cast to element type)
     Type        objType   = exprType(*indexAssign.object);
     Type        elementType = objType.kind == TypeKind::TypedPtr
                                 ? typedPtrElement(objType)
                                 : Type{objType.elementKind};
+
+    // Object element (`ptr<Class>` buffer): deep-copy the source into the slot, not a scalar store.
+    // The slot is raw (uninitialised) buffer memory, so we zero-init it first — that makes
+    // @Class_clone's "release dest's old reference field" a null no-op, turning the copy-assignment
+    // clone into a safe copy-CONSTRUCT on the raw slot. The RHS (a value object, a `Class&`, or a
+    // `Class*` borrow) evaluates to the source object's address (see the value-object assign path).
+    if (elementType.kind == TypeKind::Object) {
+        std::string src = genExpr(*indexAssign.value);
+        emitStore("%" + elementType.className, "zeroinitializer", elemPtr);
+        clonesNeeded_.insert(elementType.className);
+        emit("call void @" + elementType.className + "_clone(ptr " + elemPtr + ", ptr " + src + ")");
+        return src;   // assignment expression yields the source object's address
+    }
+
     Type        valueType = exprType(*indexAssign.value);
     std::string value     = genExpr(*indexAssign.value);
     value = emitCast(value, valueType, elementType);
@@ -1566,6 +1611,20 @@ std::string CodeGen::genSizeof(const SizeofExpr& sizeofExpr) {
     std::string sz = freshTemp();
     emit("%" + sz + " = ptrtoint ptr %" + gep + " to i64");
     return "%" + sz;
+}
+
+// ---- destroy(place) — run a value object's destructor in place (no free) ----
+// The operand is always evaluated (for its side effects). For an object element, `genExpr` yields the
+// slot ADDRESS (see genIndex/genAssign object convention), so we destroy the buffer element itself.
+// A primitive/enum place or a class with no destructor lowers to nothing.
+std::string CodeGen::genDestroy(const DestroyExpr& destroy) {
+    Type placeType = exprType(*destroy.place);
+    std::string addr = genExpr(*destroy.place);
+    if (placeType.kind != TypeKind::Object) return "";
+    auto cgIt = cgClasses_.find(placeType.className);
+    if (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
+        emit("call void @" + placeType.className + "_dtor(ptr " + addr + ")");
+    return "";
 }
 
 // ---- compile-time reflection (scalar queries; inline for / @field are expanded in the parser) ----

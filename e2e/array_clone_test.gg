@@ -1,0 +1,113 @@
+// e2e/array_clone_test.gg — the `Clone` trait (Phase 2): value objects that own a raw buffer
+// (`String`, a nested `Array`) stored BY VALUE in an `Array<T>`, deep-copied via each type's
+// `impl Clone` and destroyed exactly once. Proves the copies own INDEPENDENT buffers (mutating /
+// dropping one never touches another) and that recursion composes for `Array<Array<Point>>`.
+//
+// Exit 0 = all assertions held. A non-zero exit names the failing scenario.
+
+import "std/String.gg";
+import "std/Array.gg";
+
+class Point {
+    mut i32 x;
+    mut i32 y;
+    Point(i32 px, i32 py) { x = px; y = py; }
+}
+
+// ---- Array<String>: push/pop/set/clear, independent buffers ----
+fn stringElements() -> i32 {
+    mut Array<String>& a = new Array<String>();
+    String hi("hello");
+    String wo("world");
+    a.push(hi);                 // deep-clone into the buffer
+    a.push(wo);
+    if (a.size() != 2) { return 11; }
+
+    // The buffered copy is independent of the source: compare by value.
+    String first = a.get(0);    // clone out
+    if (!first.equals(hi)) { return 12; }
+
+    // Overwrite a live element (destroy old + clone new), then read it back.
+    String bye("goodbye");
+    a.set(0, bye);
+    String got = a.get(0);
+    if (!got.equals(bye)) { return 13; }
+
+    // pop transfers ownership out; the buffer copy is destroyed.
+    String popped = a.pop();
+    if (!popped.equals(wo)) { return 14; }
+    if (a.size() != 1) { return 15; }
+
+    a.clear();
+    if (a.size() != 0) { return 16; }
+    return 0;
+}
+
+// ---- Array<Array<Point>>: nested, recursive clone + destroy ----
+fn nestedElements() -> i32 {
+    mut Array<Array<Point>>& outer = new Array<Array<Point>>();
+
+    // Build a row of two points and push it (deep-cloned into `outer`).
+    mut Array<Point>& row0 = new Array<Point>();
+    Point p0(1, 2);
+    Point p1(3, 4);
+    row0.push(p0);
+    row0.push(p1);
+    outer.push(row0);           // recursive clone: Array<Point> (buffer) + each Point
+
+    mut Array<Point>& row1 = new Array<Point>();
+    Point p2(5, 6);
+    row1.push(p2);
+    outer.push(row1);
+
+    if (outer.size() != 2) { return 21; }
+
+    // Read back the first row (clone out) and check its contents survived the round trip.
+    Array<Point> r = outer.get(0);
+    if (r.size() != 2) { return 22; }
+    Point q0 = r.get(0);
+    Point q1 = r.get(1);
+    if (q0.x != 1) { return 23; }
+    if (q1.y != 4) { return 24; }
+
+    outer.clear();
+    if (outer.size() != 0) { return 25; }
+    return 0;
+}
+
+// ---- Direct value copy of a Clone type: independent buffers ----
+fn directCopy() -> i32 {
+    String a("independent");
+    String b = a;               // deep copy via String's Clone impl
+    if (!b.equals(a)) { return 31; }
+    if (b.byteLength() != a.byteLength()) { return 32; }
+    return 0;                    // both dropped here → two distinct frees, no double-free
+}
+
+// ---- Embedded Clone value-object field: recursion via plain embedding (not an Array) ----
+class Named {
+    mut String name;
+    mut i32 id;
+    Named(String& n, i32 i) { name = n; id = i; }   // String& → String field = deep clone
+}
+
+fn embeddedField() -> i32 {
+    String n("alice");
+    Named x(n, 7);
+    Named y = x;                 // Named_clone → String_clone (embedded field), + i32 copy
+    if (y.id != 7) { return 41; }
+    if (!y.name.equals(x.name)) { return 42; }
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 r1 = stringElements();
+    if (r1 != 0) { return r1; }
+    i32 r2 = nestedElements();
+    if (r2 != 0) { return r2; }
+    i32 r3 = directCopy();
+    if (r3 != 0) { return r3; }
+    i32 r4 = embeddedField();
+    if (r4 != 0) { return r4; }
+    return 0;
+}

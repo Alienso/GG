@@ -199,8 +199,7 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
         std::string argStr = "ptr " + slot + ", ptr " + recvPtr;
         for (size_t i = 0; i < argVals.size(); ++i) {
             Type pt = (pit != funcParamTypes.end() && i < pit->second.size()) ? pit->second[i] : argTypes[i];
-            std::string v = emitCast(argVals[i], argTypes[i], pt);
-            argStr += ", " + irTypeName(pt) + " " + v;
+            argStr += ", " + lowerArgOperand(argVals[i], argTypes[i], pt);
         }
         emit("call void @" + sym + "(" + argStr + ")");
         return slot;
@@ -209,8 +208,7 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
     std::string argStr = "ptr " + recvPtr;
     for (size_t i = 0; i < argVals.size(); ++i) {
         Type pt = (pit != funcParamTypes.end() && i < pit->second.size()) ? pit->second[i] : argTypes[i];
-        std::string v = emitCast(argVals[i], argTypes[i], pt);
-        argStr += ", " + irTypeName(pt) + " " + v;
+        argStr += ", " + lowerArgOperand(argVals[i], argTypes[i], pt);
     }
     std::string retIr = irTypeName(ret);
     if (retIr == "void") { emit("call void @" + sym + "(" + argStr + ")"); return ""; }

@@ -1293,6 +1293,26 @@ free(data);              // must free manually
 (usually from a destructor). Use these only at the FFI boundary or inside class
 internals (e.g. dynamic buffer in a container class).
 
+### `destroy(place)` — run a value object's destructor in place
+
+`destroy(place)` explicitly runs the destructor of a value object living at `place`. It exists so a
+hand-written container can store value objects **by value** in a `ptr<T>` buffer and tear each one
+down (the compiler auto-destroys locals and fields, but not elements inside a raw buffer it doesn't
+track). Like the raw-pointer types, it is `--unsafe-ptr`-gated and container-internal.
+
+```gg
+fn pop() mut -> T out {
+    count = count - 1;
+    out = data[count];        // clone the element out to the caller (ownership transfer)
+    destroy(data[count]);     // then destroy the buffer copy
+    return out;
+}
+```
+
+`destroy` on a primitive or a class with no destructor is a no-op. It **cannot** be used on a plain
+local variable (those are destroyed automatically at scope exit — doing so would double-free); use it
+only on `ptr<T>` elements and fields the compiler does not manage for you.
+
 ### `sizeof`
 ```gg
 u64 n = sizeof(i32);    // 4
@@ -1691,6 +1711,39 @@ fn main() -> i32 {
 
 An operator may still return a heap reference (`-> Vec2&` with `return new Vec2(...)`) if you
 want a heap-allocated result; the value-return form above is simply the allocation-free default.
+
+### The `Clone` trait — a custom deep-copy (copy constructor)
+
+By default, copying a value object is **memberwise**: primitive fields are copied, reference
+(`Class&`) fields are retained, and embedded value-object fields are cloned recursively. That is
+correct for every ordinary class. But a class that owns a **raw `ptr` buffer** (a hand-written
+container like `String` or `Array<T>`) can't be copied memberwise — the raw pointer would be
+duplicated, so two objects would share (and both free) one allocation. For those, implement the
+built-in **`Clone` trait** to define a proper deep copy:
+
+```gg
+impl Clone for String {
+    fn clone(String& src) mut {          // `this` = destination, `src` = source
+        free(this.data);                 // release this's current buffer (a no-op if empty)
+        this.size = src.size;
+        this.data = malloc(this.size + 1);
+        memcpy(this.data, src.data, this.size + 1);   // own a fresh, independent copy
+    }
+}
+```
+
+- `clone` is a `mut` method taking `Self&` (the source); it deep-copies `src` into `this`.
+- It **replaces** the default memberwise copy everywhere a copy happens — a value binding
+  (`String b = a;`), a return, a container element write — so `Clone` types copy deeply and safely.
+- **Recursion composes**: an `Array<String>`'s clone copies each element through `String`'s clone;
+  an `Array<Array<Point>>`'s clone recurses again. You only write the one hop.
+- **Contract**: `clone` must release `this`'s old resources first (the `free(this.data)` above).
+  This is a no-op on a fresh/empty destination, so the single body works whether the destination is
+  brand-new or already holds data.
+
+This is what lets `String` and the generic `Array<T>` be stored by value inside another `Array`
+(`Array<String>`, `Array<Array<Point>>`). Without a `Clone` impl, using a buffer-owning value object
+as an `Array` element is a compile error that points you here.
 
 ---
 

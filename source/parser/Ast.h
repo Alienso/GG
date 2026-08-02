@@ -174,6 +174,14 @@ struct SizeofExpr {
     Token typeName;   // the (possibly synthesized) type token
 };
 
+// `destroy(place)` — run the destructor on an object/`ptr<T>`-element lvalue in place (no free).
+// Unsafe container primitive (requires --unsafe-ptr); a no-op for primitive / no-dtor places.
+// Evaluates to void.
+struct DestroyExpr {
+    Token keyword;                 // the 'destroy' token
+    std::unique_ptr<Expr> place;   // the object lvalue to destroy
+};
+
 // Compile-time reflection builtin (`@…`). TRANSIENT: folded/lowered away by the parser's
 // reflection-expansion pass, so it never reaches semantic analysis or codegen.
 //   @typeName(T)      -> string literal
@@ -242,6 +250,7 @@ struct Expr {
         CastExpr,
         NewExpr,
         SizeofExpr,
+        DestroyExpr,
         ReflectExpr,
         SwitchExpr
     >;

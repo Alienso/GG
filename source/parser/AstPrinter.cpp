@@ -192,6 +192,11 @@ void AstPrinter::printExpr(const Expr& expr) {
             out("Sizeof '" + sizeofExpr.typeName.lexeme + "'");
         },
 
+        [&](const DestroyExpr& destroyExpr) {
+            out("Destroy");
+            if (destroyExpr.place) { indent++; printExpr(*destroyExpr.place); indent--; }
+        },
+
         [&](const ReflectExpr&) {
             out("Reflect");
         },

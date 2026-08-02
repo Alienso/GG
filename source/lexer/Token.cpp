@@ -52,6 +52,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"as",      TokenType::AS},
     {"new",     TokenType::NEW},
     {"sizeof",  TokenType::SIZEOF},
+    {"destroy", TokenType::DESTROY},
     {"static",  TokenType::STATIC},
     {"mut",     TokenType::MUT},
     {"trait",   TokenType::TRAIT},

@@ -512,6 +512,16 @@ Expr Parser::parsePrimary() {
         return makeExpr(SizeofExpr{ keyword, typeName });
     }
 
+    // destroy(place) — run a destructor on an object/ptr-element lvalue in place (unsafe container
+    // primitive; requires --unsafe-ptr). Takes an expression, unlike sizeof which takes a type.
+    if (match({ TokenType::DESTROY })) {
+        Token keyword = previous();
+        consume(TokenType::LEFT_PAREN, "expected '(' after 'destroy'");
+        std::unique_ptr<Expr> place = box(parseExpression());
+        consume(TokenType::RIGHT_PAREN, "expected ')' after 'destroy' operand");
+        return makeExpr(DestroyExpr{ keyword, std::move(place) });
+    }
+
     // Compile-time reflection builtin: @name(args).
     if (match({ TokenType::AT })) return parseReflectExpr();
 

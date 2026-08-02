@@ -11,16 +11,18 @@
 // `ptr`: a GG string literal *is* a `ptr` to bytes, so `String s("hi")` needs it. That
 // is the only entry point into the type from raw memory.
 //
-// Ownership: a String owns its buffer and frees it in the destructor. It is a value
-// object holding a raw buffer, so copy-initialising one (`String b = a;`) would
-// shallow-copy the pointer and double-free. Pass a String by reference (`String&`).
+// Ownership: a String owns its buffer and frees it in the destructor. It is a value object holding a
+// raw buffer, so a naive memberwise copy would alias the pointer and double-free. `impl Clone` (below)
+// gives it a proper deep copy, so `String b = a;` and `Array<String>` work — the copy owns a fresh
+// buffer. (`data`/`size` are `mut` only so the `clone` hook can rebuild them; the type is otherwise
+// used immutably.)
 
 import "crt/cmem.gg";
 import "crt/cstring.gg";
 
 class String {
-    private ptr data;   // owned, null-terminated UTF-8 byte buffer
-    private u64 size;   // byte length (excluding the null terminator)
+    private mut ptr data;   // owned, null-terminated UTF-8 byte buffer
+    private mut u64 size;   // byte length (excluding the null terminator)
 
     // Construct from a `str` literal, copying its bytes into an owned buffer. The byte length is
     // known from the view (`literal.len`), so no strlen scan is needed; `literal.data` is the
@@ -223,4 +225,17 @@ impl Eq for String {
 }
 impl Ord for String {
     fn cmp(String& other) -> i32 { return this.compareTo(other); }
+}
+
+// Deep copy — replaces the (unsafe, shallow) generated clone. `this` is the destination; free its old
+// buffer first (a no-op null-free when `this` is a freshly zeroed slot), then own a fresh copy of
+// `src`'s bytes. Enables safe value copies and `Array<String>`.
+impl Clone for String {
+    fn clone(String& src) mut {
+        free(this.data);
+        this.size = src.size;
+        u64 allocSize = this.size + 1;
+        this.data = malloc(allocSize);
+        memcpy(this.data, src.data, allocSize);
+    }
 }

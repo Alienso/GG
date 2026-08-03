@@ -46,6 +46,11 @@ std::vector<ParamDecl> Parser::parseParamList(bool allowDefaults) {
     }
     consume(TokenType::RIGHT_PAREN, "expected ')' after parameters");
 
+    // A variadic pack parameter must be the last one (v1: at most one pack, in final position).
+    for (size_t i = 0; i < params.size(); ++i)
+        if (params[i].isVariadic && i + 1 != params.size())
+            throw error(params[i].name, "a variadic pack parameter must be the last parameter");
+
     // A default may sit on ANY parameter, in any position — named arguments can fill the later
     // ones while a defaulted earlier param falls back (a purely positional call still only omits
     // trailing defaults, since positional binding is left-to-right). `extern` takes no defaults.
@@ -64,7 +69,8 @@ std::vector<ParamDecl> Parser::parseParamList(bool allowDefaults) {
 // See the header note. Recognises `name: expr` named arguments (unambiguous — no expression form
 // begins with `IDENTIFIER :`), enforcing that positional args precede all named ones.
 std::vector<std::unique_ptr<Expr>> Parser::parseCallArgs(std::vector<Token>& names,
-                                                         TokenType close, bool allowNames) {
+                                                         TokenType close, bool allowNames,
+                                                         std::vector<bool>* spreads) {
     std::vector<std::unique_ptr<Expr>> args;
     if (!check(close)) {
         bool sawNamed = false;
@@ -80,6 +86,10 @@ std::vector<std::unique_ptr<Expr>> Parser::parseCallArgs(std::vector<Token>& nam
                 names.push_back(Token{ TokenType::IDENTIFIER, "", peek().line });  // positional
             }
             args.push_back(box(parseExpression()));
+            bool spread = match({ TokenType::ELLIPSIS });   // `xs...` — spread a pack into the call
+            if (spreads) spreads->push_back(spread);
+            else if (spread) throw error(previous(), "'...' spread is only valid as an argument to a "
+                                                     "variadic function");
         } while (match({ TokenType::COMMA }));
     }
     consume(close, close == TokenType::RIGHT_BRACE ? "expected '}' after arguments"
@@ -107,11 +117,16 @@ ParamDecl Parser::parseParam() {
     bool isMut = match({ TokenType::MUT });
     if (!isTypeName()) throwTypeExpected("a parameter type");
     Token paramType = consumeType();
+    // Variadic pack: `Ts... args` — the pack element type followed by `...`. The type is a generic
+    // pack type-parameter; the pack materializes as a tuple at monomorphization.
+    bool isVariadic = match({ TokenType::ELLIPSIS });
     Token paramName = consume(TokenType::IDENTIFIER, "expected parameter name");
     std::unique_ptr<Expr> defaultValue;
-    if (match({ TokenType::EQUAL }))                       // `= <expr>` default value
+    if (match({ TokenType::EQUAL })) {                     // `= <expr>` default value
+        if (isVariadic) throw error(paramName, "a variadic pack parameter cannot have a default value");
         defaultValue = std::make_unique<Expr>(parseExpression());
-    return ParamDecl{ paramType, paramName, isMut, std::move(defaultValue) };
+    }
+    return ParamDecl{ paramType, paramName, isMut, isVariadic, std::move(defaultValue) };
 }
 
 

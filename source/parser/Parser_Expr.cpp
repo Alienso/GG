@@ -69,7 +69,7 @@ Expr Parser::finishLambda(std::vector<std::pair<Token, std::optional<Token>>> pa
     std::vector<ParamDecl> methodParams;
     for (size_t i = 0; i < params.size(); ++i) {
         Token ptype = params[i].second ? *params[i].second : expectedLambdaSig_->first[i];
-        methodParams.push_back(ParamDecl{ ptype, params[i].first, /*isMut=*/false, nullptr });
+        methodParams.push_back(ParamDecl{ ptype, params[i].first, /*isMut=*/false, /*isVariadic=*/false, nullptr });
     }
     Token retType = explicitRet ? *explicitRet
                   : (expectedLambdaSig_ ? expectedLambdaSig_->second
@@ -103,7 +103,7 @@ Expr Parser::finishLambda(std::vector<std::pair<Token, std::optional<Token>>> pa
         std::vector<ParamDecl> ctorParams;
         std::vector<std::unique_ptr<Stmt>> ctorBody;
         for (const auto& [cn, ct] : caps) {
-            ctorParams.push_back(ParamDecl{ ct, Token{ TokenType::IDENTIFIER, cn, line }, false, nullptr });
+            ctorParams.push_back(ParamDecl{ ct, Token{ TokenType::IDENTIFIER, cn, line }, false, false, nullptr });
             // this.cap = cap;
             ctorBody.push_back(std::make_unique<Stmt>(makeStmt(ExprStmt{ makeExpr(MemberAssignExpr{
                 box(makeExpr(ThisExpr{ Token{ TokenType::THIS, "this", line } })),
@@ -543,6 +543,13 @@ Expr Parser::parsePrimary() {
 
         // Generic function call: name<typeArgs>(args)  →  mangled concrete call.
         if (gen_->funcNames.count(name.lexeme) && check(TokenType::LESS)) {
+            // A variadic function's pack is always inferred from the trailing arguments — explicit
+            // `<…>` type arguments can't spell a pack, so reject them (they would mis-bind the pack).
+            auto tmplIt = gen_->templates.find(name.lexeme);
+            if (tmplIt != gen_->templates.end() && !tmplIt->second.isPack.empty()
+                && tmplIt->second.isPack.back())
+                throw error(name, "variadic function '" + name.lexeme + "' does not take explicit type "
+                            "arguments; call it as " + name.lexeme + "(args) — the pack is inferred");
             std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
             std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
             recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
@@ -586,8 +593,9 @@ Expr Parser::parsePrimary() {
                 }
             }
             std::vector<Token> argNames;
+            std::vector<bool>  argSpreads;   // parallel: `xs...` spread flags (for variadic calls)
             std::vector<std::unique_ptr<Expr>> args =
-                parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
+                parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &argSpreads);
             expectedLambdaSig_ = savedSig;   // restore (handles nested calls)
 
             // Lambda-literal inference: a generic function with exactly one `Call`-bounded type
@@ -622,6 +630,15 @@ Expr Parser::parsePrimary() {
             if (gen_->funcNames.count(name.lexeme)) {
                 bool positional = true;
                 for (const Token& an : argNames) if (!an.lexeme.empty()) { positional = false; break; }
+                // Variadic pack: collect the trailing args into a pack tuple (rewrites `args`).
+                if (positional) {
+                    if (auto mangled = deduceVariadicInstantiation(name.lexeme, args, argSpreads)) {
+                        std::vector<Token> posNames(args.size(),
+                            Token{ TokenType::IDENTIFIER, "", name.line });   // all positional now
+                        return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, *mangled, name.line },
+                                                  std::move(args), std::move(posNames) });
+                    }
+                }
                 std::vector<std::vector<Token>> inferred;
                 if (positional && inferGenericTypeArgs(name.lexeme, args, inferred)) {
                     std::string mangled = mangleInstantiation(name.lexeme, inferred);

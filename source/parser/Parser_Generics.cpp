@@ -65,11 +65,17 @@ bool Parser::tryCaptureFunctionTemplate() {
     // '<' and '>'; verify the decl continues with '('.
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;
-    size_t j = scanTypeParamList(s + 2, typeParams, bounds);
+    std::vector<bool>                     isPack;
+    size_t j = scanTypeParamList(s + 2, typeParams, bounds, isPack);
     if (j == 0 || tokens[j].type != TokenType::GREATER) return false;
     size_t afterGt = j + 1;
     if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_PAREN) return false;
     if (typeParams.empty()) return false;
+    // v1: at most one variadic pack, and it must be the last type parameter.
+    for (size_t p = 0; p < isPack.size(); ++p)
+        if (isPack[p] && p + 1 != isPack.size())
+            throw error(tokens[nameIdx], "a variadic pack '...' must be the last type parameter of '"
+                        + tokens[nameIdx].lexeme + "'");
 
     // Capture with the `<...>` list stripped so the monomorphized re-parse sees an ordinary
     // declaration: `fn`, the name, the parameter list, then everything up to the body
@@ -103,7 +109,8 @@ bool Parser::tryCaptureFunctionTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[nameIdx].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds), std::move(captured) };
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds),
+                                             std::move(isPack), std::move(captured) };
     gen_->funcNames.insert(name);
     current = k;   // advance past the captured declaration
     return true;
@@ -180,7 +187,7 @@ std::string Parser::canonicalCallTrait(const std::vector<Token>& paramTypeTokens
         std::vector<ParamDecl> callParams;
         for (size_t i = 0; i < paramTypeTokens.size(); ++i)
             callParams.push_back(ParamDecl{ paramTypeTokens[i],
-                Token{ TokenType::IDENTIFIER, "a" + std::to_string(i), retType.line }, false, nullptr });
+                Token{ TokenType::IDENTIFIER, "a" + std::to_string(i), retType.line }, false, false, nullptr });
         std::deque<MethodDecl> methods;
         methods.push_back(MethodDecl{
             /*isPublic=*/true, /*isConstructor=*/false, /*isDestructor=*/false, /*isStatic=*/false,
@@ -199,8 +206,10 @@ std::string Parser::canonicalCallTrait(const std::vector<Token>& paramTypeTokens
 // of the closing '>' token, or 0 if the list is malformed / unterminated.
 // A `Call(P…)->R` bound is canonicalized to a mangled `Call$…` trait name.
 size_t Parser::scanTypeParamList(size_t from, std::vector<std::string>& typeParams,
-                                 std::vector<std::vector<std::string>>& bounds) {
+                                 std::vector<std::vector<std::string>>& bounds,
+                                 std::vector<bool>& isPack) {
     bool   expectParam = true;
+    bool   nextIsPack  = false;   // a `...` just before the next param name marks it a variadic pack
     int    depth = 1;
     size_t j = from;
     for (; j < tokens.size() && depth > 0; ++j) {
@@ -210,8 +219,10 @@ size_t Parser::scanTypeParamList(size_t from, std::vector<std::string>& typePara
         if (tt == TokenType::SHIFT_RIGHT)      { depth -= 2; if (depth <= 0) return 0; continue; }
         if (depth != 1) continue;
         if (tt == TokenType::COMMA)            { expectParam = true; }
+        else if (tt == TokenType::ELLIPSIS)    { if (expectParam) nextIsPack = true; }
         else if (tt == TokenType::IDENTIFIER) {
-            if (expectParam) { typeParams.push_back(tokens[j].lexeme); bounds.push_back({}); expectParam = false; }
+            if (expectParam) { typeParams.push_back(tokens[j].lexeme); bounds.push_back({});
+                               isPack.push_back(nextIsPack); nextIsPack = false; expectParam = false; }
             // `Call(P…)->R` bound → canonical `Call$…` trait name.
             else if (tokens[j].lexeme == "Call" && !bounds.empty()
                      && j + 1 < tokens.size() && tokens[j + 1].type == TokenType::LEFT_PAREN) {
@@ -237,7 +248,8 @@ bool Parser::tryCaptureClassTemplate() {
 
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;
-    size_t j = scanTypeParamList(current + 3, typeParams, bounds);
+    std::vector<bool>                     isPack;   // (variadic packs on classes not supported in v1)
+    size_t j = scanTypeParamList(current + 3, typeParams, bounds, isPack);
     if (j == 0 || tokens[j].type != TokenType::GREATER) return false;
     size_t afterGt = j + 1;
     if (afterGt >= tokens.size() || tokens[afterGt].type != TokenType::LEFT_BRACE) return false;
@@ -257,7 +269,8 @@ bool Parser::tryCaptureClassTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[current + 1].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds), std::move(captured) };
+    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds),
+                                             std::move(isPack), std::move(captured) };
     gen_->classNames.insert(name);
     current = k;
     return true;
@@ -272,7 +285,8 @@ bool Parser::tryCaptureImplTemplate() {
 
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;
-    size_t j = scanTypeParamList(current + 2, typeParams, bounds);   // j = closing '>'
+    std::vector<bool>                     isPack;   // (variadic packs on impls not supported in v1)
+    size_t j = scanTypeParamList(current + 2, typeParams, bounds, isPack);   // j = closing '>'
     if (j == 0 || tokens[j].type != TokenType::GREATER || typeParams.empty()) return false;
 
     auto isTypeParam = [&](const std::string& s) {
@@ -535,6 +549,267 @@ bool Parser::inferGenericTypeArgs(const std::string& fnName,
     return true;
 }
 
+// ---- Variadic packs ----
+
+// A primitive type name → its keyword token kind (so a tuple field is by-value); non-primitive → an
+// IDENTIFIER (a class element takes a reference ctor param). Mirrors the lexer's type keywords.
+static TokenType primTokenFor(const std::string& name) {
+    static const std::unordered_map<std::string, TokenType> m = {
+        {"i8",TokenType::I8},{"i16",TokenType::I16},{"i32",TokenType::I32},{"i64",TokenType::I64},
+        {"u8",TokenType::U8},{"u16",TokenType::U16},{"u32",TokenType::U32},{"u64",TokenType::U64},
+        {"f32",TokenType::F32},{"f64",TokenType::F64},{"bool",TokenType::BOOL},
+        {"char",TokenType::CHAR_TYPE},{"str",TokenType::STR},
+    };
+    auto it = m.find(name);
+    return it == m.end() ? TokenType::IDENTIFIER : it->second;
+}
+
+std::optional<Token> Parser::deduceArgTypeToken(const Expr* arg) const {
+    if (!arg || !arg->node) return std::nullopt;
+    const auto& node = *arg->node;
+
+    if (const auto* lit = std::get_if<LiteralExpr>(&node)) {
+        switch (lit->token.type) {
+            case TokenType::NUMBER: {
+                bool isFloat = lit->token.lexeme.find('.') != std::string::npos
+                            || lit->token.lexeme.find('e') != std::string::npos
+                            || lit->token.lexeme.find('E') != std::string::npos;
+                return isFloat ? Token{ TokenType::F64, "f64", lit->token.line }
+                               : Token{ TokenType::I32, "i32", lit->token.line };
+            }
+            case TokenType::STRING: return Token{ TokenType::STR,       "str",  lit->token.line };
+            case TokenType::TRUE:
+            case TokenType::FALSE:  return Token{ TokenType::BOOL,      "bool", lit->token.line };
+            case TokenType::CHAR:   return Token{ TokenType::CHAR_TYPE, "char", lit->token.line };
+            default:                return std::nullopt;
+        }
+    }
+
+    std::string base;
+    int         line = 0;
+    if (const auto* id = std::get_if<IdentifierExpr>(&node)) {
+        line = id->name.line;
+        const Token* found = nullptr;
+        for (size_t k = scopes_.size(); k-- > 0 && !found; ) {   // innermost binding wins (shadowing)
+            auto sit = scopes_[k].find(id->name.lexeme);
+            if (sit != scopes_[k].end()) found = &sit->second;
+        }
+        if (!found) {
+            auto fit = classFieldScope_.find(id->name.lexeme);
+            if (fit != classFieldScope_.end()) found = &fit->second;
+        }
+        if (found && found->type != TokenType::VAR) base = genericArgBaseName(*found);
+    } else if (const auto* c = std::get_if<CallExpr>(&node)) {
+        if (classNames.count(c->callee.lexeme) || gen_->classNames.count(c->callee.lexeme))
+            { base = c->callee.lexeme; line = c->callee.line; }        // `Class(...)` constructor
+    } else if (const auto* ne = std::get_if<NewExpr>(&node)) {
+        base = ne->className.lexeme; line = ne->className.line;        // `new Class(...)`
+    }
+    if (base.empty()) return std::nullopt;
+    return Token{ primTokenFor(base), base, line };
+}
+
+std::string Parser::requestTupleType(const std::vector<Token>& elems) {
+    std::string mangled = "Tuple";
+    for (const Token& e : elems) mangled += "$" + e.lexeme;
+    classNames.insert(mangled);
+    gen_->classNames.insert(mangled);
+    if (gen_->tupleRequests.find(mangled) == gen_->tupleRequests.end()) {
+        std::vector<Token> copy;
+        copy.reserve(elems.size());
+        for (const Token& e : elems) copy.push_back(e);
+        gen_->tupleRequests.emplace(mangled, std::move(copy));
+    }
+    return mangled;
+}
+
+std::optional<std::string> Parser::deduceVariadicInstantiation(
+        const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
+        const std::vector<bool>& spreads) {
+    auto it = gen_->templates.find(fnName);
+    if (it == gen_->templates.end()) return std::nullopt;
+    const GenericTemplate& tmpl = it->second;
+    if (tmpl.isPack.empty() || !tmpl.isPack.back()) return std::nullopt;   // not variadic
+
+    // Count value params in the template's raw param list (last one is the pack).
+    const std::vector<Token>& toks = tmpl.tokens;
+    size_t lp = 0;
+    while (lp < toks.size() && toks[lp].type != TokenType::LEFT_PAREN) ++lp;
+    if (lp == toks.size()) return std::nullopt;
+    size_t depth = 1, paramCount = 0; bool anyToken = false;
+    for (size_t i = lp + 1; i < toks.size() && depth > 0; ++i) {
+        TokenType tt = toks[i].type;
+        if (tt == TokenType::LEFT_PAREN || tt == TokenType::LESS) ++depth;
+        else if (tt == TokenType::GREATER)    { if (depth > 1) --depth; }
+        else if (tt == TokenType::RIGHT_PAREN) { --depth; }
+        else if (tt == TokenType::COMMA && depth == 1) ++paramCount;
+        else if (depth == 1) anyToken = true;
+    }
+    if (anyToken) ++paramCount;                          // the last / only param
+    size_t fixedCount = paramCount == 0 ? 0 : paramCount - 1;
+    if (args.size() < fixedCount) return std::nullopt;   // too few args — let the normal path error
+
+    // A trailing spread anywhere other than the SOLE pack argument is unsupported in v1.
+    for (size_t i = 0; i < spreads.size(); ++i)
+        if (i < spreads.size() && spreads[i] && i != args.size() - 1)
+            throw error(previous(), "'...' spread must be the last argument to '" + fnName + "'");
+
+    std::string tupleName;
+
+    // Spread form `f(fixed…, xs...)`: the pack is one spread of an existing pack tuple `xs` — pass it
+    // through directly (no re-tupling). `xs` must be a tuple-typed in-scope binding.
+    bool spreadPack = args.size() == fixedCount + 1 && !spreads.empty()
+                   && spreads.size() == args.size() && spreads.back();
+    if (spreadPack) {
+        std::optional<Token> t = deduceArgTypeToken(args.back().get());
+        if (!t || t->lexeme.rfind("Tuple", 0) != 0)
+            throw error(previous(), "'...' can only spread a variadic pack (a tuple) into '" + fnName + "'");
+        tupleName = t->lexeme;
+        classNames.insert(tupleName);
+        gen_->classNames.insert(tupleName);
+        // args stays as-is (fixed… + the pack tuple `xs`); no BraceInitExpr wrapping.
+        std::vector<std::vector<Token>> targs;
+        targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, tupleName, 0 } });
+        std::string mangled = mangleInstantiation(fnName, targs);
+        recordInstantiation(fnName, mangled, std::move(targs));
+        return mangled;
+    }
+
+    // Deduce the trailing pack element types.
+    std::vector<Token> elems;
+    for (size_t i = fixedCount; i < args.size(); ++i) {
+        std::optional<Token> t = deduceArgTypeToken(args[i].get());
+        if (!t)
+            throw error(previous(), "cannot infer the type of a variadic argument to '" + fnName
+                        + "'; pack arguments must be literals, in-scope variables, or constructor calls");
+        elems.push_back(*t);
+    }
+    tupleName = requestTupleType(elems);
+
+    std::vector<std::vector<Token>> targs;               // one type arg = the pack tuple
+    targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, tupleName, 0 } });
+    std::string mangled = mangleInstantiation(fnName, targs);
+    recordInstantiation(fnName, mangled, std::move(targs));
+
+    // Rewrite args: fixed prefix + one tuple literal (BraceInitExpr) holding the pack args.
+    std::vector<std::unique_ptr<Expr>> packArgs;
+    for (size_t i = fixedCount; i < args.size(); ++i) packArgs.push_back(std::move(args[i]));
+    std::vector<std::unique_ptr<Expr>> newArgs;
+    for (size_t i = 0; i < fixedCount; ++i) newArgs.push_back(std::move(args[i]));
+    newArgs.push_back(box(makeExpr(BraceInitExpr{ std::move(packArgs),
+                                                  Token{ TokenType::LEFT_PAREN, "(", 0 } })));
+    args = std::move(newArgs);
+    return mangled;
+}
+
+void Parser::expandPackMatch(std::vector<Token>& body, const std::string& pv,
+                             const std::vector<Token>& elems) {
+    const size_t arity = elems.size();
+    auto id  = [](const std::string& s) { return Token{ TokenType::IDENTIFIER, s, 0 }; };
+    auto sym = [](TokenType t, const char* s) { return Token{ t, s, 0 }; };
+
+    for (size_t i = 0; i + 2 < body.size(); ) {
+        if (!(body[i].type == TokenType::MATCH
+              && body[i + 1].type == TokenType::IDENTIFIER && body[i + 1].lexeme == pv
+              && body[i + 2].type == TokenType::LEFT_BRACE)) { ++i; continue; }
+
+        // Matching close brace of the `match { … }` block.
+        size_t open = i + 2, depth = 0, close = std::string::npos;
+        for (size_t j = open; j < body.size(); ++j) {
+            if (body[j].type == TokenType::LEFT_BRACE) ++depth;
+            else if (body[j].type == TokenType::RIGHT_BRACE) { if (--depth == 0) { close = j; break; } }
+        }
+        if (close == std::string::npos) { ++i; continue; }
+
+        // Parse the arms: `( )` / `( head : tail )`  `->`  ( { … } | expr ; ).
+        std::vector<Token> emptyBody, consBody;
+        std::string headName, tailName;
+        bool haveEmpty = false, haveCons = false, malformed = false;
+        size_t k = open + 1;
+        while (k < close && !malformed) {
+            if (body[k].type != TokenType::LEFT_PAREN) { malformed = true; break; }
+            ++k;
+            bool isEmpty = false; std::string h, t;
+            if (body[k].type == TokenType::RIGHT_PAREN) { isEmpty = true; ++k; }
+            else {
+                if (body[k].type != TokenType::IDENTIFIER) { malformed = true; break; }
+                h = body[k++].lexeme;
+                if (body[k].type != TokenType::COLON) { malformed = true; break; }
+                ++k;
+                if (body[k].type != TokenType::IDENTIFIER) { malformed = true; break; }
+                t = body[k++].lexeme;
+                if (body[k].type != TokenType::RIGHT_PAREN) { malformed = true; break; }
+                ++k;
+            }
+            if (body[k].type != TokenType::ARROW) { malformed = true; break; }
+            ++k;
+            std::vector<Token> arm;
+            if (body[k].type == TokenType::LEFT_BRACE) {
+                int d = 0;
+                do {
+                    if (body[k].type == TokenType::LEFT_BRACE) ++d;
+                    else if (body[k].type == TokenType::RIGHT_BRACE) --d;
+                    arm.push_back(body[k++]);
+                } while (k < close && d > 0);
+            } else {
+                while (k < close && body[k].type != TokenType::SEMICOLON) arm.push_back(body[k++]);
+                if (k < close && body[k].type == TokenType::SEMICOLON) arm.push_back(body[k++]);
+            }
+            if (isEmpty) { emptyBody = std::move(arm); haveEmpty = true; }
+            else         { consBody  = std::move(arm); headName = h; tailName = t; haveCons = true; }
+        }
+        if (malformed) { ++i; continue; }   // not a well-formed pack match — leave for normal parse
+
+        // Build the arm selected by the pack arity, wrapped in a block.
+        std::vector<Token> repl;
+        repl.push_back(sym(TokenType::LEFT_BRACE, "{"));
+        if (arity == 0) {
+            if (!haveEmpty) throw error(body[i], "match on an empty pack requires a '()' arm");
+            for (const Token& tk : emptyBody) repl.push_back(tk);
+        } else {
+            if (!haveCons) throw error(body[i], "match on a non-empty pack requires a '(x:xs)' arm");
+            // Tail tuple `<Tail> <tail> = <Tail>( pv._1, …, pv._{n-1} );` (unit for arity 1).
+            std::vector<Token> tailElems(elems.begin() + 1, elems.end());
+            std::string tailTuple = requestTupleType(tailElems);
+            repl.push_back(id(tailTuple));
+            repl.push_back(id(tailName));
+            repl.push_back(sym(TokenType::EQUAL, "="));
+            repl.push_back(id(tailTuple));
+            repl.push_back(sym(TokenType::LEFT_PAREN, "("));
+            for (size_t e = 1; e < arity; ++e) {
+                if (e > 1) repl.push_back(sym(TokenType::COMMA, ","));
+                repl.push_back(id(pv));
+                repl.push_back(sym(TokenType::DOT, "."));
+                repl.push_back(id("_" + std::to_string(e)));
+            }
+            repl.push_back(sym(TokenType::RIGHT_PAREN, ")"));
+            repl.push_back(sym(TokenType::SEMICOLON, ";"));
+            // Cons body with the head `head` rewritten to `pv._0` (skip a `.`/`::`-qualified use).
+            for (size_t b = 0; b < consBody.size(); ++b) {
+                bool afterAccess = b > 0 && (consBody[b - 1].type == TokenType::DOT
+                                             || consBody[b - 1].type == TokenType::COLON_COLON);
+                if (consBody[b].type == TokenType::IDENTIFIER && consBody[b].lexeme == headName
+                    && !afterAccess) {
+                    repl.push_back(id(pv));
+                    repl.push_back(sym(TokenType::DOT, "."));
+                    repl.push_back(id("_0"));
+                } else {
+                    repl.push_back(consBody[b]);
+                }
+            }
+        }
+        repl.push_back(sym(TokenType::RIGHT_BRACE, "}"));
+
+        // Splice `repl` in place of body[i .. close].
+        std::vector<Token> next;
+        for (size_t a = 0; a < i; ++a)               next.push_back(body[a]);
+        for (const Token& tk : repl)                 next.push_back(tk);
+        for (size_t a = close + 1; a < body.size(); ++a) next.push_back(body[a]);
+        body = std::move(next);
+        i += repl.size();
+    }
+}
+
 void Parser::runMonomorphization(Program& program) {
     // Every queued instantiation's mangled name is a concrete class name during
     // re-parse (the per-file parsers that recorded them are gone, so seed here).
@@ -587,15 +862,37 @@ void Parser::runMonomorphization(Program& program) {
                     GenericBoundCheck{ argHead.lexeme, tr, inst.mangledName, argHead.line });
         }
 
+        // A variadic pack type parameter (the last one, if `isPack`): the pack materializes as a
+        // tuple, so a `Ts... args` parameter substitutes to `Tuple$…* args` (a tuple borrow).
+        const std::string packName = (!tmpl.isPack.empty() && tmpl.isPack.back())
+                                    ? tmpl.typeParams.back() : std::string{};
+
         // Substitute. Rename the declaration name and any constructor/destructor name
         // (a token == templateName that is NOT followed by '<'); self-references like
         // "Name<...>" are left for re-parse to mangle. Replace type-parameter tokens.
+        std::string packValueName;   // the pack VALUE parameter name (`args` in `Ts... args`)
         std::vector<Token> out;
         for (size_t idx = 0; idx < tmpl.tokens.size(); ++idx) {
             const Token& t = tmpl.tokens[idx];
+            // Rename occurrences of the template name to the mangled instantiation. For a VARIADIC
+            // template, rename ONLY the declaration name (`fn NAME` — idx 1) and leave recursive
+            // *calls* as the bare name, so `f(…, xs...)` re-deduces the SHORTER pack each level
+            // (a self-recursive call over a fixed pack would otherwise loop forever). For a non-
+            // variadic generic, recursive calls do share the instantiation, so all occurrences rename.
             if (t.type == TokenType::IDENTIFIER && t.lexeme == inst.templateName
-                && (idx + 1 >= tmpl.tokens.size() || tmpl.tokens[idx + 1].type != TokenType::LESS)) {
+                && (idx + 1 >= tmpl.tokens.size() || tmpl.tokens[idx + 1].type != TokenType::LESS)
+                && (packName.empty() || idx == 1)) {
                 out.push_back(Token{ TokenType::IDENTIFIER, inst.mangledName, t.line });
+                continue;
+            }
+            // `PackName ...` → the pack's tuple type + `*` borrow (drop the ELLIPSIS).
+            if (!packName.empty() && t.type == TokenType::IDENTIFIER && t.lexeme == packName
+                && idx + 1 < tmpl.tokens.size() && tmpl.tokens[idx + 1].type == TokenType::ELLIPSIS) {
+                auto sit = sub.find(packName);
+                if (sit != sub.end()) for (const Token& a : sit->second) out.push_back(a);
+                out.push_back(Token{ TokenType::STAR, "*", t.line });
+                if (idx + 2 < tmpl.tokens.size()) packValueName = tmpl.tokens[idx + 2].lexeme;
+                ++idx;   // skip the ELLIPSIS (the value-param name is emitted next iteration)
                 continue;
             }
             if (t.type == TokenType::IDENTIFIER) {
@@ -606,6 +903,19 @@ void Parser::runMonomorphization(Program& program) {
                 }
             }
             out.push_back(t);
+        }
+
+        // Expand any compile-time cons-`match` over the pack now that the pack arity is known
+        // (`match args { () -> …; (x:xs) -> … }` → the arm selected by arity, tail materialized).
+        if (!packName.empty() && !packValueName.empty()) {
+            auto sit = sub.find(packName);
+            if (sit != sub.end() && !sit->second.empty()) {
+                auto trIt = gen_->tupleRequests.find(sit->second.front().lexeme);
+                std::vector<Token> elems;
+                if (trIt != gen_->tupleRequests.end())
+                    for (const Token& e : trIt->second) elems.push_back(e);
+                expandPackMatch(out, packValueName, elems);
+            }
         }
         out.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
 

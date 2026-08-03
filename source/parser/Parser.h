@@ -30,6 +30,7 @@ public:
 struct GenericTemplate {
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;   // bounds[i] = trait names required of typeParams[i]
+    std::vector<bool>                     isPack;    // isPack[i] = typeParams[i] is a variadic pack `...T`
     std::vector<Token>                    tokens;    // decl tokens; tokens[1] is the name; <...> stripped
 };
 struct GenericInstantiation {
@@ -235,10 +236,12 @@ private:
     bool tryCaptureFunctionTemplate();                       // capture a generic fn decl
     bool tryCaptureClassTemplate();                          // capture a generic class decl
     bool tryCaptureImplTemplate();                           // capture a generic `impl<T> … for C<T>`
-    // Scan a `<T, U: Trait + ...>` param list from index `from`; fills typeParams +
-    // parallel bounds, returns the closing '>' index (0 if malformed).
+    // Scan a `<T, U: Trait + ..., ...Ts>` param list from index `from`; fills typeParams +
+    // parallel bounds + parallel isPack (a `...Ts` variadic pack), returns the closing '>' index
+    // (0 if malformed).
     size_t scanTypeParamList(size_t from, std::vector<std::string>& typeParams,
-                             std::vector<std::vector<std::string>>& bounds);
+                             std::vector<std::vector<std::string>>& bounds,
+                             std::vector<bool>& isPack);
     // Number of tokens a complete type occupies at `from` (base + optional <...> + optional &),
     // or 0 if `from` is not the start of a type. Used by declaration-detection lookahead.
     [[nodiscard]] size_t typeSpanAt(size_t from) const;
@@ -259,6 +262,31 @@ private:
     bool inferGenericTypeArgs(const std::string& fnName,
                               const std::vector<std::unique_ptr<Expr>>& args,
                               std::vector<std::vector<Token>>& out);
+    // ---- Variadic packs ----
+    // Best-effort deduce a call argument's TYPE token (proper token kind so it re-parses/mangles
+    // correctly): a literal by its default type (int→i32, decimal→f64, string→str, bool, char), an
+    // in-scope identifier / instance field via `scopes_`, a `Class(...)` ctor call, or `new Class(...)`.
+    // Returns nullopt if the type isn't parser-visible.
+    [[nodiscard]] std::optional<Token> deduceArgTypeToken(const Expr* arg) const;
+    // Record a tuple type from its ordered element type tokens (deduped) and return its mangled
+    // `Tuple$…` class name — the direct-request counterpart of `consumeTupleType` (allows arity 0/1,
+    // used only for internal pack tails/empty).
+    std::string requestTupleType(const std::vector<Token>& elems);
+    // If `fnName` is a variadic template, collect the trailing arguments into a pack tuple, deduce its
+    // element types, record the tuple + the `fnName$Tuple$…` instantiation, and REWRITE `args` to
+    // [fixed prefix…, one tuple literal]. A single trailing `xs...` spread (spreads[k]) passes an
+    // existing pack tuple directly instead of re-tupling. Returns the mangled instantiation name, or
+    // nullopt if `fnName` isn't variadic. Throws a clear error if a pack element's type can't be deduced.
+    [[nodiscard]] std::optional<std::string> deduceVariadicInstantiation(
+        const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
+        const std::vector<bool>& spreads);
+    // Expand a compile-time cons-`match` over a variadic pack IN PLACE (token level, during
+    // monomorphization where the pack arity is known): each `match <packValue> { () -> A; (x:xs) -> B }`
+    // is replaced by the arm selected by the pack's arity — `A` for arity 0, else `B` with the head `x`
+    // rewritten to `<packValue>._0` and the tail `xs` materialized as a tail-tuple local. `elems` are
+    // the pack's element type tokens.
+    void expandPackMatch(std::vector<Token>& body, const std::string& packValue,
+                         const std::vector<Token>& elems);
     // The base type name a deduced argument contributes (strips a trailing `?`, a `ref:` borrow
     // prefix, and a trailing `&`): `User&` / `ref:User` / `User?` → `User`; `i32` → `i32`.
     [[nodiscard]] static std::string genericArgBaseName(const Token& typeToken);
@@ -396,8 +424,12 @@ private:
     // lexeme marks a named argument (`f(x: 1)`), an empty-lexeme token a positional one. When
     // `allowNames` is false (e.g. brace-form constructor calls), `name:` is not recognised.
     // Enforces that a positional argument may not follow a named one.
+    // `spreads` (optional, parallel to the returned args) records a trailing `xs...` spread on each
+    // argument. When null, a `...` after an argument is an error (spreads are only valid in a call
+    // that supports them — a variadic call).
     [[nodiscard]] std::vector<std::unique_ptr<Expr>> parseCallArgs(
-        std::vector<Token>& names, TokenType close, bool allowNames);
+        std::vector<Token>& names, TokenType close, bool allowNames,
+        std::vector<bool>* spreads = nullptr);
 };
 
 #endif //GG_PARSER_H

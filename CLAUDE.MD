@@ -313,6 +313,38 @@ around the scrutinee — a full expr parsed up to `{`). Reuses the `switch` arm-
   or-patterns, `if` guards, ranges, and `var (a,b) = …` destructuring-let. Tests:
   `tests/match_tests.cpp` (`[match]`), `e2e/match_test.gg`.
 
+### Variadic parameters — compile-time type packs `<...Ts>(Ts... args)`
+A heterogeneous variadic — `fn f<...Ts>(fixed…, Ts... args)` — is a **compile-time type pack**, all in
+the **parser/monomorphizer** (semantics/codegen see ordinary functions over ordinary tuples). No
+runtime heterogeneous list / RTTI. Built on tuples (packs materialize as tuples) + generic
+monomorphization.
+- **Lexer**: `...` → `ELLIPSIS` (peek both trailing dots; a lone `.` stays `DOT`).
+- **Pack type param** `<...Ts>`: `scanTypeParamList` marks it; `GenericTemplate::isPack` (parallel to
+  `typeParams`) threaded through the capture sites. v1: **one pack, last type param**. Pack **value
+  param** `Ts... args` (`ParamDecl::isVariadic`, `parseParam`; must be the last param).
+- **Call-site collection** (`deduceVariadicInstantiation`, `Parser_Expr.cpp` free-fn path): split the
+  call's fixed prefix from the trailing pack; **deduce** each pack element's type at parse time
+  (`deduceArgTypeToken` — literals default-typed `1`→i32/`1.0`→f64/`"x"`→str/bool/char, in-scope
+  identifiers, ctor/`new`); build the pack tuple (`requestTupleType`, allows internal unit/1-tuples),
+  mangle `f$Tuple$…`, and rewrite the args to `[fixed…, one tuple literal]`. A trailing **spread**
+  `xs...` (parsed by `parseCallArgs`) passes an existing pack tuple through directly.
+- **Monomorphization** (`runMonomorphization`): the pack param `Ts... args` substitutes to
+  `Tuple$…* args` (a tuple borrow). For a variadic template, the self-reference rename applies **only
+  to the decl name** (`tokens[1]`), NOT recursive *calls* — so `f(…, xs...)` re-deduces the SHORTER
+  pack each level (else infinite self-recursion over a fixed pack).
+- **Consumption = compile-time cons-`match`** (`expandPackMatch`, token-level, run per instantiation
+  where the pack arity is known): `match args { () -> A; (x:xs) -> B }` → the arm chosen by arity —
+  arity 0 → `A`; else `B` with head `x` rewritten to `args._0` and tail `xs` materialized as a
+  tail-tuple local (`Tuple$…(args._1, …)`, unit for arity 1). The recursive `f(…, xs...)` unrolls to
+  the `()` base case; terminates because the pack strictly shrinks. Distinct from the runtime `match`
+  (arms bind different types per arity — must be comptime).
+- **v1 limits** (clean errors): heterogeneous packs only (no homogeneous `i32...`→Array, no C-extern
+  `printf(ptr,…)`); pack element types must be **parser-deducible** (a nested-call arg → "cannot
+  infer", same limitation as generic inference incl. forward-reference); explicit `<…>` on a variadic
+  is rejected (the pack is inferred); pack elements are value/primitive (tuple-element rules); pack
+  trait bounds deferred (overloaded helpers like `weight(x)` per element suffice). Tests:
+  `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`.
+
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
 fall-through, no `break`). Two AST nodes: `SwitchStmt` (Stmt) and `SwitchExpr` (Expr), sharing a
@@ -1407,6 +1439,19 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1132 test cases / 2121 assertions** (as of **variadic parameters — compile-time type packs** —
+`fn f<...Ts>(fixed…, Ts... args)`: a heterogeneous variadic collects its trailing args into a **tuple
+pack** at the call site (deduced at parse time — literals default-typed, identifiers/ctor/`new`), the
+pack param monomorphizes to a `Tuple$…* args` borrow, and the callee consumes it by **compile-time
+cons-recursion** — `match args { () -> …; (x:xs) -> … }` expanded per-instantiation by pack arity
+(`expandPackMatch`, token-level): head `x` → `args._0`, tail `xs` materialized as a tail-tuple local,
+`xs...` spread + recursive re-instantiation unrolling to the `()` base case. Entirely in the
+parser/monomorphizer (semantics/codegen see ordinary functions over ordinary tuples) — no runtime
+list/RTTI. Key fix found in QA: for a variadic the self-reference rename applies only to the decl
+name, not recursive calls, so each level re-deduces the shorter pack. v1 limits: heterogeneous packs
+only, parser-deducible pack args, explicit `<…>` rejected, one pack in last position. See the
+"Variadic parameters" invariant; `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`.
+Prior baseline was
 **1117 test cases / 2093 assertions** (as of **tuple types + `match` destructuring patterns** — two
 features built as a thin front-end layer. **Tuples**: anonymous `(T1, T2, …)` types (arity ≥ 2) are
 synthesized value-object classes `Tuple$…` (fields `_0 … _n` + a positional ctor), injected by the

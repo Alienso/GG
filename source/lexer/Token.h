@@ -11,7 +11,7 @@ enum class TokenType {
     // Single-character tokens.
     LEFT_PAREN, RIGHT_PAREN, LEFT_BRACE, RIGHT_BRACE,
     LEFT_BRACKET, RIGHT_BRACKET,
-    COMMA, DOT, SEMICOLON,
+    COMMA, DOT, ELLIPSIS, SEMICOLON,   // ELLIPSIS `...` — variadic pack marker
     TILDE, QUESTION, COLON, COLON_COLON,
     AT,   // '@' — prefix for compile-time reflection builtins (@fields, @typeName, …)
 

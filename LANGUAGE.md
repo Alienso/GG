@@ -643,6 +643,49 @@ Pattern kinds: **wildcard** `_`, **binding** `name` (matches anything, binds it)
 - **Deferred** (v1): enum-payload patterns (`Some(x)`), list/collection patterns (`(x:xs)`),
   or-patterns, `if` guards, ranges, and `var (a, b) = …` destructuring bindings.
 
+### Variadic parameters — compile-time type packs
+
+A function can take a variable number of **heterogeneous** arguments via a **type pack**
+`<...Ts>` + a `Ts... args` parameter. It's resolved entirely at compile time — each call
+monomorphizes a concrete instantiation, so there is no runtime list and no boxing.
+
+```gg
+fn count<...Ts>(Ts... args) -> i32 {
+    match args {
+        ()     -> { return 0; }                    // empty pack — base case
+        (x:xs) -> { return 1 + count(xs...); }      // head x, tail-pack xs (spread with `xs...`)
+    }
+}
+
+count(1, "hi", true)     // 3  — the pack is (i32, str, bool)
+```
+
+- A call collects its trailing arguments into a **tuple** (the pack); the callee receives it and takes
+  it apart with a compile-time `match args { () -> …; (x:xs) -> … }`: `()` matches the empty pack,
+  `(x:xs)` binds the first element to `x` and the rest to a shorter pack `xs`, and `f(…, xs...)`
+  recurses on that shorter pack until it bottoms out at `()`.
+- The head `x` has each element's **concrete type** at that level, so ordinary overloading picks the
+  right operation per element — no trait needed:
+
+```gg
+fn weight(i32 x) -> i32 { return 1; }
+fn weight(bool b) -> i32 { return 10; }
+fn sumW<...Ts>(Ts... args) -> i32 {
+    match args { () -> { return 0; }  (x:xs) -> { return weight(x) + sumW(xs...); } }
+}
+sumW(1, true)            // 11
+```
+
+- **Fixed parameters** may precede the pack (`fn f<...Ts>(str fmt, Ts... args)`); the pack is always
+  last. Pack element types may be primitives, `str`, and value classes (deep-copied in, like tuple
+  elements).
+- **v1 limitations** (clean errors): the pack's argument types must be knowable at parse time —
+  literals, in-scope variables, or constructor calls; a value produced by another call (`f(g())`) or a
+  forward-referenced function isn't inferable (the same limitation as generic type-argument
+  inference). Explicit `<…>` type arguments on a variadic are rejected (the pack is always inferred).
+  One pack per function. (Homogeneous `i32...` packing into an array, and binding C variadic functions
+  like `printf`, are not part of this.)
+
 ---
 
 ## 6. Functions

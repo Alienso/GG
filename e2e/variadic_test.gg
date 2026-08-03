@@ -1,0 +1,47 @@
+// e2e/variadic_test.gg — variadic parameters (compile-time type packs, consumed by cons-recursion).
+// A `fn f<...Ts>(Ts... args)` collects its trailing arguments into a tuple pack; a compile-time
+// `match args { () -> …; (x:xs) -> … }` recurses over the pack (head `x` = args._0, tail-pack `xs`
+// spread with `xs...`) down to the empty `()` base case. Exit 0 = all checks held.
+
+import "std/String.gg";
+
+// Pure arity via cons-recursion over a HETEROGENEOUS pack.
+fn count<...Ts>(Ts... args) -> i32 {
+    match args {
+        ()     -> { return 0; }
+        (x:xs) -> { return 1 + count(xs...); }
+    }
+}
+
+// Per-element OVERLOAD resolution: the head `x` resolves the right `weight` each level.
+fn weight(i32 x)  -> i32 { return 1; }
+fn weight(bool b) -> i32 { return 10; }
+fn weight(str s)  -> i32 { return 100; }
+fn sumW<...Ts>(Ts... args) -> i32 {
+    match args {
+        ()     -> { return 0; }
+        (x:xs) -> { return weight(x) + sumW(xs...); }
+    }
+}
+
+// Object (String) pack elements — deep-cloned into the pack tuple and destroyed exactly once
+// (a double-free would crash with a non-zero exit).
+fn totalLen<...Ts>(Ts... args) -> u64 {
+    match args {
+        ()     -> { return 0; }
+        (x:xs) -> { return x.byteLength() + totalLen(xs...); }
+    }
+}
+
+fn main() -> i32 {
+    if (count(1, "hi", true, 4) != 4) { return 11; }   // heterogeneous, arity 4
+    if (count(9)                != 1) { return 12; }    // arity 1
+    if (count()                 != 0) { return 13; }    // empty pack (unit base case)
+
+    if (sumW(1, true, "x") != 111) { return 21; }       // 1 + 10 + 100 (per-element overloads)
+
+    String a("hello");   // 5
+    String b("hi");      // 2
+    if (totalLen(a, b) != 7) { return 31; }             // String pack elements, clone/dtor balanced
+    return 0;
+}

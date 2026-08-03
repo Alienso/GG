@@ -62,7 +62,17 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const s
             case '[': tokens.emplace_back(TokenType::LEFT_BRACKET,  "[", line); break;
             case ']': tokens.emplace_back(TokenType::RIGHT_BRACKET, "]", line); break;
             case ',': tokens.emplace_back(TokenType::COMMA,    ",", line); break;
-            case '.': tokens.emplace_back(TokenType::DOT,      ".", line); break;
+            case '.':
+                // `...` (ELLIPSIS) — variadic pack marker. Consume the two trailing dots only when
+                // BOTH are present (peek, don't half-consume); a lone `.` stays DOT. There is no range
+                // operator, so a stray `..` lexes as two DOTs and the parser rejects it downstream.
+                if (current + 1 < source.size() && source[current] == '.' && source[current + 1] == '.') {
+                    current += 2;
+                    tokens.emplace_back(TokenType::ELLIPSIS, "...", line);
+                } else {
+                    tokens.emplace_back(TokenType::DOT, ".", line);
+                }
+                break;
             case ';': tokens.emplace_back(TokenType::SEMICOLON, ";", line); break;
             case '@': tokens.emplace_back(TokenType::AT,       "@", line); break;
             case '~': tokens.emplace_back(TokenType::TILDE,    "~", line); break;

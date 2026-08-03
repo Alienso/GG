@@ -242,6 +242,77 @@ thus move-only). A call may pass arguments **positionally**, **by name** (`f(x: 
   normal method call and does reorder. Braces stay positional. Everything else (free/method/static/
   ctor/`new`/generic/sret) supports named args and reorders correctly.
 
+### Tuple types & literals — anonymous value objects `(T1, T2, …)`
+Anonymous tuples are **synthesized value-object classes**, not a new type kind — so the whole feature
+is a thin front-end layer and codegen/semantics treat a tuple as an ordinary class.
+- **Type syntax** `(T1, T2, …)` (arity ≥ 2; `()` reserved for a future empty-collection pattern,
+  `(x)` stays grouping): `consumeTypeCore` (`Parser.cpp`) branches on `LEFT_PAREN` →
+  `consumeTupleType`, which parses the element types, mangles a canonical class name
+  `Tuple$<e0>$<e1>…` (each element lexeme is a clean identifier), records a synthesis request in
+  `gen_->tupleRequests`, and returns a single synthesized `IDENTIFIER` token — same collapse-to-one-
+  token convention as `Class&`/`ptr<T>`/`Vec$i32`. It flows into the shared `&`/`*` suffix logic, so
+  a tuple can be borrowed (`(i32,i32)*`) / owned-referenced (`(i32,i32)&`). `isTypeName`'s paren case
+  returns `typeSpanAt(current) > 0`; `typeSpanAt` recursively validates a paren type span (≥ 2
+  elements, closing `)`), so a grouped expr `(a+b)` / tuple literal `(a,b)` is not mistaken for a type.
+- **v1 element restriction**: elements must be **value/primitive types** (no `&`/`*`/`?`/`ptr`
+  elements → clean parse error) so the mangled name is a clean identifier. Value classes (incl.
+  nested tuples, `str`) are fine.
+- **Literal syntax** `(e1, e2, …)`: `parsePrimary`'s grouping branch, on a trailing `COMMA`, emits a
+  **`BraceInitExpr`** (the `{...}` node) — **no dedicated tuple-literal node**. `analyzeBraceInit`
+  resolves the class from the **expected tuple type** at the use site, so a tuple literal needs a
+  typed context (var annotation / param / return / another tuple slot); `var t = (1,2)` with no
+  annotation is the same "cannot infer" error as untyped `{...}`.
+- **Class synthesis** (`Parser::synthesizeTupleClasses`, run in `runMonomorphization` **before**
+  `expandReflection`): for each recorded shape, hand-build a `ClassDeclStmt` `class Tuple$… { E0 _0;
+  … Tuple$…(P0 a0, …) { _0 = a0; … } }` (tokens built directly — the lexer rejects `$` in idents —
+  and re-parsed via `parseDeclaration`, like a monomorphized generic/lambda class), deduped by name.
+  **Object-typed elements take a reference ctor param** (`ElemType&`) that clones into the value
+  field (mirrors an embedded value-object field like `class Named { String name; }`).
+- **Free reuse**: `._0`/`._1` are ordinary member accesses (`_0` lexes as an identifier); nested
+  `p._0._1` chains GEPs; struct layout / clone / dtor / structeq / `needsDtor` all key off the
+  synthesized class — so `(String, i32)` deep-copies through `@String_clone` automatically.
+- **v1 limits** (clean errors): tuple **params must be a borrow/reference** (a tuple is an object;
+  by-value object params are rejected — write `(i32,i32)*`); no unit/1-tuples; tuple-type diagnostics
+  render the mangled `Tuple$…` name (pretty-printing deferred). Tests: `tests/tuple_tests.cpp`
+  (`[tuple]`), `e2e/tuple_test.gg`.
+
+### `match` — destructuring pattern matching (statement + expression)
+A **new front-end construct** distinct from `switch` (which stays equality-label only — mixing the
+two analyses is incoherent, the C#/Java lesson). `match <scrutinee> { pattern -> body … }` (no parens
+around the scrutinee — a full expr parsed up to `{`). Reuses the `switch` arm-lowering skeleton
+(`genSwitchArms` → `genMatchArms`), swapping equality-labels for **pattern test-trees + bindings**.
+- **AST** (`Ast.h`): a recursive `Pattern` variant (`WildcardPat` `_`, `BindingPat` `x`, `LiteralPat`
+  (compared via `==`), `TuplePat` `(p0,p1)`, `StructPat` `Class{ field: sub, field }`); sub-patterns
+  held as `unique_ptr<Pattern>` (breaks the completeness cycle). `MatchArm` (pattern + arrow body,
+  mirrors `SwitchArm`), `MatchStmt`/`MatchExpr` (mirror `SwitchStmt`/`SwitchExpr`); `yield` reused for
+  expr block arms. Free `patternIsIrrefutable(Pattern)` in `Ast.h` (shared with control-flow analysis).
+- **Parser** (`parseMatchStmt`/`parseMatchExpr`/`parseMatchArmBlock`/`parsePattern`, `Parser_Stmt.cpp`;
+  primary dispatch in `Parser_Expr.cpp`): `match` is pattern-first, so a bare identifier is
+  unambiguously a **binding** (`x`), `_` a wildcard, `Class{…}` a struct pattern, `Enum::V`/`E.V` a
+  literal (scoped/member access), else a literal (number/string/char/bool/null, via `parseUnary`).
+  Bindings recorded in `scopes_` with the `var` sentinel.
+- **Semantic** (`checkPattern`/`analyzeMatchStmt`/`analyzeMatchExpr`/`analyzeMatchArm`,
+  `SemanticAnalyzer_Exprs.cpp`): each arm gets a fresh scope; `checkPattern` type-checks the pattern
+  against the scrutinee/sub-value type and **declares bindings** (immutable, initialized) — tuple
+  requires a `Tuple$…` Object/Reference with matching arity, struct requires the named class + fields,
+  literal reuses `classifyEquality` (records the codegen decision keyed by the literal node).
+  **Exhaustiveness** (expression form): needs an irrefutable arm (`patternIsIrrefutable`) else error.
+  **Reachability** (both): an arm after an irrefutable one is unreachable → error. `alwaysReturns`
+  gained a `MatchStmt` arm (exhaustive + all-arm-blocks-return).
+- **Codegen** (`genMatchStmt`/`genMatchExpr`/`genMatchArms`/`emitPatternTest`/`materializeScrutinee`,
+  `CodeGen_Stmts.cpp`): the scrutinee is materialized **once** into a *place* — a ptr to its storage
+  (an object is already its address; any other value is spilled to an alloca) — so bindings alias the
+  place, field GEPs recurse into it, and literal tests load from it. `emitPatternTest` returns an i1
+  (or the literal `"true"` for an irrefutable pattern): wildcard/binding → `"true"` (+ register the
+  binding in `allocaMap`/`varTypeMap`), literal → `emitEquality` (reused), tuple/struct → AND of
+  sub-tests over `resolveFieldGEP`'d fields (a Reference place is `load`ed first to reach the object).
+  `genMatchArms` snapshots/restores `allocaMap` per arm so bindings don't leak; the expr form reuses
+  the `switchExprStack_` result slot + `yield`.
+- **v1 limits / deferred**: enum-payload patterns (`Some(x)` — needs tagged unions; GG enums are
+  Java-singletons), `(x:xs)` cons / collection patterns (the `()`=empty-collection direction),
+  or-patterns, `if` guards, ranges, and `var (a,b) = …` destructuring-let. Tests:
+  `tests/match_tests.cpp` (`[match]`), `e2e/match_test.gg`.
+
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
 fall-through, no `break`). Two AST nodes: `SwitchStmt` (Stmt) and `SwitchExpr` (Expr), sharing a
@@ -1336,6 +1407,22 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1117 test cases / 2093 assertions** (as of **tuple types + `match` destructuring patterns** — two
+features built as a thin front-end layer. **Tuples**: anonymous `(T1, T2, …)` types (arity ≥ 2) are
+synthesized value-object classes `Tuple$…` (fields `_0 … _n` + a positional ctor), injected by the
+parser during monomorphization (like a generic/lambda class), so semantics/codegen treat them as
+ordinary value objects — struct layout, clone, dtor, structeq, `._0` access, `(String,i32)` deep-copy
+all fall out for free. Tuple literals `(e1, e2)` reuse `BraceInitExpr` (class from the expected type).
+**`match`**: a new construct (distinct from `switch`) with destructuring patterns — wildcard `_`,
+binding, literal (via `==`), tuple `(a, b)`, struct `Point{ x: 0, y }`, nested — that reuses the
+switch arm-lowering skeleton, swapping equality-labels for pattern test-trees + bindings; the
+scrutinee is materialized once into a *place* (ptr to storage) that bindings alias / GEPs recurse /
+literals load. Exhaustiveness (expression form) + reachability (arm-after-irrefutable) enforced.
+v1 limits: tuple elements value/primitive-only, tuple params must be a borrow (`(i32,i32)*`), no
+unit/1-tuples; deferred patterns = enum-payload (needs tagged unions), `(x:xs)` collection, or-/guard/
+range, and `var (a,b)=…` destructuring-let. See the "Tuple types" + "`match`" invariants;
+`tests/tuple_tests.cpp` (`[tuple]`), `tests/match_tests.cpp` (`[match]`), `e2e/tuple_test.gg`,
+`e2e/match_test.gg`. Prior baseline was
 **1101 test cases / 2062 assertions** (as of **the `Clone` trait — a user deep-copy hook (Array<T>
 Phase 2)** — a built-in `Clone { fn clone(Self& src) mut; }` (copy constructor) lets buffer-owning
 value objects (`String`, a nested `Array`) be stored **by value** in an `Array<T>`, deep-copied and

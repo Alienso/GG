@@ -30,6 +30,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const DestroyExpr& destroyExpr)        const { return destroyExpr.keyword; }
         const Token& operator()(const ReflectExpr& reflect)            const { return reflect.at; }
         const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
+        const Token& operator()(const MatchExpr& matchExpr)            const { return matchExpr.keyword; }
         const Token& operator()(const NullLiteralExpr& n)              const { return n.keyword; }
         const Token& operator()(const UnwrapExpr& u)                   const { return exprFirstToken(*u.operand); }
         const Token& operator()(const ElvisExpr& e)                    const { return exprFirstToken(*e.left); }
@@ -84,6 +85,15 @@ static bool alwaysReturns(const Stmt& stmt) {
             }
             return hasDefault;
         },
+        [](const MatchStmt& m)         {
+            // Always returns iff exhaustive (an irrefutable arm) and every arm's body always returns.
+            bool exhaustive = false;
+            for (const MatchArm& arm : m.arms) {
+                if (patternIsIrrefutable(arm.pattern)) exhaustive = true;
+                if (!(arm.block && alwaysReturns(*arm.block))) return false;
+            }
+            return exhaustive;
+        },
         [](const YieldStmt&)           { return false; },  // exits the switch expr, not the fn
         [](const ExprStmt&)            { return false; },
         [](const FunctionDeclStmt&)    { return false; },
@@ -116,6 +126,7 @@ void SemanticAnalyzer::analyzeStmt(const Stmt& stmt) {
         [&](const BreakStmt& breakStmt)             { analyzeBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt)       { analyzeContinue(continueStmt); },
         [&](const SwitchStmt& switchStmt)           { analyzeSwitchStmt(switchStmt); },
+        [&](const MatchStmt& matchStmt)             { analyzeMatchStmt(matchStmt); },
         [&](const YieldStmt& yieldStmt)             { analyzeYield(yieldStmt); },
         [&](const FunctionDeclStmt& functionDecl)    { analyzeFunctionDecl(functionDecl); },
         [&](const ExternFuncDeclStmt& externDecl)    { analyzeExternFuncDecl(externDecl); },

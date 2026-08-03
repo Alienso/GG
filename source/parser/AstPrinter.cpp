@@ -212,7 +212,46 @@ void AstPrinter::printExpr(const Expr& expr) {
             indent--;
         },
 
+        [&](const MatchExpr& matchExpr) {
+            out("MatchExpr");
+            indent++;
+            out("scrutinee:");
+            indent++;
+            printExpr(*matchExpr.scrutinee);
+            indent--;
+            for (const MatchArm& arm : matchExpr.arms) printMatchArm(arm);
+            indent--;
+        },
+
     }, *expr.node);
+}
+
+void AstPrinter::printPattern(const Pattern& pattern) {
+    std::visit(overloaded{
+        [&](const WildcardPat&)          { out("_"); },
+        [&](const BindingPat& b)         { out("bind " + b.name.lexeme); },
+        [&](const LiteralPat& l)         { out("literal:"); indent++; printExpr(*l.literal); indent--; },
+        [&](const TuplePat& t) {
+            out("tuple(");
+            indent++;
+            for (const auto& e : t.elems) printPattern(*e);
+            indent--;
+        },
+        [&](const StructPat& s) {
+            out(s.typeName.lexeme + "{");
+            indent++;
+            for (const auto& [field, sub] : s.fields) { out(field.lexeme + ":"); indent++; printPattern(*sub); indent--; }
+            indent--;
+        },
+    }, *pattern.node);
+}
+
+void AstPrinter::printMatchArm(const MatchArm& arm) {
+    printPattern(arm.pattern);
+    indent++;
+    if (arm.valueExpr) printExpr(*arm.valueExpr);
+    else if (arm.block) printStmt(*arm.block);
+    indent--;
 }
 
 void AstPrinter::printArm(const SwitchArm& arm) {
@@ -332,6 +371,17 @@ void AstPrinter::printStmt(const Stmt& stmt) {
             printExpr(switchStmt.scrutinee);
             indent--;
             for (const SwitchArm& arm : switchStmt.arms) printArm(arm);
+            indent--;
+        },
+
+        [&](const MatchStmt& matchStmt) {
+            out("Match");
+            indent++;
+            out("scrutinee:");
+            indent++;
+            printExpr(matchStmt.scrutinee);
+            indent--;
+            for (const MatchArm& arm : matchStmt.arms) printMatchArm(arm);
             indent--;
         },
 

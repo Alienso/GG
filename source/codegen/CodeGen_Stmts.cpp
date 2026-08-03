@@ -19,6 +19,7 @@ void CodeGen::genStmt(const Stmt& stmt) {
         [&](const BreakStmt& breakStmt)     { genBreak(breakStmt); },
         [&](const ContinueStmt& continueStmt) { genContinue(continueStmt); },
         [&](const SwitchStmt& switchStmt)   { genSwitchStmt(switchStmt); },
+        [&](const MatchStmt& matchStmt)     { genMatchStmt(matchStmt); },
         [&](const YieldStmt& yieldStmt)     { genYield(yieldStmt); },
         [&](const FunctionDeclStmt&)         { /* nested functions not supported */ },
         [&](const ExternFuncDeclStmt&)       { /* handled at module level in generate() */ },
@@ -313,6 +314,140 @@ std::string CodeGen::genSwitchExpr(const SwitchExpr& switchExpr, const Type& res
     std::string result = emitLoad(resultIr, slot);
     // A reference result carries the +1 the winning arm transferred into the slot; hand it to the
     // consumer as a pending temp (claimed by a binding/return, else released at the boundary).
+    if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
+        pendingTemps_.push_back({ result, resolvedType.className });
+    return result;
+}
+
+// ============================================================
+// match / patterns
+// ============================================================
+
+std::string CodeGen::materializeScrutinee(const std::string& scrutVal, const Type& scrutType) {
+    // An object's SSA value is already its address; every other value is a scalar, so spill it to a
+    // fresh alloca. Result: `place` is uniformly a ptr to the value's storage (bindings alias it,
+    // field GEPs recurse into it, literal tests load from it).
+    if (scrutType.kind == TypeKind::Object) return scrutVal;
+    std::string slot = "%" + freshTemp();
+    emitAlloca(slot, irTypeName(scrutType));
+    emitStore(irTypeName(scrutType), scrutVal, slot);
+    return slot;
+}
+
+std::string CodeGen::emitPatternTest(const Pattern& pattern, const std::string& place,
+                                     const Type& pType) {
+    auto andCond = [&](const std::string& a, const std::string& b) -> std::string {
+        if (a == "true") return b;
+        if (b == "true") return a;
+        std::string t = freshTemp();
+        emit("%" + t + " = and i1 " + a + ", " + b);
+        return "%" + t;
+    };
+    // The address to GEP into for destructuring: an object lives AT `place`; a reference `place`
+    // holds the heap pointer, so load it to reach the object.
+    auto objectAddr = [&]() -> std::string {
+        return (pType.kind == TypeKind::Reference) ? emitLoad("ptr", place) : place;
+    };
+
+    return std::visit(overloaded{
+        [&](const WildcardPat&) -> std::string { return "true"; },
+        [&](const BindingPat& b) -> std::string {
+            allocaMap[b.name.lexeme]  = place;      // read-only alias to the value's storage
+            varTypeMap[b.name.lexeme] = pType;
+            return "true";
+        },
+        [&](const LiteralPat& lit) -> std::string {
+            Type        lt     = exprType(*lit.literal);
+            std::string litVal = genExpr(*lit.literal);
+            std::string scrutV = (pType.kind == TypeKind::Object) ? place
+                                                                  : emitLoad(irTypeName(pType), place);
+            return emitEquality(lit.literal->node.get(), scrutV, pType, litVal, lt, TokenType::EQUAL_EQUAL);
+        },
+        [&](const TuplePat& t) -> std::string {
+            std::string addr = objectAddr();
+            std::string cond = "true";
+            for (size_t i = 0; i < t.elems.size(); ++i) {
+                auto [fieldPtr, fieldType] = resolveFieldGEP(addr, pType.className, "_" + std::to_string(i));
+                cond = andCond(cond, emitPatternTest(*t.elems[i], fieldPtr, fieldType));
+            }
+            return cond;
+        },
+        [&](const StructPat& s) -> std::string {
+            std::string addr = objectAddr();
+            std::string cond = "true";
+            for (const auto& fp : s.fields) {
+                auto [fieldPtr, fieldType] = resolveFieldGEP(addr, pType.className, fp.first.lexeme);
+                cond = andCond(cond, emitPatternTest(*fp.second, fieldPtr, fieldType));
+            }
+            return cond;
+        },
+    }, *pattern.node);
+}
+
+void CodeGen::genMatchArms(const std::deque<MatchArm>& arms, const std::string& scrutPlace,
+                           const Type& scrutType, const std::string& mergeLabel,
+                           const std::function<void(const MatchArm&)>& emitArmBody) {
+    for (const MatchArm& arm : arms) {
+        // Pattern bindings are registered into allocaMap in the test block (their GEPs dominate the
+        // arm body). Snapshot/restore so one arm's bindings never leak into the next.
+        auto savedAllocas = allocaMap;
+        auto savedTypes   = varTypeMap;
+
+        std::string cond      = emitPatternTest(arm.pattern, scrutPlace, scrutType);
+        std::string armLabel  = freshLabel("mt.arm");
+        std::string nextLabel = freshLabel("mt.test");
+        emitCondBr(cond, armLabel, nextLabel);       // `cond` is the literal "true" for an irrefutable arm
+        switchBlock(armLabel);
+        emitArmBody(arm);
+        emitBr(mergeLabel);                          // no-op if the arm already terminated
+        switchBlock(nextLabel);
+
+        allocaMap  = std::move(savedAllocas);
+        varTypeMap = std::move(savedTypes);
+    }
+    emitBr(mergeLabel);   // no arm matched (a statement match need not be exhaustive)
+}
+
+void CodeGen::genMatchStmt(const MatchStmt& matchStmt) {
+    Type        scrutType = exprType(matchStmt.scrutinee);
+    std::string scrutVal  = genExpr(matchStmt.scrutinee);
+    std::string place     = materializeScrutinee(scrutVal, scrutType);
+    std::string mergeLabel = freshLabel("mt.merge");
+
+    genMatchArms(matchStmt.arms, place, scrutType, mergeLabel,
+        [&](const MatchArm& arm) {
+            if (arm.block)          genStmt(*arm.block);
+            else if (arm.valueExpr) { genExpr(*arm.valueExpr); flushTempReleases(); }
+        });
+
+    switchBlock(mergeLabel);
+    flushTempReleases();   // release scrutinee temporaries at the match boundary
+}
+
+std::string CodeGen::genMatchExpr(const MatchExpr& matchExpr, const Type& resolvedType) {
+    std::string resultIr = irTypeName(resolvedType);
+    std::string slot = "%" + freshTemp();
+    emitAlloca(slot, resultIr);
+
+    Type        scrutType = exprType(*matchExpr.scrutinee);
+    std::string scrutVal  = genExpr(*matchExpr.scrutinee);
+    std::string place     = materializeScrutinee(scrutVal, scrutType);
+    std::string mergeLabel = freshLabel("mt.merge");
+
+    switchExprStack_.push_back({ slot, resolvedType, mergeLabel });   // `yield` targets this slot
+    genMatchArms(matchExpr.arms, place, scrutType, mergeLabel,
+        [&](const MatchArm& arm) {
+            if (arm.valueExpr) {
+                storeSwitchArmValue(*arm.valueExpr, slot, resolvedType);
+                flushTempReleases();
+            } else if (arm.block) {
+                genStmt(*arm.block);   // a `yield` inside stores to the slot + branches to merge
+            }
+        });
+    switchExprStack_.pop_back();
+
+    switchBlock(mergeLabel);
+    std::string result = emitLoad(resultIr, slot);
     if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
         pendingTemps_.push_back({ result, resolvedType.className });
     return result;

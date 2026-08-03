@@ -144,6 +144,8 @@ add_executable(GG_tests
         tests/array_tests.cpp
         tests/array_object_tests.cpp
         tests/clone_tests.cpp
+        tests/tuple_tests.cpp
+        tests/match_tests.cpp
         tests/class_tests.cpp
         tests/enum_tests.cpp
         tests/static_tests.cpp

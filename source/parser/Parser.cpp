@@ -194,6 +194,11 @@ bool Parser::isTypeName() const {
             return true;   // valid only inside trait/impl bodies; semantic enforces that
         case TokenType::IDENTIFIER:
             return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
+        case TokenType::LEFT_PAREN:
+            // A tuple type `(T1, T2, …)` starts with '('. Confirm it is a full, valid tuple-type
+            // span (≥ 2 type elements, closing ')') so a grouped expression `(a + b)` or a tuple
+            // *literal* `(a, b)` (whose elements are values, not types) is not mistaken for a type.
+            return typeSpanAt(current) > 0;
         default:
             return false;
     }
@@ -213,7 +218,11 @@ Token Parser::consumeType() {
 }
 
 Token Parser::consumeTypeCore() {
-    Token base = advance();  // caller has verified isTypeName()
+    // A tuple type `(T1, T2, …)` yields a synthesized IDENTIFIER token (the `Tuple$…` class name);
+    // otherwise the base is the next type token. Either way, the shared `&`/`*` suffix logic below
+    // applies (a tuple has no `<…>` args, so those branches are naturally skipped for it) — so a
+    // tuple can be borrowed (`(i32,i32)*`) or owned-referenced (`(i32,i32)&`) like any class.
+    Token base = check(TokenType::LEFT_PAREN) ? consumeTupleType() : advance();
 
     std::string lexeme = base.lexeme;
     int         line   = base.line;
@@ -267,6 +276,52 @@ Token Parser::consumeTypeCore() {
     if (lexeme != base.lexeme)  // a generic instantiation was mangled
         return Token{ TokenType::IDENTIFIER, lexeme, line };
     return base;
+}
+
+// A tuple type `(T1, T2, …)` (arity ≥ 2). Each element is a value or primitive type (v1 rejects
+// `&`/`*`/`?`/`ptr` elements so the mangled name is a clean identifier). Produces the canonical
+// class name `Tuple$<e1>$<e2>…` (each element lexeme is already a clean identifier — a primitive
+// keyword, a class name, or a nested `Tuple$…`), records a one-shot synthesis request keyed by that
+// name, and returns it as a single synthesized IDENTIFIER token — an ordinary value-object type to
+// everything downstream. `consumeType` recursion handles nesting: `((i32,i32), str)` works.
+Token Parser::consumeTupleType() {
+    Token lparen = advance();   // '('
+    int   line   = lparen.line;
+
+    std::vector<Token> elems;
+    do {
+        if (!isTypeName())
+            throw error(peek(), "expected a type in a tuple type '(T1, T2, …)'");
+        Token e = consumeType();
+        const std::string& lx = e.lexeme;
+        bool badSigil = (!lx.empty() && (lx.back() == '&' || lx.back() == '?'))
+                     || lx.rfind("ref:", 0) == 0
+                     || lx == "ptr" || lx.rfind("ptr<", 0) == 0
+                     || lx == "void";
+        if (badSigil)
+            throw error(e, "tuple elements must be value or primitive types in v1 "
+                           "(no '&', '*', '?', or raw pointers); found '" + lx + "'");
+        elems.push_back(e);
+    } while (match({ TokenType::COMMA }));
+
+    consume(TokenType::RIGHT_PAREN, "expected ')' to close a tuple type");
+
+    if (elems.size() < 2)
+        throw error(lparen, "a tuple type needs at least two elements; '(T)' is just grouping "
+                            "and '()' is reserved");
+
+    std::string mangled = "Tuple";
+    for (const Token& e : elems) mangled += "$" + e.lexeme;
+
+    classNames.insert(mangled);
+    gen_->classNames.insert(mangled);
+    if (gen_->tupleRequests.find(mangled) == gen_->tupleRequests.end()) {
+        std::vector<Token> copy;
+        copy.reserve(elems.size());
+        for (const Token& e : elems) copy.push_back(e);   // Token copy-ctor is fine (only assign is deleted)
+        gen_->tupleRequests.emplace(mangled, std::move(copy));
+    }
+    return Token{ TokenType::IDENTIFIER, mangled, line };
 }
 
 // ============================================================
@@ -356,6 +411,7 @@ Stmt Parser::parseStatement() {
     if (match({ TokenType::BREAK }))    return parseBreakStmt();
     if (match({ TokenType::CONTINUE })) return parseContinueStmt();
     if (match({ TokenType::SWITCH }))   return parseSwitchStmt();
+    if (match({ TokenType::MATCH }))    return parseMatchStmt();
     if (match({ TokenType::YIELD }))    return parseYieldStmt();
     return parseExprStmt();
 }

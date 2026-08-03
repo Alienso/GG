@@ -1,9 +1,18 @@
-
+import "std/crt/cio.gg"
 import "std/crt/cmem.gg";
 import "std/crt/cstring.gg";
-import "std/crt/cio.gg";
 
 import "std/array.gg";
+
+class Instance{
+    i32 x;
+    i32 y;
+
+    Instance(x: i32, y: i32){
+        this.x = x;
+        this.y = y;
+    }
+}
 
 fn main() -> i32 {
 

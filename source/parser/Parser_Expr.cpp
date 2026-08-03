@@ -464,6 +464,11 @@ Expr Parser::parsePrimary() {
         return parseSwitchExpr();
     }
 
+    // Match expression: `match (x) { pattern -> v; … }`
+    if (match({ TokenType::MATCH })) {
+        return parseMatchExpr();
+    }
+
     // Lambda literal: `( … ) -> …` (distinguished from a grouped expression by the trailing `->`).
     if (isLambdaAhead()) {
         return parseLambda();
@@ -659,9 +664,21 @@ Expr Parser::parsePrimary() {
         return makeExpr(IdentifierExpr{ name });
     }
 
-    // Grouping — no AST node, just return the inner expression directly
+    // Grouping, or a tuple literal `(e1, e2, …)`. A comma after the first element makes it a tuple:
+    // lower to a `BraceInitExpr` (the same node as `{...}`), whose class is deduced from the expected
+    // tuple type at the use site (`analyzeBraceInit`) — no dedicated tuple-literal node. A lone `(e)`
+    // stays plain grouping (arity ≥ 2). Lambdas `(…) ->` are already diverted earlier.
     if (match({ TokenType::LEFT_PAREN })) {
-        Expr inner = parseExpression();
+        Token paren = previous();
+        Expr  inner = parseExpression();
+        if (check(TokenType::COMMA)) {
+            std::vector<std::unique_ptr<Expr>> args;
+            args.push_back(box(std::move(inner)));
+            while (match({ TokenType::COMMA }))
+                args.push_back(box(parseExpression()));
+            consume(TokenType::RIGHT_PAREN, "expected ')' to close a tuple literal");
+            return makeExpr(BraceInitExpr{ std::move(args), paren });
+        }
         consume(TokenType::RIGHT_PAREN, "expected ')' after expression");
         return inner;
     }

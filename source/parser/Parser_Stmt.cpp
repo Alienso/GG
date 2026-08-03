@@ -137,6 +137,106 @@ std::deque<SwitchArm> Parser::parseSwitchArmBlock() {
     return arms;
 }
 
+// ---- match ----
+// `match <scrutinee> { pattern -> body … }`. The scrutinee has no surrounding parens (a full
+// expression parsed up to the opening `{`), matching the user-facing form `match pair { … }`.
+Stmt Parser::parseMatchStmt() {
+    Token keyword  = previous();               // 'match'
+    Expr  scrutinee = parseExpression();
+    std::deque<MatchArm> arms = parseMatchArmBlock();
+    return makeStmt(MatchStmt{ keyword, std::move(scrutinee), std::move(arms) });
+}
+
+Expr Parser::parseMatchExpr() {
+    Token keyword  = previous();               // 'match' (consumed by the caller)
+    Expr  scrutinee = parseExpression();
+    std::deque<MatchArm> arms = parseMatchArmBlock();
+    return makeExpr(MatchExpr{ keyword, box(std::move(scrutinee)), std::move(arms) });
+}
+
+std::deque<MatchArm> Parser::parseMatchArmBlock() {
+    consume(TokenType::LEFT_BRACE, "expected '{' to open match body");
+    std::deque<MatchArm> arms;
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+        parsingCaseLabel_ = true;              // a trailing `->` is the arm separator, not a lambda
+        Pattern pat = parsePattern();
+        parsingCaseLabel_ = false;
+        Token arrow = consume(TokenType::ARROW, "expected '->' after match pattern");
+
+        std::unique_ptr<Expr> valueExpr = nullptr;
+        std::unique_ptr<Stmt> block     = nullptr;
+        if (check(TokenType::LEFT_BRACE)) {
+            block = box(parseBlock());
+        } else {
+            valueExpr = box(parseExpression());
+            consume(TokenType::SEMICOLON, "expected ';' after match arm expression");
+        }
+        arms.push_back(MatchArm{ std::move(pat), std::move(valueExpr), std::move(block), arrow });
+    }
+    consume(TokenType::RIGHT_BRACE, "expected '}' to close match body");
+    return arms;
+}
+
+// Recursive-descent pattern grammar. A pattern is one of: a tuple `(p0, p1, …)`, a struct
+// `Class{ field: sub, field, … }`, a wildcard `_`, a binding `name`, or a literal (number / string /
+// char / bool / null / enum-variant — compared via ==). Sub-patterns nest.
+Pattern Parser::parsePattern() {
+    auto mk = [](auto&& v) {
+        return Pattern{ std::make_unique<Pattern::Variant>(std::forward<decltype(v)>(v)) };
+    };
+
+    // Tuple pattern: '(' sub (',' sub)+ ')'  (arity ≥ 2; '()' reserved for the empty-collection form).
+    if (match({ TokenType::LEFT_PAREN })) {
+        Token paren = previous();
+        std::deque<std::unique_ptr<Pattern>> elems;
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do { elems.push_back(std::make_unique<Pattern>(parsePattern())); }
+            while (match({ TokenType::COMMA }));
+        }
+        consume(TokenType::RIGHT_PAREN, "expected ')' to close a tuple pattern");
+        if (elems.size() < 2)
+            throw error(paren, "a tuple pattern needs at least two elements; '()' is reserved and "
+                               "'(p)' is just a parenthesized pattern");
+        return mk(TuplePat{ std::move(elems), paren });
+    }
+
+    // Struct pattern: ClassName '{' (field (':' sub)? ) (',' …)* '}'. A bare `field` is shorthand
+    // for `field: field` (bind the field's value to a same-named variable).
+    if (check(TokenType::IDENTIFIER)
+        && (classNames.count(peek().lexeme) || gen_->classNames.count(peek().lexeme))
+        && peekNext().type == TokenType::LEFT_BRACE) {
+        Token typeName = advance();
+        consume(TokenType::LEFT_BRACE, "expected '{' in a struct pattern");
+        std::deque<std::pair<Token, std::unique_ptr<Pattern>>> fields;
+        if (!check(TokenType::RIGHT_BRACE)) {
+            do {
+                Token field = consume(TokenType::IDENTIFIER, "expected a field name in a struct pattern");
+                std::unique_ptr<Pattern> sub;
+                if (match({ TokenType::COLON }))
+                    sub = std::make_unique<Pattern>(parsePattern());
+                else
+                    sub = std::make_unique<Pattern>(mk(BindingPat{ field }));   // shorthand
+                fields.push_back({ field, std::move(sub) });
+            } while (match({ TokenType::COMMA }));
+        }
+        Token brace = consume(TokenType::RIGHT_BRACE, "expected '}' to close a struct pattern");
+        return mk(StructPat{ typeName, std::move(fields), brace });
+    }
+
+    // Identifier forms: wildcard `_`, an enum-variant / member literal (`Color::RED`, `E.V`), else a
+    // binding. (Matching against an existing variable's *value* uses a literal, not a bare name.)
+    if (check(TokenType::IDENTIFIER)) {
+        if (peek().lexeme == "_") { Token t = advance(); return mk(WildcardPat{ t }); }
+        if (peekNext().type == TokenType::COLON_COLON || peekNext().type == TokenType::DOT)
+            return mk(LiteralPat{ box(parseUnary()) });      // scoped/member access → literal
+        Token name = advance();
+        return mk(BindingPat{ name });
+    }
+
+    // Literal pattern: a number / string / char / bool / null / negated literal, compared via ==.
+    return mk(LiteralPat{ box(parseUnary()) });
+}
+
 Stmt Parser::parseYieldStmt() {
     Token keyword = previous();   // 'yield'
     Expr value = parseExpression();

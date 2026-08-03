@@ -209,6 +209,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const DestroyExpr& destroyExpr)          -> std::string { return genDestroy(destroyExpr); },
         [&](const ReflectExpr& reflect)              -> std::string { return genReflect(reflect); },
         [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
+        [&](const MatchExpr& matchExpr)              -> std::string { return genMatchExpr(matchExpr, resolvedType); },
         [&](const NullLiteralExpr&)                  -> std::string { return "null"; },
         [&](const UnwrapExpr& unwrap)                -> std::string { return genUnwrap(unwrap); },
         [&](const ElvisExpr& elvis)                  -> std::string { return genElvis(elvis, resolvedType); },

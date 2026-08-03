@@ -1,0 +1,10 @@
+import "std/crt/cio.gg"
+
+
+fn print(i32 n) {  }
+fn print(u64 n) {  }
+fn print(f64 x) {  }
+fn print(bool b) {  }
+fn print(String& s) {  }
+fn print(str s) {  }
+fn println(i32 n) mut { print(n); putchar(10); }

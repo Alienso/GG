@@ -37,6 +37,7 @@ enum class TokenType {
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
     PRIVATE, AS, NEW, SIZEOF, DESTROY, STATIC, MUT, TRAIT, IMPL, SELF, FN,
     SWITCH, CASE, DEFAULT, YIELD, NULL_LITERAL, ANNOTATION,
+    MATCH,        // `match (e) { pattern -> … }` — destructuring pattern match (distinct from `switch`)
     QUESTION_DOT, QUESTION_COLON,   // note: `!!` (unwrap) is parsed as two BANG tokens, not one token
     INLINE, IN,   // `inline for (x in @fields(T))` — compile-time reflection unroll
     MODULE,       // `module geo;` — declares a file's namespace (see module namespacing)

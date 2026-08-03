@@ -204,6 +204,52 @@ struct ReflectExpr {
     std::vector<std::unique_ptr<Expr>> valueArgs;  // value args (e.g. v, "x", or f.name)
 };
 
+// ---- Patterns (for `match`) ----
+// A destructuring pattern. Recursive (tuple/struct patterns hold sub-patterns), so sub-patterns are
+// held as `unique_ptr<Pattern>` to break the type-completeness cycle (mirrors how Expr nests via
+// `unique_ptr<Expr>`). Lowers to a test-tree + bindings — never a runtime type tag.
+struct Pattern;
+struct WildcardPat { Token token; };                       // `_` — matches anything, binds nothing
+struct BindingPat  { Token name;  };                       // `x` — matches anything, binds x
+struct LiteralPat  { std::unique_ptr<Expr> literal; };     // `0`, `"s"`, … — compared via ==
+struct TuplePat    { std::deque<std::unique_ptr<Pattern>> elems; Token paren; };   // `(p0, p1, …)`
+struct StructPat {                                         // `Class{ field: subpat, field, … }`
+    Token typeName;
+    std::deque<std::pair<Token, std::unique_ptr<Pattern>>> fields;   // (field name, sub-pattern)
+    Token brace;
+};
+struct Pattern {
+    using Variant = std::variant<WildcardPat, BindingPat, LiteralPat, TuplePat, StructPat>;
+    std::unique_ptr<Variant> node;
+};
+
+// One arm of a `match`: a pattern plus a body. Exactly one of `valueExpr` (`-> expr` form) or
+// `block` (`-> { ... }` form) is set. Move-only (Pattern + unique_ptrs + Token const members).
+struct MatchArm {
+    Pattern               pattern;
+    std::unique_ptr<Expr> valueExpr;   // `-> expr ;` form (nullptr if block)
+    std::unique_ptr<Stmt> block;       // `-> { ... }` form (nullptr if expr)
+    Token                 arrow;       // the '->' token, for diagnostics
+};
+
+// A pattern that matches every value of its type (a wildcard/binding, or a tuple/struct whose
+// sub-patterns are all irrefutable). Drives match-expression exhaustiveness + arm reachability.
+inline bool patternIsIrrefutable(const Pattern& pattern) {
+    return std::visit(overloaded{
+        [](const WildcardPat&) { return true; },
+        [](const BindingPat&)  { return true; },
+        [](const LiteralPat&)  { return false; },
+        [](const TuplePat& t)  {
+            for (const auto& e : t.elems) if (!patternIsIrrefutable(*e)) return false;
+            return true;
+        },
+        [](const StructPat& s) {
+            for (const auto& fp : s.fields) if (!patternIsIrrefutable(*fp.second)) return false;
+            return true;
+        },
+    }, *pattern.node);
+}
+
 // One arm of a `switch`. `labels` empty ⇒ the `default` arm. Exactly one of
 // `valueExpr` (arrow `-> expr` form) or `block` (arrow `-> { ... }` form) is set.
 // All members are pointers so the struct is usable while Expr/Stmt are incomplete
@@ -221,6 +267,14 @@ struct SwitchExpr {
     Token                  keyword;     // the 'switch' token
     std::unique_ptr<Expr>  scrutinee;
     std::deque<SwitchArm>  arms;        // deque: SwitchArm is move-only (Token const members)
+};
+
+// Match expression: `match (scrutinee) { pattern -> value ; … }` producing a value. Like SwitchExpr
+// but arms carry destructuring patterns (MatchArm) instead of equality labels.
+struct MatchExpr {
+    Token                 keyword;      // the 'match' token
+    std::unique_ptr<Expr> scrutinee;
+    std::deque<MatchArm>  arms;
 };
 
 // ---- Expr wrapper ----
@@ -252,7 +306,8 @@ struct Expr {
         SizeofExpr,
         DestroyExpr,
         ReflectExpr,
-        SwitchExpr
+        SwitchExpr,
+        MatchExpr
     >;
     std::unique_ptr<Variant> node;
 };
@@ -318,6 +373,14 @@ struct SwitchStmt {
     Token                 keyword;     // the 'switch' token
     Expr                  scrutinee;
     std::deque<SwitchArm> arms;
+};
+
+// Match statement: `match (scrutinee) { pattern -> … }`. Arrow-form arms carrying destructuring
+// patterns (MatchArm); value discarded. Never required exhaustive (like a switch statement).
+struct MatchStmt {
+    Token                keyword;      // the 'match' token
+    Expr                 scrutinee;
+    std::deque<MatchArm> arms;
 };
 
 // `yield expr;` — produces the value of the enclosing switch-expression arm.
@@ -471,6 +534,7 @@ struct Stmt {
         ContinueStmt,
         ReturnStmt,
         SwitchStmt,
+        MatchStmt,
         YieldStmt,
         FunctionDeclStmt,
         ExternFuncDeclStmt,

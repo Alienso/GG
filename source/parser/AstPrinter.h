@@ -21,6 +21,8 @@ private:
     void printStmt(const Stmt& stmt);
     void printBlock(const BlockStmt& block);
     void printArm(const SwitchArm& arm);
+    void printPattern(const Pattern& pattern);
+    void printMatchArm(const MatchArm& arm);
 
     void out(const std::string& text);
 };

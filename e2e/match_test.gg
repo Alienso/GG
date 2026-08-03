@@ -1,0 +1,88 @@
+// e2e/match_test.gg — `match` with destructuring patterns (Phase B). Tuple patterns, struct
+// patterns with literal sub-patterns + reachability ordering, nested patterns, the match-expression
+// form, and an object-element `(String, i32)` tuple matched + dropped (a clean run = no double-free).
+// Exit 0 = all checks held; a non-zero exit names the failing scenario.
+
+import "std/String.gg";
+
+class Point {
+    i32 x;
+    i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }
+}
+
+// Tuple pattern + tuple return (borrow param — a tuple is an object, so it is passed by reference).
+fn swap((i32, i32)* pair) -> (i32, i32) out {
+    match pair {
+        (a, b) -> { out = (b, a); return out; }
+    }
+    return out;
+}
+
+// Struct pattern with a literal sub-pattern; the specific arm must precede the catch-all.
+fn classify(Point* p) -> i32 {
+    match p {
+        Point{ x: 0, y } -> { return 100 + y; }   // x == 0
+        Point{ x, y }    -> { return x + y; }      // catch-all
+    }
+    return -1;
+}
+
+fn tuples() -> i32 {
+    (i32, i32) p = (3, 4);
+    (i32, i32) s = swap(p);
+    if (s._0 != 4) { return 11; }
+    if (s._1 != 3) { return 12; }
+
+    // nested tuple destructuring in a match EXPRESSION
+    ((i32, i32), i32) n = ((1, 2), 3);
+    i32 nv = match n {
+        ((a, b), c) -> a + b + c;
+    };
+    if (nv != 6) { return 13; }
+    return 0;
+}
+
+fn structs() -> i32 {
+    Point a(0, 7);
+    Point b(2, 5);
+    if (classify(a) != 107) { return 21; }         // x==0 arm: 100 + 7
+    if (classify(b) != 7)   { return 22; }         // catch-all: 2 + 5
+    return 0;
+}
+
+// A match EXPRESSION over a primitive with a literal arm + wildcard catch-all.
+fn describe(i32 n) -> i32 {
+    return match n {
+        0 -> 1000;
+        1 -> 2000;
+        _ -> n;
+    };
+}
+
+fn expr() -> i32 {
+    if (describe(0) != 1000) { return 31; }
+    if (describe(1) != 2000) { return 32; }
+    if (describe(9) != 9)    { return 33; }
+    return 0;
+}
+
+// An object-element tuple matched; the String binding aliases the field. A clean run proves the
+// tuple's clone/dtor balance (a double-free would crash with a non-zero exit).
+fn objectTuple() -> i32 {
+    String hi("hello");
+    (String, i32) t = (hi, 5);
+    i32 r = match t {
+        (s, count) -> count + (s.byteLength() as i32);   // 5 + 5 (expression arm)
+    };
+    if (r != 10) { return 41; }
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 r1 = tuples();      if (r1 != 0) { return r1; }
+    i32 r2 = structs();     if (r2 != 0) { return r2; }
+    i32 r3 = expr();        if (r3 != 0) { return r3; }
+    i32 r4 = objectTuple(); if (r4 != 0) { return r4; }
+    return 0;
+}

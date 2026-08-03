@@ -343,6 +343,26 @@ bool Parser::tryCaptureImplTemplate() {
 size_t Parser::typeSpanAt(size_t from) const {
     if (from >= tokens.size()) return 0;
     const Token& t = tokens[from];
+
+    // Tuple type: '(' type (',' type)+ ')' — at least two element type spans. Each element is
+    // validated by a recursive typeSpanAt, so a grouped expression `(a + b)` or a tuple *literal*
+    // `(a, b)` (elements are values, not types) yields 0 and is not read as a type.
+    if (t.type == TokenType::LEFT_PAREN) {
+        size_t i = from + 1;
+        size_t count = 0;
+        for (;;) {
+            size_t inner = typeSpanAt(i);
+            if (inner == 0) return 0;
+            i += inner;
+            ++count;
+            if (i < tokens.size() && tokens[i].type == TokenType::COMMA) { ++i; continue; }
+            break;
+        }
+        if (count < 2) return 0;                                        // '(T)' is grouping
+        if (i >= tokens.size() || tokens[i].type != TokenType::RIGHT_PAREN) return 0;
+        return (i + 1) - from;                                          // include ')'
+    }
+
     bool isType = isTypeKeyword(t.type)
                || (t.type == TokenType::IDENTIFIER
                    && (classNames.count(t.lexeme) || gen_->classNames.count(t.lexeme)));
@@ -659,7 +679,69 @@ void Parser::runMonomorphization(Program& program) {
         }
     }
 
+    // Synthesize the concrete value-object class for every tuple type recorded during parsing +
+    // monomorphization (before reflection, so a tuple's fields are visible to `@fields`, and before
+    // semantics/codegen, which then treat it as an ordinary class).
+    synthesizeTupleClasses(program);
+
     // Compile-time reflection: now that every class (incl. monomorphized ones) is in the program,
     // expand every `inline for (v in @fields(T))` into ordinary statements.
     expandReflection(program);
+}
+
+// Build a concrete `ClassDeclStmt` for each recorded tuple type and append it to the Program. The
+// class is an ordinary value object `class Tuple$… { E0 _0; E1 _1; … Tuple$…(P0 a0, …) { _0 = a0; … } }`.
+// Object-typed elements (a class or nested tuple — an IDENTIFIER type token) take a reference ctor
+// parameter (`ElemType&`) whose assignment into the value field clones (mirrors an embedded
+// value-object field, e.g. `class Named { String name; Named(String& n) { name = n; } }`); primitive
+// and `str` elements pass by value. Tokens are hand-built (never lexed — the lexer rejects `$` in
+// identifiers) and re-parsed via parseDeclaration, exactly like a monomorphized generic class.
+void Parser::synthesizeTupleClasses(Program& program) {
+    auto id  = [](const std::string& s) { return Token{ TokenType::IDENTIFIER, s, 0 }; };
+    auto sym = [](TokenType t, const char* s) { return Token{ t, s, 0 }; };
+
+    // Make every tuple name a known class in THIS parser's local table, so a nested-tuple element's
+    // reference constructor parameter (`Tuple$…&`) passes consumeType's class-check during re-parse
+    // (the per-file parser that recorded the request may be a different instance from this one).
+    for (const auto& [tn, elems] : gen_->tupleRequests) { (void)elems; classNames.insert(tn); }
+
+    for (const auto& [name, elems] : gen_->tupleRequests) {
+        std::vector<Token> toks;
+        toks.push_back(sym(TokenType::CLASS, "class"));
+        toks.push_back(id(name));
+        toks.push_back(sym(TokenType::LEFT_BRACE, "{"));
+
+        // Fields: Ei _i ;
+        for (size_t i = 0; i < elems.size(); ++i) {
+            toks.push_back(elems[i]);                                   // element type token
+            toks.push_back(id("_" + std::to_string(i)));               // field name _i
+            toks.push_back(sym(TokenType::SEMICOLON, ";"));
+        }
+
+        // Constructor: Tuple$…( P0 a0, P1 a1, … ) { _0 = a0; … }
+        toks.push_back(id(name));
+        toks.push_back(sym(TokenType::LEFT_PAREN, "("));
+        for (size_t i = 0; i < elems.size(); ++i) {
+            if (i > 0) toks.push_back(sym(TokenType::COMMA, ","));
+            toks.push_back(elems[i]);                                   // param type
+            if (elems[i].type == TokenType::IDENTIFIER)                // object element → reference param
+                toks.push_back(sym(TokenType::AMPERSAND, "&"));
+            toks.push_back(id("a" + std::to_string(i)));               // param name ai
+        }
+        toks.push_back(sym(TokenType::RIGHT_PAREN, ")"));
+        toks.push_back(sym(TokenType::LEFT_BRACE, "{"));
+        for (size_t i = 0; i < elems.size(); ++i) {
+            toks.push_back(id("_" + std::to_string(i)));
+            toks.push_back(sym(TokenType::EQUAL, "="));
+            toks.push_back(id("a" + std::to_string(i)));
+            toks.push_back(sym(TokenType::SEMICOLON, ";"));
+        }
+        toks.push_back(sym(TokenType::RIGHT_BRACE, "}"));               // end ctor body
+        toks.push_back(sym(TokenType::RIGHT_BRACE, "}"));               // end class
+        toks.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
+
+        tokens  = std::move(toks);
+        current = 0;
+        program.declarations.push_back(parseDeclaration());
+    }
 }

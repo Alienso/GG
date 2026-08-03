@@ -45,6 +45,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const DestroyExpr& destroyExpr)           { return analyzeDestroy(destroyExpr); },
         [&](const ReflectExpr& reflect)               { return analyzeReflect(reflect); },
         [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
+        [&](const MatchExpr& matchExpr)               { return analyzeMatchExpr(matchExpr); },
         [&](const NullLiteralExpr&)                   { return makeNullType(); },
         [&](const UnwrapExpr& unwrap)                 { return analyzeUnwrap(unwrap); },
         [&](const ElvisExpr& elvis)                   { return analyzeElvis(elvis); },
@@ -1047,6 +1048,140 @@ Type SemanticAnalyzer::analyzeSwitchExpr(const SwitchExpr& switchExpr) {
         error(switchExpr.keyword,
               std::string("a switch expression must be exhaustive: add a 'default' arm")
               + (scrutineeType.kind == TypeKind::Enum ? " or cover every enum variant" : ""));
+
+    return isError(result) ? Type{TypeKind::Error} : result;
+}
+
+// ============================================================
+// match / patterns
+// ============================================================
+
+// A tuple type is the synthesized value-object class `Tuple$…`.
+static bool isTupleClassName(const std::string& s) { return s.rfind("Tuple$", 0) == 0; }
+
+void SemanticAnalyzer::checkPattern(const Pattern& pattern, const Type& scrutType, const Token& at) {
+    std::visit(overloaded{
+        [&](const WildcardPat&) { /* matches anything, binds nothing */ },
+        [&](const BindingPat& b) {
+            // A pattern binding is an immutable, definitely-initialized local of the matched type.
+            symbolTable.declare(b.name.lexeme, Symbol{
+                Symbol::Kind::Variable, scrutType, b.name, {},
+                /*isParameter=*/false, /*isInitialized=*/true, /*isMutable=*/false });
+        },
+        [&](const LiteralPat& lit) {
+            Type lt = analyzeExpr(*lit.literal);
+            if (!isError(lt) && !isError(scrutType))
+                (void)classifyEquality(scrutType, lt, lit.literal->node.get(), at, "match pattern");
+        },
+        [&](const TuplePat& t) {
+            bool isTuple = isTupleClassName(scrutType.className)
+                        && (scrutType.kind == TypeKind::Object || scrutType.kind == TypeKind::Reference);
+            if (!isTuple) {
+                error(t.paren, "a tuple pattern requires a tuple value, not '" + typeName(scrutType) + "'");
+                return;
+            }
+            auto it = classRegistry.find(scrutType.className);
+            if (it == classRegistry.end()) { error(t.paren, "unknown tuple type '" + scrutType.className + "'"); return; }
+            const auto& order = it->second.fieldOrder;
+            if (order.size() != t.elems.size()) {
+                error(t.paren, "tuple pattern has " + std::to_string(t.elems.size())
+                      + " element(s) but the tuple has " + std::to_string(order.size()));
+                return;
+            }
+            for (size_t i = 0; i < t.elems.size(); ++i)
+                checkPattern(*t.elems[i], it->second.fields.at(order[i]).type, t.paren);
+        },
+        [&](const StructPat& s) {
+            if (scrutType.kind != TypeKind::Object && scrutType.kind != TypeKind::Reference) {
+                error(s.typeName, "a struct pattern requires a class value, not '" + typeName(scrutType) + "'");
+                return;
+            }
+            if (scrutType.className != s.typeName.lexeme) {
+                error(s.typeName, "pattern type '" + s.typeName.lexeme + "' does not match the value type '"
+                      + typeName(scrutType) + "'");
+                return;
+            }
+            auto it = classRegistry.find(scrutType.className);
+            if (it == classRegistry.end()) { error(s.typeName, "unknown class '" + scrutType.className + "'"); return; }
+            for (const auto& fp : s.fields) {
+                const Token&   field = fp.first;
+                const Pattern& sub   = *fp.second;
+                auto fit = it->second.fields.find(field.lexeme);
+                if (fit == it->second.fields.end()) {
+                    error(field, "class '" + scrutType.className + "' has no field '" + field.lexeme + "'");
+                    continue;
+                }
+                checkPattern(sub, fit->second.type, field);
+            }
+        },
+    }, *pattern.node);
+}
+
+void SemanticAnalyzer::checkMatchReachability(const std::deque<MatchArm>& arms) {
+    bool sawIrrefutable = false;
+    for (const MatchArm& arm : arms) {
+        if (sawIrrefutable) {
+            error(arm.arrow, "unreachable match arm: an earlier pattern already matches every value");
+            return;
+        }
+        if (patternIsIrrefutable(arm.pattern)) sawIrrefutable = true;
+    }
+}
+
+void SemanticAnalyzer::analyzeMatchArm(const MatchArm& arm, const Type& scrutineeType,
+                                       Type* expectedResult, const Token& matchTok) {
+    enterScope();
+    if (!isError(scrutineeType))
+        checkPattern(arm.pattern, scrutineeType, matchTok);
+    if (expectedResult) {
+        if (arm.valueExpr) {
+            Type v = (expectedResult->kind == TypeKind::Error)
+                       ? analyzeExpr(*arm.valueExpr)
+                       : analyzeWithExpected(*arm.valueExpr, *expectedResult);
+            if (expectedResult->kind == TypeKind::Error && !isError(v))
+                *expectedResult = v;
+            else if (!isError(*expectedResult) && !isError(v))
+                checkCast(v, *expectedResult, exprFirstToken(*arm.valueExpr), "match arm value");
+        } else if (arm.block) {
+            switchExprResultStack_.push_back(*expectedResult);   // `yield` targets this arm's result
+            analyzeStmt(*arm.block);
+            switchExprResultStack_.pop_back();
+            if (!blockAlwaysYields(*arm.block))
+                error(arm.arrow, "every path through a match-expression block arm must 'yield' a value");
+        }
+    } else {
+        if (arm.valueExpr)  analyzeExpr(*arm.valueExpr);
+        else if (arm.block) analyzeStmt(*arm.block);
+    }
+    exitScope();
+}
+
+void SemanticAnalyzer::analyzeMatchStmt(const MatchStmt& matchStmt) {
+    Type scrutineeType = analyzeExpr(matchStmt.scrutinee);
+    checkMatchReachability(matchStmt.arms);
+    for (const MatchArm& arm : matchStmt.arms)
+        analyzeMatchArm(arm, scrutineeType, /*expectedResult=*/nullptr, matchStmt.keyword);
+}
+
+Type SemanticAnalyzer::analyzeMatchExpr(const MatchExpr& matchExpr) {
+    // Result type = the contextual expected type (captured before analyzing the scrutinee), else
+    // inferred from the first arm. A value object can't be produced by value — require a reference.
+    Type result = expectedType_.has_value() ? *expectedType_ : Type{TypeKind::Error};
+    if (result.kind == TypeKind::Object) {
+        error(matchExpr.keyword, "a match expression cannot produce a value object '"
+              + result.className + "'; use a reference");
+        result = Type{TypeKind::Error};
+    }
+    Type scrutineeType = analyzeExpr(*matchExpr.scrutinee);
+    checkMatchReachability(matchExpr.arms);
+    for (const MatchArm& arm : matchExpr.arms)
+        analyzeMatchArm(arm, scrutineeType, &result, matchExpr.keyword);
+
+    bool exhaustive = false;
+    for (const MatchArm& arm : matchExpr.arms)
+        if (patternIsIrrefutable(arm.pattern)) { exhaustive = true; break; }
+    if (!exhaustive)
+        error(matchExpr.keyword, "a match expression must be exhaustive: add a wildcard '_' or a binding arm");
 
     return isError(result) ? Type{TypeKind::Error} : result;
 }

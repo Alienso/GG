@@ -319,6 +319,22 @@ private:
     // it starts as Error to infer from the first arm).
     void analyzeSwitchArm(const SwitchArm& arm, const Type& scrutineeType,
                           Type* expectedResult, const Token& switchTok);
+
+    // ---- match / patterns ----
+    void analyzeMatchStmt(const MatchStmt& matchStmt);
+    [[nodiscard]] Type analyzeMatchExpr(const MatchExpr& matchExpr);
+    // Analyze one match arm: check its pattern against the scrutinee type (declaring bindings in a
+    // fresh scope), then its body. `expectedResult` non-null ⇒ expression form (arm value/yield
+    // checked against it, inferred from the first arm when it starts as Error).
+    void analyzeMatchArm(const MatchArm& arm, const Type& scrutineeType,
+                         Type* expectedResult, const Token& matchTok);
+    // Type-check a pattern against the value type it destructures, declaring each binding into the
+    // current scope. Records literal-sub-pattern equality classifications (for codegen) via
+    // classifyEquality. `at` is a token for diagnostics.
+    void checkPattern(const Pattern& pattern, const Type& scrutType, const Token& at);
+    // (`patternIsIrrefutable` is a free function in Ast.h — shared with control-flow analysis.)
+    // Report an arm that can never match because an earlier arm's pattern is irrefutable.
+    void checkMatchReachability(const std::deque<MatchArm>& arms);
     // Report duplicate case labels that are compile-time identifiable (int/char/bool/string
     // literals, negated int literals, enum variants, and identifier labels).
     void checkDuplicateLabels(const std::deque<SwitchArm>& arms);

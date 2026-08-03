@@ -1,0 +1,47 @@
+// e2e/tuple_test.gg — anonymous tuple types & literals (Phase A). Multiple return values, nested
+// tuples, `._0`/`._1` access, and an object-element tuple (`(String, i32)`) that deep-clones its
+// element. Exit 0 = all checks held; a non-zero exit names the failing scenario.
+
+import "std/String.gg";
+
+// Multiple return values via a tuple return-alias.
+fn divmod(i32 a, i32 b) -> (i32, i32) out {
+    out = (a / b, a % b);
+    return out;
+}
+
+fn primitives() -> i32 {
+    (i32, i32) r = divmod(17, 5);
+    if (r._0 != 3) { return 11; }         // 17 / 5
+    if (r._1 != 2) { return 12; }         // 17 % 5
+
+    // A tuple built inline, then read back.
+    (i32, bool) t = (42, true);
+    if (t._0 != 42) { return 13; }
+    if (!t._1)      { return 14; }
+    return 0;
+}
+
+fn nested() -> i32 {
+    ((i32, i32), i32) n = ((1, 2), 3);
+    if (n._0._0 != 1) { return 21; }
+    if (n._0._1 != 2) { return 22; }
+    if (n._1    != 3) { return 23; }
+    return 0;
+}
+
+fn objectElement() -> i32 {
+    String hi("hello");
+    (String, i32) p = (hi, 5);            // hi borrowed & deep-cloned into _0
+    if (p._1 != 5)                { return 31; }
+    if (p._0.byteLength() != 5)   { return 32; }
+    if (!p._0.equals(hi))         { return 33; }   // independent copy, equal by value
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 r1 = primitives();    if (r1 != 0) { return r1; }
+    i32 r2 = nested();        if (r2 != 0) { return r2; }
+    i32 r3 = objectElement(); if (r3 != 0) { return r3; }
+    return 0;
+}

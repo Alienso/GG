@@ -64,6 +64,13 @@ struct GenericRegistry {
     // lambda argument can infer its parameter/return types from the callee's `Call(…)` bound.
     std::unordered_map<std::string, std::pair<std::vector<Token>, Token>> callTraitSigs;
 
+    // Tuple types: synthesized value-object class name (e.g. "Tuple$i32$str") → its ordered element
+    // TYPE tokens. Recorded when a `(T1, T2, …)` tuple type is parsed; the concrete class (fields
+    // `_0 … _n` + a positional constructor) is synthesized ONCE in runMonomorphization and appended
+    // to the Program, so semantics/codegen treat a tuple as an ordinary value object (struct layout,
+    // clone, dtor, structeq — no back-end changes). Shared across files; deduped by the mangled name.
+    std::unordered_map<std::string, std::vector<Token>> tupleRequests;
+
     // ---- Module namespacing (shared across files) ----
     // module name → simple top-level decl names it declares, split by kind because they qualify
     // differently: a TYPE name (class/enum/trait/annotation) is qualified in every position, while a
@@ -219,6 +226,10 @@ private:
     // single synthesized IDENTIFIER token with lexeme "<Class>&".
     Token consumeType();
     Token consumeTypeCore();   // consumeType without the trailing `?` (nullable) handling
+    // A tuple type `(T1, T2, …)` (arity ≥ 2). Parses the element types, mangles a canonical class
+    // name `Tuple$<m1>$<m2>…`, records a synthesis request in `gen_->tupleRequests`, and returns a
+    // single synthesized IDENTIFIER token with that name (an ordinary value-object type downstream).
+    Token consumeTupleType();
 
     // ---- Generics helpers ----
     bool tryCaptureFunctionTemplate();                       // capture a generic fn decl
@@ -252,6 +263,12 @@ private:
     // prefix, and a trailing `&`): `User&` / `ref:User` / `User?` → `User`; `i32` → `i32`.
     [[nodiscard]] static std::string genericArgBaseName(const Token& typeToken);
     void runMonomorphization(Program& program);
+    // Synthesize a concrete value-object ClassDeclStmt for every recorded tuple type (fields
+    // `_0 … _n` + a positional constructor) and append it to `program.declarations`, deduped by the
+    // mangled name. Object-typed elements take a reference constructor parameter (`ElemType&`) that
+    // clones into the value field, mirroring an embedded value-object field. Runs after the
+    // monomorphization worklist (so tuples discovered during it are included), before reflection.
+    void synthesizeTupleClasses(Program& program);
 
     // ---- Compile-time reflection expansion (runs at the end of runMonomorphization) ----
     // Build className -> ordered instance-field-name list from parsed ClassDeclStmts, then expand
@@ -346,6 +363,12 @@ private:
     [[nodiscard]] Stmt      parseYieldStmt();
     [[nodiscard]] Expr      parseSwitchExpr();
     [[nodiscard]] std::deque<SwitchArm> parseSwitchArmBlock();
+    // `match` — destructuring pattern match. Statement + expression forms share the arm-block parser
+    // (mirrors switch); `parsePattern` is the recursive-descent pattern grammar.
+    [[nodiscard]] Stmt      parseMatchStmt();
+    [[nodiscard]] Expr      parseMatchExpr();
+    [[nodiscard]] std::deque<MatchArm> parseMatchArmBlock();
+    [[nodiscard]] Pattern   parsePattern();
     [[nodiscard]] Stmt      parseExprStmt();
 
     // ---- Expression parsers (low to high precedence) ----

@@ -261,6 +261,22 @@ private:
     std::string genUnary(const UnaryExpr& unary, const Type& resolvedType);
     std::string genBinary(const BinaryExpr& binary, const Type& resolvedType);
     std::string genSwitchExpr(const SwitchExpr& switchExpr, const Type& resolvedType);
+
+    // ---- match / patterns ----
+    void        genMatchStmt(const MatchStmt& matchStmt);
+    std::string genMatchExpr(const MatchExpr& matchExpr, const Type& resolvedType);
+    // Arm-lowering skeleton (mirrors genSwitchArms): per arm, emit the pattern test-tree + bindings
+    // and cond-branch to the arm body or the next test.
+    void genMatchArms(const std::deque<MatchArm>& arms, const std::string& scrutPlace,
+                      const Type& scrutType, const std::string& mergeLabel,
+                      const std::function<void(const MatchArm&)>& emitArmBody);
+    // Emit the boolean test for `pattern` against the value stored at `place` (a ptr to a value of
+    // `pType`), registering each binding into allocaMap/varTypeMap. Returns an i1 SSA value, or the
+    // literal "true" for an irrefutable pattern.
+    std::string emitPatternTest(const Pattern& pattern, const std::string& place, const Type& pType);
+    // Materialize a scrutinee as a *place* — a ptr to its storage. An object is already its address;
+    // every other value (primitive / enum / reference / …) is spilled to a fresh alloca.
+    std::string materializeScrutinee(const std::string& scrutVal, const Type& scrutType);
     // Emit `lhs == rhs` (or `!=` when `op` is BANG_EQUAL) as an i1, choosing the path recorded by
     // semantics (value-object structural / reference or enum identity / Eq-impl method / primitive).
     // Operands are already-evaluated SSA values (value objects → their address). Switch labels pass

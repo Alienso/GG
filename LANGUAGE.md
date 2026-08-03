@@ -571,6 +571,78 @@ i32 y = switch (n) {
 - The scrutinee is evaluated once. A switch expression may produce a primitive, `bool`, `char`,
   enum, or reference — **not** a value object (bind it through a reference instead).
 
+### Tuples — `(T1, T2, …)`
+
+A **tuple** groups two or more values of possibly-different types without declaring a named class —
+handy for multiple return values and ad-hoc pairs. A tuple is a **value object** (it lives on the
+stack and copies by value); fields are positional and accessed as `._0`, `._1`, …:
+
+```gg
+fn divmod(i32 a, i32 b) -> (i32, i32) out {
+    out = (a / b, a % b);          // a tuple literal
+    return out;
+}
+
+(i32, i32) q = divmod(17, 5);
+i32 whole = q._0;                  // 3
+i32 rest  = q._1;                  // 2
+
+((i32, i32), str) nested = ((1, 2), "hi");
+i32 inner = nested._0._1;          // 2  — tuples nest
+```
+
+- **Arity ≥ 2.** `(x)` is just a parenthesized expression; `()` is reserved.
+- A tuple **literal** takes its type from context (a typed variable, a parameter, a return type), so
+  `(1, 2)` needs a known tuple type at the use site — annotate the binding (`var t = (1, 2)` can't
+  infer a tuple type).
+- Elements are **value or primitive types** in v1 (a class value like `String` is fine and is
+  deep-copied in; references `&`/borrows `*`/nullable `?` elements are not yet allowed).
+- Because a tuple is an object, a tuple **parameter is passed by reference** like any object — write
+  `fn f((i32, i32)* pair)` (a borrow), not a bare value parameter.
+
+### match — destructuring patterns
+
+`match` takes a value apart by **shape**. Unlike `switch` (which compares the scrutinee to label
+*values*), a `match` arm is a **pattern** that can bind variables. It comes in a statement form and an
+expression form:
+
+```gg
+fn swap((i32, i32)* pair) -> (i32, i32) out {
+    match pair {
+        (a, b) -> { out = (b, a); return out; }     // bind a = pair._0, b = pair._1
+    }
+    return out;
+}
+
+fn classify(Point* p) -> i32 {
+    match p {
+        Point{ x: 0, y } -> { return 100 + y; }     // x must equal 0; bind y
+        Point{ x, y }    -> { return x + y; }        // catch-all (must come AFTER the specific arm)
+    }
+    return -1;
+}
+
+i32 label = match n {                                // expression form
+    0 -> 10;
+    1 -> 20;
+    _ -> n;                                          // `_` = wildcard
+};
+```
+
+Pattern kinds: **wildcard** `_`, **binding** `name` (matches anything, binds it), **literal**
+(`0`, `"hi"`, `true`, an enum variant — compared with `==`), **tuple** `(p0, p1)`, and **struct**
+`Class{ field: subpat, field }` (a bare `field` binds that field by name). Patterns **nest**
+(`((a, b), c)`, `Point{ x: 0, y }`).
+
+- A **match expression must be exhaustive** — include a wildcard/binding arm (or a pattern that
+  matches everything). A match *statement* need not be.
+- Arms are tried top to bottom; an arm that can never be reached (it follows a pattern that already
+  matches everything) is a **compile error** — put specific patterns before general ones.
+- `yield expr;` supplies a match-expression block arm's value (as in `switch`); a bare `return`
+  inside a block arm returns from the enclosing function.
+- **Deferred** (v1): enum-payload patterns (`Some(x)`), list/collection patterns (`(x:xs)`),
+  or-patterns, `if` guards, ranges, and `var (a, b) = …` destructuring bindings.
+
 ---
 
 ## 6. Functions

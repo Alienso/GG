@@ -6,6 +6,8 @@ import "std/array.gg";
 import "std/string.gg";
 import "std/number.gg";
 
+import "std/io.gg";
+
 class Instance{
     i32 x;
     i32 y;
@@ -23,9 +25,9 @@ fn main() -> i32 {
     array[0] = 54;
     putchar(array[0]);*/
 
-    i32? x = Integer.parseInt("5");
+    i32? x = Integer.parseInt("500");
     if (x != null){
-        putchar(x + 48);
+        print(x);
     }
 
     return 0;

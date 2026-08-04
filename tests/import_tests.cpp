@@ -95,6 +95,27 @@ TEST_CASE("ImportResolver - duplicate import is only included once", "[import]")
     REQUIRE(result.declarations.size() == 4);
 }
 
+#ifdef _WIN32
+TEST_CASE("ImportResolver - case-variant spellings of one file dedup on Windows", "[import]") {
+    // On a case-insensitive filesystem, "GgCaseLib.gg" and "ggcaselib.gg" are the SAME file. Importing
+    // it under two spellings (one importer each) must be deduped, or its class would be redefined
+    // ("class 'X' is already defined") — the std_lib.gg regression that motivated the dedup-key fix.
+    writeTempFile("GgCaseLib.gg", "class CaseC { i32 x; CaseC(i32 v){ this.x = v; } }");
+    writeTempFile("gg_case_mid.gg", "import \"ggcaselib.gg\";\nfn midC() -> i32 { return 1; }");
+    std::string rootPath = writeTempFile("gg_case_root.gg",
+        "import \"GgCaseLib.gg\";\nimport \"gg_case_mid.gg\";\nfn rootC() -> i32 { return 0; }");
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(rootPath);
+
+    int caseC = 0;
+    for (const auto& d : result.declarations)
+        if (const auto* c = std::get_if<ClassDeclStmt>(d.node.get()))
+            if (c->name.lexeme == "CaseC") ++caseC;
+    REQUIRE(caseC == 1);   // deduped despite the case-variant import spellings
+}
+#endif
+
 TEST_CASE("ImportResolver - transitive import works end-to-end", "[import]") {
     // io.gg depends on mem.gg; root depends on io.gg.
     writeTempFile("gg_mem.gg",  "extern malloc(u64 size) -> ptr;");

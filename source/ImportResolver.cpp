@@ -7,10 +7,26 @@
 #include "lexer/Token.h"
 #include "parser/Parser.h"
 
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 
 namespace fs = std::filesystem;
+
+// Dedup key for an already-resolved canonical path. On Windows the filesystem is case-insensitive, so
+// "String.gg" and "string.gg" name the SAME file — importing both spellings (e.g. one file imports
+// "std/String.gg" and another "std/string.gg") must be treated as ONE import, or the file is parsed
+// twice and its classes are redefined ("class 'String' is already defined"). Lowercasing the key folds
+// the spellings together. On a case-sensitive filesystem the two are genuinely distinct files, so the
+// key is left unchanged there. (`weakly_canonical` normalizes `.`/`..`/separators but preserves case,
+// so it alone does not dedup case-variant spellings.)
+static std::string dedupKey(const fs::path& canonical) {
+    std::string s = canonical.string();
+#ifdef _WIN32
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+#endif
+    return s;
+}
 
 // ============================================================
 // Public entry point
@@ -102,8 +118,9 @@ void ImportResolver::scanModules(const std::string& filePath,
     if (ec || !fs::exists(canonical)) return;
 
     std::string canonicalStr = canonical.string();
-    if (visitedPaths.count(canonicalStr)) return;
-    visitedPaths.insert(canonicalStr);
+    std::string key = dedupKey(canonical);
+    if (visitedPaths.count(key)) return;
+    visitedPaths.insert(key);
 
     std::vector<std::string> paths{ canonicalStr };
     Lexer lexer(paths);
@@ -133,8 +150,9 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
     if (ec || !fs::exists(canonical)) return;
 
     std::string canonicalStr = canonical.string();
-    if (visitedPaths.count(canonicalStr)) return;
-    visitedPaths.insert(canonicalStr);
+    std::string key = dedupKey(canonical);
+    if (visitedPaths.count(key)) return;
+    visitedPaths.insert(key);
 
     std::vector<std::string> paths{ canonicalStr };
     Lexer lexer(paths);
@@ -168,8 +186,9 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
     if (ec || !fs::exists(canonical)) return {};
 
     std::string canonicalStr = canonical.string();
-    if (visitedPaths.count(canonicalStr)) return {};
-    visitedPaths.insert(canonicalStr);
+    std::string key = dedupKey(canonical);
+    if (visitedPaths.count(key)) return {};
+    visitedPaths.insert(key);
 
     std::vector<std::string> paths{ canonicalStr };
     Lexer lexer(paths);
@@ -222,8 +241,9 @@ Program ImportResolver::processFile(const std::string& filePath) {
     }
 
     std::string canonicalString = canonical.string();
-    if (processedPaths.count(canonicalString)) return Program{};
-    processedPaths.insert(canonicalString);  // mark before recursing — breaks cycles
+    std::string dedup = dedupKey(canonical);
+    if (processedPaths.count(dedup)) return Program{};
+    processedPaths.insert(dedup);  // mark before recursing — breaks cycles
 
     // Collect class names from this file and all its transitive imports so that
     // cross-file constructor calls ("ClassName varName(args)") are recognised as

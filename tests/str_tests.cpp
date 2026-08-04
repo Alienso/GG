@@ -172,3 +172,87 @@ TEST_CASE("str - String(str) constructs from a literal without strlen", "[str][s
     REQUIRE(ir.find("@String_String") != std::string::npos);
     REQUIRE(ir.find("extractvalue { ptr, i64 }") != std::string::npos);   // reads literal.len
 }
+
+// ------------------------------------------------------------
+// Indexing — `s[i]` is the i-th byte as a `char`
+// ------------------------------------------------------------
+
+TEST_CASE("str - indexing yields a char", "[str]") {
+    auto result = analyzeString(R"(
+        fn main() -> i32 { str s = "ABC"; char c = s[0]; return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("str - indexing lowers to extract data ptr + GEP + load i8 + zext", "[str][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 { str s = "ABC"; char c = s[1]; return 0; }
+    )");
+    REQUIRE(ir.find("extractvalue { ptr, i64 }") != std::string::npos);   // data pointer
+    REQUIRE(ir.find("getelementptr i8, ptr")     != std::string::npos);   // byte address
+    REQUIRE(ir.find("zext i8")                   != std::string::npos);   // byte -> char (i32)
+}
+
+TEST_CASE("str - indexing bounds-checks the index against .len", "[str][codegen]") {
+    auto ir = codegenString(R"(
+        fn main() -> i32 { str s = "ABC"; char c = s[1]; return 0; }
+    )");
+    // The byte length (field 1) is extracted and the index is `icmp ult`-compared against it,
+    // branching to an abort() on out-of-bounds (traps like a fixed-size array index).
+    REQUIRE(ir.find("extractvalue { ptr, i64 }") != std::string::npos);   // .len (field 1)
+    REQUIRE(ir.find("icmp ult i64")              != std::string::npos);   // idx < len
+    REQUIRE(ir.find("@abort()")                  != std::string::npos);   // OOB trap
+}
+
+TEST_CASE("str - an indexed byte is usable in arithmetic as a char", "[str]") {
+    // `(s[i] as i32) - 48` — the digit-parsing idiom.
+    auto result = analyzeString(R"(
+        fn main() -> i32 { str s = "7"; i32 d = (s[0] as i32) - 48; return d; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("str - a non-integer index is rejected", "[str][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 { str s = "ABC"; char c = s["x"]; return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("index must be an integer"));
+}
+
+TEST_CASE("str - write-through 's[i] = x' is rejected with a clear message", "[str][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 { str s = "ABC"; s[0] = 'Z'; return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("immutable view"));   // not "cannot be indexed" — reads DO work
+}
+
+TEST_CASE("str - a `str` field can be indexed", "[str]") {
+    // `obj.field[i]` where the field is a str: the member access yields the { ptr, i64 } value,
+    // then the str-index path applies.
+    auto result = analyzeString(R"(
+        class C { str name; C(str n) { this.name = n; } fn first() -> char { return this.name[0]; } }
+        fn main() -> i32 { C c("hi"); return 0; }
+    )", defaultTestOptions());
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("str - a call-result str can be indexed", "[str]") {
+    // The receiver is evaluated once (the call), then the byte is extracted.
+    auto result = analyzeString(R"(
+        fn label() -> str { return "hi"; }
+        fn main() -> i32 { char c = label()[0]; return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("str - a reflection @typeName view is indexable", "[str][reflect]") {
+    // @typeName(T) is a str, so it supports the same byte indexing.
+    auto result = analyzeString(R"(
+        fn main() -> i32 { char c = @typeName(i32)[0]; return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

@@ -532,9 +532,23 @@ not `-Debug`, which PowerShell reserves as a common parameter on advanced script
   param-spill loop and each `genVarDecl` branch (scalars/refs/enums/`ptr`/objects; arrays and static
   locals are skipped). `this` is not declared (it's the `%self` value, not an alloca). A `str` value
   is a precise `DW_TAG_structure_type` (`{ ptr data; u64 len }`, 128 bits) — see the `str` invariant.
-- **v1 limitation**: a single `DIFile` = the main source; lines from imported files map against it
-  (multi-file line attribution deferred — `Token` carries only a line, not a source-file identity;
-  function-granularity attribution via a per-file `DIFile` map is the intended fix).
+- **Multi-file attribution (function granularity)**: each user function/method is attributed to its
+  **declaring source file** — a per-file `!DIFile` (cached in `dbgFileIds_`, keyed by source path;
+  `dbgFileFor(path)` creates/reuses it, `dbgInit` seeds the main file so it isn't duplicated). The
+  declaring path comes from the `sourceFile` field on `FunctionDeclStmt`/`ClassDeclStmt`/
+  `ImplDeclStmt`/`EnumDeclStmt` (stamped by the parser; the same field the semantic error-attribution
+  uses), threaded into `dbgBeginFunction(..., sourceFile)` (and `genMethod(..., sourceFile)`). The
+  `!DISubprogram` `scope`/`file` and its `!DILocalVariable`s use `currentDbgFileId_` (the function's
+  file), not the main file — so a debugger stepping into an imported function (e.g. `Integer::parseInt`
+  from `number.gg`) lands in the right file, not the main source. The `!DICompileUnit` still points at
+  the main file (one CU, many files — the standard layout). `dbgEndFunction` resets `currentDbgFileId_`
+  to the main file. Type-composite members (`str`/object) still reference the main `!DIFile`
+  (cosmetic; not a line-attribution concern).
+- **v1 limitation (residual)**: attribution is **function-granular**, not statement-granular — every
+  statement of a function maps to that function's file (correct, since a function can't span files).
+  Generic instantiations attribute to whatever file the monomorphizer re-parse ran under (usually
+  correct; the mangled instantiation carries the template's tokens). `Token` still carries only a
+  line, not a per-token source identity — fine for the function-granular model.
 
 ## Architecture summary
 
@@ -969,6 +983,15 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   exceptions), else passes the ptr through. `?:` (`analyzeElvis`/`genElvis`) selects the non-null
   operand via a result slot. `== null` / `!= null` route through `classifyEquality`'s new null case
   → the address-identity `icmp eq/ne ptr …, null` path.
+- **A nullable operand is rejected by every NON-equality operator** (`analyzeBinary` after the
+  equality case, and `analyzeUnary` up front): arithmetic / bitwise / shift / relational / unary
+  `!`/`-` all error on an `isNullable` operand ("narrow it with a null check … or unwrap with `!!`").
+  This is load-bearing for nullable **primitives** — the operand's `Type::kind` is the *underlying*
+  kind (an `i32?` has `kind == I32`), so the `isNumeric(kind)` checks would otherwise wave it through
+  and codegen would silently `extractvalue` the payload even when null. The `isNullable` flag is the
+  only thing distinguishing `i32?` from `i32` at an operator, so it must be checked explicitly. After
+  a narrowing (`if (x != null)`, a guard clause, or `x!!`) `analyzeIdentifier` returns the
+  `stripNullable` type, so the operand is non-nullable there and the operators apply normally.
 - **Smart-casts** (`Symbol::isNarrowedNonNull`, snapshotted like `isInitialized`): `if (x != null)`
   narrows the then-branch, `if (x == null)` the else; **guard clauses** (`if (x == null) { return; }`
   → non-null after) reuse `alwaysReturns`; branch joins merge (non-null iff on every reaching path).
@@ -1308,11 +1331,22 @@ refcount. `String` (the heap class) is unchanged and distinct.
   `@typeName(T).len` and `.data` work; `f.name`/`v.name` were already `str` (they lower to string
   literals). `analyzeReflect(TypeName)` → `Str`; `genReflect(TypeName)` materializes the `{ptr,i64}`
   view over its private NUL-terminated constant.
+- **Indexing** `s[i]`: the i-th **UTF-8 byte** as a `char` (u8 zero-extended to i32 — a code point).
+  **Bounds-checked** — unlike a raw pointer, a `str` carries its length (field 1), so `genIndex`
+  extracts `.len` and traps (`abort()`) on an out-of-range index, exactly like a fixed-size array
+  (the shared `emitBoundsCheckValue(idx, lenOperand)` helper — an `icmp ult i64` that also catches
+  negatives, since they wrap to huge unsigned; `emitBoundsCheck` for arrays now delegates to it with
+  a constant size). Built in as a `TypeKind::Str` case in `analyzeIndex` (returns `Char`; the
+  index-must-be-integer check already precedes it) and `genIndex` (extract data ptr + len from
+  `{ptr,i64}`, bounds-check, `getelementptr i8`, `load i8`, `zext to i32`). Built *in the compiler*
+  because `str` is a primitive and cannot carry a user `Index` impl. `s[i] = …` (write-through) is
+  **not** supported — `str` is an immutable view over static bytes. Enables the digit-parsing idiom
+  `(s[i] as i32) - 48` and byte iteration `while (i < (s.len as i32)) { … s[i] … }`.
 - **Deferred, rejected with a clean semantic error (never miscompiled)**: `==`/`!=` on `str`
   (`classifyEquality` guards it before the numeric fall-through), relational ops (numeric check),
   `str + str` (numeric check), and `str?` (`resolveTypeToken` rejects it alongside `ptr?`/`void?`).
-  Also deferred: `str` indexing/slicing/concat. A `str` value-object **field** works (POD `{ptr,i64}`,
-  memberwise-copied). Tests: `tests/str_tests.cpp` (`[str]`), `e2e/str_test.gg`.
+  Also deferred: `str` slicing/concat and `s[i] =` write-through. A `str` value-object **field** works
+  (POD `{ptr,i64}`, memberwise-copied). Tests: `tests/str_tests.cpp` (`[str]`), `e2e/str_test.gg`.
 
 ### Destructors
 - Declared as `~ClassName()` (no params, implicitly void). At most one per class.
@@ -1439,6 +1473,45 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1149 test cases / 2150 assertions** (as of a **nullable-operand soundness fix** — a nullable
+primitive was silently accepted by arithmetic/comparison/unary operators: the operand's `Type::kind`
+is the underlying kind (`i32?` → `kind == I32`), so `isNumeric(kind)` waved it through and codegen
+`extractvalue`d the payload with **no null check** — `x + 1` on a possibly-null `i32?` "worked". Fixed
+in `analyzeBinary` (after the equality case, so `== null` still works) and `analyzeUnary` (up front):
+any `isNullable` operand on a non-equality operator is a clean error directing the user to a null
+check or `!!`. After narrowing (`if (x != null)`, a guard-clause `if (x == null) { return; }`, or
+`x!!`) the operand is `stripNullable`d and the operators apply normally. Confirmed guard-clause
+narrowing works (it reuses `alwaysReturns`). See the nullable invariant; `tests/nullable_tests.cpp`
+(`[nullable]`, +7 cases). Prior baseline was
+**1142 test cases / 2139 assertions** (as of **multi-file debug-info attribution** — a user
+function/method is now attributed to its **declaring source file** via a per-file `!DIFile`
+(`dbgFileIds_` cache + `dbgFileFor`), so a debugger stepping into an imported function lands in the
+right file instead of the main source (the old single-`DIFile` limitation). The declaring path is the
+`sourceFile` field on the decl (parser-stamped, shared with the semantic error-attribution work),
+threaded into `dbgBeginFunction`/`genMethod`; the `!DISubprogram` scope/file and `!DILocalVariable`s
+use the function's file (`currentDbgFileId_`), while the `!DICompileUnit` stays the main file.
+Function-granular (a function can't span files); debug still off by default (IR byte-identical when
+off). See the debug-info invariant; `tests/debug_tests.cpp` (`[debug]`, +1 multi-file case). Prior
+baseline was
+**1141 test cases / 2136 assertions** (as of a **QA pass over `str`/`[]` indexing** — verified the
+edge cases: index integer-type variety (`u8`/`i64`/`u32`), a **call-result** `str` (`label()[0]`), a
+`str` **field** (`obj.name[i]`), a reflection `@typeName(T)` view, negative/empty/OOB indices all
+trapping at runtime, and the array `[]` runtime bounds check still trapping after the
+`emitBoundsCheck`→`emitBoundsCheckValue` refactor. The pass improved one thing: `s[i] = …`
+write-through now errors with a **dedicated** message ("a 'str' is an immutable view … reads 's[i]'
+are allowed") instead of the generic "cannot be indexed" (which contradicted working reads).
+`tests/str_tests.cpp` (`[str]`, +5 cases). Prior baseline was
+**1137 test cases / 2131 assertions** (as of **`str` indexing — `s[i]` yields the i-th byte as a
+`char`, bounds-checked** — a built-in index on the primitive `str` type: `analyzeIndex` gains a
+`TypeKind::Str` case returning `Char`, and `genIndex` lowers it to extract-data-ptr + extract-len
+(fields 0/1 of `{ptr,i64}`) → **bounds check against `.len`** (traps `abort()` on OOB, like a
+fixed-size array — via the shared `emitBoundsCheckValue(idx, lenOperand)` helper, which `icmp ult
+i64`-compares and also catches negatives; `emitBoundsCheck` for arrays now delegates to it with a
+constant size) → `getelementptr i8` → `load i8` → `zext to i32`. No write-through (`str` is an
+immutable view). Built in the compiler because `str` is a primitive and can't carry a user `Index`
+impl. Enables the digit-parsing idiom `(s[i] as i32) - 48` and byte iteration
+`while (i < (s.len as i32)) { … s[i] … }` (exercised by `stdlib/number.gg`'s `parseInt`). See the
+"`str`" invariant; `tests/str_tests.cpp` (`[str]`, +5 cases), `e2e/str_test.gg`. Prior baseline was
 **1132 test cases / 2121 assertions** (as of **variadic parameters — compile-time type packs** —
 `fn f<...Ts>(fixed…, Ts... args)`: a heterogeneous variadic collects its trailing args into a **tuple
 pack** at the call site (deduced at parse time — literals default-typed, identifiers/ctor/`new`), the

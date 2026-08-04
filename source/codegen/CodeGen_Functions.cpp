@@ -46,7 +46,7 @@ void CodeGen::genClassDecl(const ClassDeclStmt& classDecl) {
     // Emit each method. The destructor is generated separately (genDestructor)
     // so that reference-field releases can be appended to its body.
     for (const MethodDecl& md : classDecl.methods)
-        if (!md.isDestructor) genMethod(className, md);
+        if (!md.isDestructor) genMethod(className, md, classDecl.sourceFile);
 
     if (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
         genDestructor(classDecl);
@@ -81,7 +81,7 @@ void CodeGen::genEnumDecl(const EnumDeclStmt& enumDecl) {
 
     // Emit constructor + regular methods (mangled exactly like class methods).
     for (const MethodDecl& md : enumDecl.methods)
-        genMethod(enumName, md);
+        genMethod(enumName, md, enumDecl.sourceFile);
 }
 
 void CodeGen::genEnumInit(const Program& program) {
@@ -302,7 +302,7 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
 
     if (debug_)
         dbgBeginFunction(function.name.lexeme, emitName, function.name.line,
-                         paramTypes, logicalRet, false, "");
+                         paramTypes, logicalRet, false, "", function.sourceFile);
 
     // Bind the slot name directly to the sret pointer and zero-init the object in place.
     if (sret) {
@@ -328,7 +328,8 @@ void CodeGen::genFunction(const FunctionDeclStmt& function) {
     currentBasicBlock = nullptr;
 }
 
-void CodeGen::genMethod(const std::string& className, const MethodDecl& method) {
+void CodeGen::genMethod(const std::string& className, const MethodDecl& method,
+                        const std::string& sourceFile) {
     // Reset per-function state
     tempCounter = 0; labelCounter = 0;
     allocaMap.clear(); varTypeMap.clear();
@@ -386,7 +387,7 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method) 
                            : method.isConstructor ? className
                            : (className + "::" + method.name.lexeme);
         dbgBeginFunction(pretty, mangledName, method.name.line, paramTypes, logicalRet,
-                         !method.isStatic, className);
+                         !method.isStatic, className, sourceFile);
     }
 
     if (!method.isStatic) {

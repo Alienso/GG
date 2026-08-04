@@ -1,0 +1,23 @@
+// e2e/io_print_test.gg — exercises IO.print's two-digit-per-iteration integer formatting across
+// every integer width/signedness, including each type's MIN/MAX edge. Prints the values (visual
+// check) and returns 0 on a clean run (regression smoke test: compiles + runs without a crash).
+import "std/IO.gg";
+
+fn main() -> i32 {
+    print(0);            putchar(10);
+    print(9);            putchar(10);
+    print(10);           putchar(10);
+    print(12345);        putchar(10);
+    print(-7);           putchar(10);
+    print(-2147483648);  putchar(10);   // i32 MIN
+
+    i8  a = -128;                print(a); putchar(10);   // i8  MIN
+    u8  b = 255;                 print(b); putchar(10);   // u8  MAX
+    i16 c = -32768;              print(c); putchar(10);   // i16 MIN
+    u16 d = 65535;               print(d); putchar(10);   // u16 MAX
+    i64 e = -9223372036854775808; print(e); putchar(10);  // i64 MIN
+    u64 f = 18446744073709551615; print(f); putchar(10);  // u64 MAX
+
+    println(42);                                          // print + newline
+    return 0;
+}

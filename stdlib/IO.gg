@@ -1,10 +1,96 @@
-import "std/crt/cio.gg"
+import "std/crt/cio.gg";
+import "std/String.gg";
 
 
-fn print(i32 n) {  }
-fn print(u64 n) {  }
+// ============================================================
+// Integer printing — two decimal digits per iteration (the Java Integer.getChars / C++
+// std::to_chars technique). A single 200-char rodata table holds the pairs "00".."99"; indexing it
+// at r*2 yields the two ASCII digit bytes of any r in 0..99. Doing ÷100 / %100 (two digits at a time)
+// halves the number of divisions vs the naive ÷10 loop — division is the expensive step.
+//
+// ONE table serves EVERY integer width and signedness, because the table is pure digits — it knows
+// nothing about the value's type. Only the driver differs, and both drivers reduce to a single core:
+//   • signed   i8/i16/i32/i64  → widen to i64, work in the NEGATIVE domain so each type's MIN_VALUE
+//                                (whose magnitude overflows the type) is still representable;
+//   • unsigned u8/u16/u32/u64  → widen to u64, work in the positive domain (no sign, no MIN edge).
+// Each 0..99 chunk is written least-significant-first into a small stack buffer, then flushed left to
+// right. Buffer size 24 covers u64's 20 digits and i64's 19 digits + slack.
+// ============================================================
+
+fn private digitPairs() -> str {
+    return "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+}
+
+// Emit the decimal digits of a NON-POSITIVE i64 (m <= 0) — the sign, if any, is printed by the caller.
+fn private emitNeg(i64 m) {
+    char[24] buf;
+    str t = digitPairs();
+    mut i32 pos = 24;
+    mut i64 n = m;
+    while (n <= -100) {
+        i64 q = n / 100;
+        i32 r = (q * 100 - n) as i32;      // 0..99  (q*100 - n == |n| % 100, since n <= 0)
+        n = q;
+        pos = pos - 1; buf[pos] = t[r * 2 + 1];
+        pos = pos - 1; buf[pos] = t[r * 2];
+    }
+    i32 last = (0 - n) as i32;             // 0..99  (n is now in -99..0)
+    if (last >= 10) {
+        pos = pos - 1; buf[pos] = t[last * 2 + 1];
+        pos = pos - 1; buf[pos] = t[last * 2];
+    } else {
+        pos = pos - 1; buf[pos] = (48 + last) as char;
+    }
+    mut i32 i = pos;
+    while (i < 24) { putchar(buf[i] as i32); i = i + 1; }
+}
+
+// Emit the decimal digits of a u64 (positive domain — no sign, no MIN edge case).
+fn private emitPos(u64 m) {
+    char[24] buf;
+    str t = digitPairs();
+    mut i32 pos = 24;
+    mut u64 n = m;
+    while (n >= 100) {
+        u64 q = n / 100;
+        i32 r = (n - q * 100) as i32;      // 0..99
+        n = q;
+        pos = pos - 1; buf[pos] = t[r * 2 + 1];
+        pos = pos - 1; buf[pos] = t[r * 2];
+    }
+    i32 last = n as i32;                   // 0..99
+    if (last >= 10) {
+        pos = pos - 1; buf[pos] = t[last * 2 + 1];
+        pos = pos - 1; buf[pos] = t[last * 2];
+    } else {
+        pos = pos - 1; buf[pos] = (48 + last) as char;
+    }
+    mut i32 i = pos;
+    while (i < 24) { putchar(buf[i] as i32); i = i + 1; }
+}
+
+// Signed integers: widen to i64 and route through the negative-domain core.
+fn print(i64 n) {
+    if (n < 0) {
+        putchar(45);              // '-'
+        emitNeg(n);               // already <= 0 — pass through, no overflowing negation
+    } else {
+        emitNeg(0 - n);           // -n is in [MIN + 1, 0] for n in [0, MAX]: always safe
+    }
+}
+fn print(i32 n) { print(n as i64); }
+fn print(i16 n) { print(n as i64); }
+fn print(i8  n) { print(n as i64); }
+
+// Unsigned integers: widen to u64 and route through the positive-domain core.
+fn print(u64 n) { emitPos(n); }
+fn print(u32 n) { print(n as u64); }
+fn print(u16 n) { print(n as u64); }
+fn print(u8  n) { print(n as u64); }
+
 fn print(f64 x) {  }
 fn print(bool b) {  }
 fn print(String& s) {  }
 fn print(str s) {  }
-fn println(i32 n) mut { print(n); putchar(10); }
+
+fn println(i32 n) { print(n); putchar(10); }

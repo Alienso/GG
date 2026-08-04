@@ -107,9 +107,18 @@ s.data                // the underlying pointer (ptr), NUL-terminated, for FFI/C
 - `s.data` gives a NUL-terminated `ptr`; a `str` also **implicitly decays to `ptr`**, so a literal can
   be passed straight to a `ptr`/`extern` parameter: `puts("hi")` works. (The reverse — a raw `ptr` to
   a `str` — is **not** allowed, since a pointer carries no length.)
+- **Indexing** `s[i]` gives the i-th **byte** as a `char` (a code point). It is **bounds-checked** —
+  an out-of-range index aborts at runtime (like a fixed-size array). So the digit-parsing idiom and
+  byte iteration work:
+  ```
+  i32 digit = (s[0] as i32) - 48;              // '7' -> 7
+  i32 i = 0;
+  while (i < (s.len as i32)) { use(s[i]); i = i + 1; }
+  ```
+  (`s[i] = …` write-through is not allowed — a `str` is an immutable view.)
 - Build a heap `String` from a literal with `String("...")` (its constructor takes a `str`).
-- v1 limits: no indexing / slicing / concatenation / `==` on `str` yet, and `str?` is unsupported —
-  use `String` for those.
+- v1 limits: no slicing / concatenation / `==` on `str` yet, and `str?` is unsupported — use `String`
+  for those.
 
 ### Class types
 

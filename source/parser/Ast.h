@@ -481,6 +481,7 @@ struct ClassDeclStmt {
     // (const string members) — making it neither copyable nor noexcept-moveable.
     std::deque<MethodDecl> methods;
     std::deque<AnnotationApp> annotations{};  // `@Name(...)` prefixes on the class
+    std::string sourceFile{};   // declaring file (for error attribution across imports)
 };
 
 // A compile-time annotation type: `annotation Name { <const fields> }`. Purely reflective — it
@@ -505,6 +506,7 @@ struct EnumDeclStmt {
     std::deque<FieldDecl>    fields;
     // std::deque for the same reason as ClassDeclStmt::methods.
     std::deque<MethodDecl>   methods;
+    std::string              sourceFile{};   // declaring file (for error attribution across imports)
 };
 
 // ---- Stmt wrapper ----
@@ -521,6 +523,7 @@ struct ImplDeclStmt {
     Token                  traitName;
     Token                  typeName;
     std::deque<MethodDecl> methods;
+    std::string            sourceFile{};   // declaring file (for error attribution across imports)
 };
 
 struct Stmt {

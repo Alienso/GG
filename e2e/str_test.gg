@@ -42,5 +42,30 @@ fn main() -> i32 {
     if (cs.byteLength() != 5) { return 10; }   // 5 bytes
     if (cs.length()     != 4) { return 11; }   // 4 codepoints
 
+    // Indexing: s[i] is the i-th byte as a char (u8 zero-extended to a code point).
+    str abc = "ABC";
+    if (abc[0] != 'A') { return 12; }
+    if (abc[2] != 'C') { return 13; }
+
+    // The digit-parsing idiom: (byte as i32) - '0'.
+    str num = "7";
+    i32 digit = (num[0] as i32) - 48;
+    if (digit != 7) { return 14; }
+
+    // Iterate the bytes and sum their code points ('A'+'B'+'C' = 65+66+67 = 198).
+    str seq = "ABC";
+    mut i32 sum = 0;
+    mut i32 i = 0;
+    while (i < (seq.len as i32)) {
+        sum = sum + (seq[i] as i32);
+        i = i + 1;
+    }
+    if (sum != 198) { return 15; }
+
+    // Bounds check: the last valid index (len-1) is in bounds and must not trap. (An out-of-bounds
+    // index like s[len] aborts at runtime — exercised in the unit tests, not here where exit 0 is
+    // the success signal.)
+    if (seq[(seq.len as i32) - 1] != 'C') { return 16; }
+
     return 0;
 }

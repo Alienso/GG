@@ -10,13 +10,16 @@ void CodeGen::ensureAbortDeclared() {
 }
 
 void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {
-    std::string sizeStr  = std::to_string(arraySize);
+    emitBoundsCheckValue(indexValue, std::to_string(arraySize));
+}
+
+void CodeGen::emitBoundsCheckValue(const std::string& indexValue, const std::string& lengthValue) {
     std::string okLabel  = freshLabel("bounds.ok");
     std::string oobLabel = freshLabel("bounds.oob");
 
     std::string cmp = freshTemp();
     // icmp ult catches negative indices too: negative i64 values are huge unsigned numbers
-    emit("%" + cmp + " = icmp ult i64 " + indexValue + ", " + sizeStr);
+    emit("%" + cmp + " = icmp ult i64 " + indexValue + ", " + lengthValue);
     emitCondBr("%" + cmp, okLabel, oobLabel);
 
     switchBlock(oobLabel);

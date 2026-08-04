@@ -295,7 +295,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             // An impl block's methods are emitted as methods on the target class.
             const auto& impl = std::get<ImplDeclStmt>(*decl.node);
             for (const MethodDecl& md : impl.methods)
-                genMethod(impl.typeName.lexeme, md);
+                genMethod(impl.typeName.lexeme, md, impl.sourceFile);
         }
     }
 

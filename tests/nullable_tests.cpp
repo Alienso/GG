@@ -687,3 +687,72 @@ TEST_CASE("Nullable - a nullable enum works as a switch scrutinee with a `null` 
     )");
     REQUIRE_FALSE(r.hadError);
 }
+
+// A nullable primitive must be narrowed / unwrapped before arithmetic — without this the operand's
+// underlying kind (i32) would slip through the numeric checks and the payload would be used even when
+// null. (Regression: this was silently accepted before.)
+TEST_CASE("Nullable - arithmetic on a bare nullable primitive is rejected", "[nullable][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { return x + 1; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("nullable"));
+}
+
+TEST_CASE("Nullable - a unary operator on a bare nullable primitive is rejected", "[nullable][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { return -x; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("nullable"));
+}
+
+TEST_CASE("Nullable - a comparison on a bare nullable primitive is rejected", "[nullable][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> bool { return x < 5; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("nullable"));
+}
+
+TEST_CASE("Nullable - arithmetic is allowed inside an `if (x != null)` narrowing", "[nullable][semantic]") {
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { if (x != null) { return x + 1; } return 0; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Nullable - arithmetic is allowed after a guard-clause `if (x == null) return;`", "[nullable][semantic]") {
+    // The guard exits on null (alwaysReturns), so the fall-through narrows x to a non-null i32.
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { if (x == null) { return 0; } return x + 1; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Nullable - a non-exiting `if (x == null)` block does NOT narrow the fall-through", "[nullable][semantic]") {
+    // The guard body doesn't return, so on the join x may still be null → arithmetic is rejected.
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { if (x == null) { } return x + 1; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("nullable"));
+}
+
+TEST_CASE("Nullable - `!!` unwrap re-enables arithmetic", "[nullable][semantic]") {
+    auto r = analyzeString(R"(
+        fn f(i32? x) -> i32 { return x!! + 1; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}

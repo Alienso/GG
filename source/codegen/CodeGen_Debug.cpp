@@ -93,21 +93,38 @@ int CodeGen::dbgAdd(const std::string& body) {
     return id;
 }
 
-void CodeGen::dbgInit() {
+// Create (or reuse) a !DIFile for a source path. Splits into filename + directory the same way for
+// every file. An empty path resolves to the main source's file (dbgFileId_). Cached by raw path so a
+// file shared by many functions emits a single !DIFile.
+int CodeGen::dbgFileFor(const std::string& path) {
     namespace fs = std::filesystem;
-    std::string filename = "unknown.gg", directory = ".";
-    if (!dbgSourceFile_.empty()) {
-        try {
-            fs::path p(dbgSourceFile_);
-            filename  = p.filename().string();
-            directory = p.parent_path().string();
-        } catch (...) { filename = dbgSourceFile_; }
-    }
+    if (path.empty()) return dbgFileId_;
+    auto it = dbgFileIds_.find(path);
+    if (it != dbgFileIds_.end()) return it->second;
+
+    std::string filename = path, directory = ".";
+    try {
+        fs::path p(path);
+        filename  = p.filename().string();
+        directory = p.parent_path().string();
+    } catch (...) { filename = path; }
     if (filename.empty())  filename  = "unknown.gg";
     if (directory.empty()) directory = ".";
 
-    dbgFileId_ = dbgAdd("!DIFile(filename: \"" + dbgEscape(filename)
-                        + "\", directory: \"" + dbgEscape(directory) + "\")");
+    int id = dbgAdd("!DIFile(filename: \"" + dbgEscape(filename)
+                    + "\", directory: \"" + dbgEscape(directory) + "\")");
+    dbgFileIds_[path] = id;
+    return id;
+}
+
+void CodeGen::dbgInit() {
+    // The compile-unit file is the main source; register it in the per-file cache too so a function
+    // declared in the main source reuses this exact !DIFile (no duplicate node).
+    std::string mainPath = dbgSourceFile_.empty() ? std::string("unknown.gg") : dbgSourceFile_;
+    dbgFileId_          = -1;                  // so dbgFileFor doesn't short-circuit to itself
+    dbgFileId_          = dbgFileFor(mainPath);
+    currentDbgFileId_   = dbgFileId_;
+
     dbgCUId_   = dbgAdd("distinct !DICompileUnit(language: DW_LANG_C, file: !"
                         + std::to_string(dbgFileId_)
                         + ", producer: \"GG\", isOptimized: false, runtimeVersion: 0, "
@@ -249,10 +266,16 @@ int CodeGen::dbgTypeOf(const Type& t) {
 
 void CodeGen::dbgBeginFunction(const std::string& prettyName, const std::string& linkageName,
                                int line, const std::vector<Type>& paramTypes,
-                               const Type& returnType, bool hasThis, const std::string& thisClass) {
+                               const Type& returnType, bool hasThis, const std::string& thisClass,
+                               const std::string& sourceFile) {
     if (!debug_ || !currentFunction) return;
     dbgLineCache_.clear();
     if (line <= 0) line = 1;
+
+    // Attribute this function to its DECLARING source file (a per-file !DIFile), so a debugger
+    // stepping into an imported function lands in the right file — not the main source. Falls back
+    // to the main file when the declaring source is unknown.
+    currentDbgFileId_ = dbgFileFor(sourceFile);
 
     std::string types;
     auto addType = [&](int id) {
@@ -270,8 +293,8 @@ void CodeGen::dbgBeginFunction(const std::string& prettyName, const std::string&
     int subrType   = dbgAdd("!DISubroutineType(types: !" + std::to_string(typesTuple) + ")");
     int sp = dbgAdd("distinct !DISubprogram(name: \"" + dbgEscape(prettyName)
                     + "\", linkageName: \"" + dbgEscape(linkageName)
-                    + "\", scope: !" + std::to_string(dbgFileId_)
-                    + ", file: !"  + std::to_string(dbgFileId_)
+                    + "\", scope: !" + std::to_string(currentDbgFileId_)
+                    + ", file: !"  + std::to_string(currentDbgFileId_)
                     + ", line: "   + std::to_string(line)
                     + ", type: !"  + std::to_string(subrType)
                     + ", scopeLine: " + std::to_string(line)
@@ -284,6 +307,7 @@ void CodeGen::dbgBeginFunction(const std::string& prettyName, const std::string&
 
 void CodeGen::dbgEndFunction() {
     currentSubprogram_ = -1;
+    currentDbgFileId_  = dbgFileId_;   // back to the main file for anything emitted between functions
     currentDbgLoc_.clear();
     dbgLineCache_.clear();
 }
@@ -320,7 +344,7 @@ void CodeGen::dbgDeclare(const std::string& allocaPtr, const std::string& name,
     std::string argPart = argIndex > 0 ? (", arg: " + std::to_string(argIndex)) : "";
     int var = dbgAdd("!DILocalVariable(name: \"" + dbgEscape(name) + "\"" + argPart
                      + ", scope: !" + std::to_string(currentSubprogram_)
-                     + ", file: !"  + std::to_string(dbgFileId_)
+                     + ", file: !"  + std::to_string(currentDbgFileId_)
                      + ", line: "   + std::to_string(line)
                      + ", type: !"  + std::to_string(ty) + ")");
 

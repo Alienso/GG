@@ -406,9 +406,11 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     std::string         savedSlot       = currentReturnSlotName_;
     bool                savedAliasRef   = currentReturnAliasIsRef_;
     std::string         savedFile       = currentFile_;
+    std::string         savedFilename   = filename;   // error attribution — report the declaring file
     currentReturnType = resolveTypeToken(functionDecl.returnType);
     loopDepth         = 0;  // loops in the outer scope do not extend into this function
     currentFile_      = functionDecl.sourceFile;  // for the cross-file private-call warning
+    if (!functionDecl.sourceFile.empty()) filename = functionDecl.sourceFile;
 
     // Gate raw pointer types behind --unsafe-ptr.
     checkRawPtrAllowed(functionDecl.returnType, functionDecl.name);
@@ -465,6 +467,7 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     currentReturnSlotName_   = savedSlot;
     currentReturnAliasIsRef_ = savedAliasRef;
     currentFile_             = savedFile;
+    filename                 = savedFilename;
 }
 
 void SemanticAnalyzer::analyzeExternFuncDecl(const ExternFuncDeclStmt& externDecl) {
@@ -483,6 +486,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
 
     std::string savedClassName = currentClassName;
     currentClassName          = className;
+    std::string savedFilename  = filename;   // report errors against the class's declaring file
+    if (!classDecl.sourceFile.empty()) filename = classDecl.sourceFile;
 
     // Gate raw pointer field types behind --unsafe-ptr, and type-check the constant
     // initializer of each static field against its declared type.
@@ -583,6 +588,7 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     }
 
     currentClassName = savedClassName;
+    filename         = savedFilename;
 }
 
 // Analyse the method bodies of an `impl Trait for Type { … }` block. The methods were
@@ -594,8 +600,10 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
 
     std::string savedClassName = currentClassName;
     std::string savedSelfType  = currentSelfType_;
+    std::string savedFilename  = filename;
     currentClassName = type;
     currentSelfType_ = type;
+    if (!impl.sourceFile.empty()) filename = impl.sourceFile;
 
     for (const MethodDecl& md : impl.methods) {
         if (!md.hasBody) continue;   // impl methods always have bodies; defensive
@@ -663,6 +671,7 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
 
     currentClassName = savedClassName;
     currentSelfType_ = savedSelfType;
+    filename         = savedFilename;
 }
 
 // ============================================================
@@ -706,8 +715,10 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
 
     std::string savedClassName = currentClassName;
     bool        savedIsEnum    = currentClassIsEnum;
+    std::string savedFilename  = filename;
     currentClassName   = enumName;
     currentClassIsEnum = true;
+    if (!enumDecl.sourceFile.empty()) filename = enumDecl.sourceFile;
 
     // Gate raw pointer field types behind --unsafe-ptr.
     for (const FieldDecl& fd : enumDecl.fields)
@@ -819,4 +830,5 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
 
     currentClassName   = savedClassName;
     currentClassIsEnum = savedIsEnum;
+    filename           = savedFilename;
 }

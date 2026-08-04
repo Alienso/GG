@@ -143,7 +143,9 @@ Stmt Parser::parseClassDecl() {
     parseMemberList(name, fields, methods, /*allowDestructor=*/true, /*isEnum=*/false);
 
     consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
-    return makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
+    Stmt s = makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
+    std::get<ClassDeclStmt>(*s.node).sourceFile = filename;   // for cross-import error attribution
+    return s;
 }
 
 // A run of `@Name` / `@Name(arg, …)` annotation prefixes in declaration position. Args are ordinary
@@ -256,10 +258,14 @@ Stmt Parser::parseImplDecl() {
         std::vector<Token> paramTypes;
         for (const ParamDecl& p : callMethod->params) paramTypes.push_back(p.typeName);
         std::string canon = canonicalCallTrait(paramTypes, callMethod->returnType);
-        return makeStmt(ImplDeclStmt{ Token{ TokenType::IDENTIFIER, canon, traitName.line },
-                                      typeName, std::move(methods) });
+        Stmt s = makeStmt(ImplDeclStmt{ Token{ TokenType::IDENTIFIER, canon, traitName.line },
+                                        typeName, std::move(methods) });
+        std::get<ImplDeclStmt>(*s.node).sourceFile = filename;
+        return s;
     }
-    return makeStmt(ImplDeclStmt{ traitName, typeName, std::move(methods) });
+    Stmt s = makeStmt(ImplDeclStmt{ traitName, typeName, std::move(methods) });
+    std::get<ImplDeclStmt>(*s.node).sourceFile = filename;
+    return s;
 }
 
 Stmt Parser::parseEnumDecl() {
@@ -296,7 +302,9 @@ Stmt Parser::parseEnumDecl() {
     parseMemberList(name, fields, methods, /*allowDestructor=*/true, /*isEnum=*/true);
 
     consume(TokenType::RIGHT_BRACE, "expected '}' after enum body");
-    return makeStmt(EnumDeclStmt{ name, std::move(variants), std::move(fields), std::move(methods) });
+    Stmt s = makeStmt(EnumDeclStmt{ name, std::move(variants), std::move(fields), std::move(methods) });
+    std::get<EnumDeclStmt>(*s.node).sourceFile = filename;
+    return s;
 }
 
 void Parser::parseMemberList(const Token& name,

@@ -147,14 +147,18 @@ private:
     bool        debug_ = false;
     std::string dbgSourceFile_;            // main source path → DWARF DIFile
     int         dbgNextId_ = 0;            // next "!N" metadata id
-    int         dbgFileId_ = -1;           // !DIFile
+    int         dbgFileId_ = -1;           // !DIFile of the MAIN source (compile-unit file)
     int         dbgCUId_   = -1;           // !DICompileUnit
     int         currentSubprogram_ = -1;   // !DISubprogram of the function being emitted (-1 = none)
+    int         currentDbgFileId_  = -1;   // !DIFile of the function being emitted (its declaring source)
     std::string currentDbgLoc_;            // ", !dbg !N" suffix appended by emit() (empty ⇒ none)
     std::unordered_map<int, int>         dbgLineCache_;  // line → !DILocation id (per function; cleared each fn)
     std::unordered_map<std::string, int> dbgTypeCache_;  // type key → !DIType id
+    std::unordered_map<std::string, int> dbgFileIds_;    // source path → !DIFile id (multi-file attribution)
     // Append a "!<id> = <body>" metadata node; returns its id.
     int  dbgAdd(const std::string& body);
+    // !DIFile id for a source path (cached). Empty path ⇒ the main source's file.
+    int  dbgFileFor(const std::string& path);
     // !DIType id for a GG type (a distinct sentinel of -1 means the DWARF `null` type, i.e. void).
     int  dbgTypeOf(const Type& t);
     // Byte (size, alignment) of a GG type, matching the LLVM struct layout used for `%Class`.
@@ -163,7 +167,7 @@ private:
     // Begin/end a user function's debug scope: create its !DISubprogram, attach it, set the line.
     void dbgBeginFunction(const std::string& prettyName, const std::string& linkageName, int line,
                           const std::vector<Type>& paramTypes, const Type& returnType, bool hasThis,
-                          const std::string& thisClass);
+                          const std::string& thisClass, const std::string& sourceFile = std::string());
     void dbgEndFunction();
     void dbgSetLine(int line);   // update currentDbgLoc_ to a !DILocation for `line`
     void dbgStmtLine(const Stmt& stmt);   // set the current line from a statement's leading token
@@ -221,7 +225,8 @@ private:
     // Lower a `static <prim> name = const;` local: emit a persistent global, map the
     // name to it, and queue its initializer for pre-main execution.
     std::string genStaticLocal(const VarDeclExpr& varDecl);
-    void genMethod(const std::string& className, const MethodDecl& method);
+    void genMethod(const std::string& className, const MethodDecl& method,
+                   const std::string& sourceFile = std::string());
     // Generate @Class_dtor: runs the user destructor body (if any), then releases
     // each reference field in reverse declaration order. Emitted for any class that
     // has a user destructor or any reference field.
@@ -401,6 +406,9 @@ private:
     // ---- Bounds check helpers ----
     void ensureAbortDeclared();
     void emitBoundsCheck(const std::string& indexValue, size_t arraySize);
+    // Runtime-length variant: `lengthValue` is an i64 SSA operand (e.g. a `str`'s .len), not a
+    // compile-time constant. Traps (abort) when indexValue (i64) is out of [0, lengthValue).
+    void emitBoundsCheckValue(const std::string& indexValue, const std::string& lengthValue);
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

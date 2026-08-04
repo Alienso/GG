@@ -139,3 +139,39 @@ TEST_CASE("Debug - a reference variable is a pointer type", "[debug][codegen]") 
     REQUIRE(ir.find("!DIDerivedType(tag: DW_TAG_pointer_type, baseType: null, size: 64)") != std::string::npos);
     REQUIRE(ir.find("!DILocalVariable(name: \"r\"") != std::string::npos);
 }
+
+// Multi-file attribution: a function declared in an imported file gets its OWN !DIFile, so a
+// debugger stepping into it lands in the right source — not the main file. (Regression test for the
+// old single-DIFile limitation, where every function was attributed to the main source.)
+TEST_CASE("Debug - an imported function is attributed to its own source file", "[debug][codegen]") {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path();
+    std::string helperName = "dbg_helper_" + std::to_string(_getpid()) + ".gg";
+    fs::path helperPath = dir / helperName;
+    fs::path mainPath   = dir / ("dbg_main_" + std::to_string(_getpid()) + ".gg");
+
+    {
+        std::ofstream h(helperPath);
+        h << "class Integer {\n"
+             "    fn static parseInt(str s) -> i32 { i32 n = 0; return n; }\n"
+             "}\n";
+    }
+    {
+        std::ofstream m(mainPath);
+        m << "import \"" << helperName << "\";\n"
+             "fn main() -> i32 { i32 x = Integer.parseInt(\"5\"); return x; }\n";
+    }
+
+    CompilerOptions opts = debugOptions();
+    opts.sourceFile = mainPath.string();
+    std::string ir = codegenFile(mainPath.string(), opts);
+
+    fs::remove(helperPath);
+    fs::remove(mainPath);
+
+    // Two distinct !DIFile nodes: the main and the imported helper.
+    REQUIRE(ir.find("!DIFile(filename: \"" + mainPath.filename().string() + "\"")   != std::string::npos);
+    REQUIRE(ir.find("!DIFile(filename: \"" + helperName + "\"")                     != std::string::npos);
+    // The imported method's subprogram exists (it is attributed to the helper file's DIFile).
+    REQUIRE(ir.find("!DISubprogram(name: \"Integer::parseInt\"") != std::string::npos);
+}

@@ -1484,6 +1484,27 @@ std::string CodeGen::genIndex(const IndexExpr& indexExpr) {
         return genTraitMethodCall(&indexExpr, objType.className, "get", recv,
                                   { idxType }, { idx }, callRet);
     }
+    // `str` indexing: extract the data pointer (field 0) and byte length (field 1) of { ptr, i64 },
+    // bounds-check the index against the length (traps on OOB, like a fixed-size array), then GEP by
+    // the byte index, load the i8 byte, and zero-extend it to a `char` (i32).
+    if (objType.kind == TypeKind::Str) {
+        std::string strVal = genExpr(*indexExpr.object);
+        Type        idxTy  = exprType(*indexExpr.index);
+        std::string idxVal = genExpr(*indexExpr.index);
+        idxVal = emitCast(idxVal, idxTy, Type{TypeKind::I64});
+        std::string dataPtr = freshTemp();
+        emit("%" + dataPtr + " = extractvalue { ptr, i64 } " + strVal + ", 0");
+        std::string lenVal = freshTemp();
+        emit("%" + lenVal + " = extractvalue { ptr, i64 } " + strVal + ", 1");
+        ensureAbortDeclared();
+        emitBoundsCheckValue(idxVal, "%" + lenVal);
+        std::string bytePtr = freshTemp();
+        emit("%" + bytePtr + " = getelementptr i8, ptr %" + dataPtr + ", i64 " + idxVal);
+        std::string byte = emitLoad("i8", "%" + bytePtr);
+        std::string ch = freshTemp();
+        emit("%" + ch + " = zext i8 " + byte + " to i32");
+        return "%" + ch;
+    }
     std::string elementIrType;
     std::string elemPtr = genElementAddress(*indexExpr.object, *indexExpr.index, elementIrType);
     // Object element: yield the slot ADDRESS (objects are manipulated by address, matching the

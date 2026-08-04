@@ -1,14 +1,16 @@
-import "std/crt/cio.gg"
+import "std/crt/cio.gg";
 import "std/crt/cmem.gg";
 import "std/crt/cstring.gg";
 
 import "std/array.gg";
+import "std/string.gg";
+import "std/number.gg";
 
 class Instance{
     i32 x;
     i32 y;
 
-    Instance(x: i32, y: i32){
+    Instance(i32 x, i32 y){
         this.x = x;
         this.y = y;
     }
@@ -17,9 +19,14 @@ class Instance{
 fn main() -> i32 {
 
     puts("Hello world!");
-    Array<i32> array();
+    /*Array<i32> array();
     array[0] = 54;
-    putchar(array[0]);
+    putchar(array[0]);*/
+
+    i32? x = Integer.parseInt("5");
+    if (x != null){
+        putchar(x + 48);
+    }
 
     return 0;
 }

@@ -530,6 +530,15 @@ bool SemanticAnalyzer::incDecTargetOk(const Token& op, const std::string& name) 
 Type SemanticAnalyzer::analyzeUnary(const UnaryExpr& unary) {
     Type operandType = decayPrimitiveBorrow(analyzeExpr(*unary.operand));
 
+    // A nullable operand must be narrowed / unwrapped before a unary operator (`!x`, `-x`) — the
+    // operand's kind is the underlying kind, so the checks below would otherwise use the payload
+    // even when null. (`!!` and `?:` are their own expression nodes, not UnaryExpr.)
+    if (!isError(operandType) && operandType.isNullable) {
+        error(unary.operatorToken, "operand of unary '" + unary.operatorToken.lexeme + "' is nullable '"
+              + typeName(operandType) + "'; narrow it with a null check or unwrap it with `!!` first");
+        return Type{TypeKind::Error};
+    }
+
     switch (unary.operatorToken.type) {
         case TokenType::BANG:
             if (!isError(operandType) && !isBoolCompatible(operandType)) {
@@ -780,6 +789,20 @@ Type SemanticAnalyzer::analyzeBinary(const BinaryExpr& binary) {
         || binary.operatorToken.type == TokenType::BANG_EQUAL) {
         return classifyEquality(leftType, rightType, &binary, binary.operatorToken,
                                 "operator '" + binary.operatorToken.lexeme + "'");
+    }
+
+    // A nullable operand must be null-checked (narrowed) or unwrapped before any NON-equality
+    // operator — `== null` / `!= null` are handled just above. Otherwise `x + 1` on an `i32?` would
+    // silently use the payload even when x is null (the operand's kind is the underlying kind, so the
+    // numeric checks below would wave it through). Inside `if (x != null) { ... }` (or after a
+    // guard-clause `if (x == null) { return; }`) the binding is narrowed to a NON-nullable type, so
+    // this does not fire there.
+    if (leftType.isNullable || rightType.isNullable) {
+        const Type& nt = leftType.isNullable ? leftType : rightType;
+        error(binary.operatorToken, "operand of '" + binary.operatorToken.lexeme + "' is nullable '"
+              + typeName(nt) + "'; narrow it with a null check (e.g. `if (x != null) { ... }`) "
+                "or unwrap it with `!!` first");
+        return Type{TypeKind::Error};
     }
 
     // Operator overloading (non-equality): if the left operand is a class, desugar to its trait
@@ -1763,9 +1786,15 @@ Type SemanticAnalyzer::analyzeIndex(const IndexExpr& indexExpr) {
     if (objectType.kind == TypeKind::TypedPtr)
         return typedPtrElement(objectType);
 
+    // `str` indexing: `s[i]` is the i-th UTF-8 byte, zero-extended to a `char`. No bounds check
+    // (like a raw pointer) — the byte view is deliberately low-level (codepoint decoding is a
+    // `String` concern). Built in here because `str` cannot carry a user `Index` impl.
+    if (objectType.kind == TypeKind::Str)
+        return Type{TypeKind::Char};
+
     error(site, "cannot index a value of type " + typeName(objectType)
         + " with '[]'; indexing works on a fixed-size array 'T[N]', a raw pointer 'ptr<T>', "
-          "or a class that implements the 'Index' trait");
+          "a 'str', or a class that implements the 'Index' trait");
     return Type{TypeKind::Error};
 }
 
@@ -1825,10 +1854,16 @@ Type SemanticAnalyzer::analyzeIndexAssign(const IndexAssignExpr& indexAssign) {
                         "container), and memberwise copy would alias that buffer. Define an "
                         "'impl Clone for " + elementType.className + "' to deep-copy it.");
         }
+    } else if (objectType.kind == TypeKind::Str) {
+        error(site, "cannot assign through 'str' indexing: a 'str' is an immutable view over static "
+                    "bytes (reads 's[i]' are allowed, but 's[i] = ...' is not); build a 'String' for a "
+                    "mutable text buffer");
+        analyzeExpr(*indexAssign.value);
+        return Type{TypeKind::Error};
     } else {
         error(site, "cannot index a value of type " + typeName(objectType)
             + " with '[]'; indexing works on a fixed-size array 'T[N]', a raw pointer 'ptr<T>', "
-              "or a class that implements the 'Index' trait");
+              "a 'str' (read-only), or a class that implements the 'Index' trait");
         analyzeExpr(*indexAssign.value);
         return Type{TypeKind::Error};
     }

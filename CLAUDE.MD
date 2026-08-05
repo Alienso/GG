@@ -380,6 +380,22 @@ produces a block arm's value in the expression form.
   `sw.merge` block. `break`/`continue` inside an arm bind to an enclosing loop (switch pushes nothing
   on the loop stacks). Not an LLVM `switch` instruction (labels may be arbitrary `eq` calls).
 
+### Ternary conditional — `cond ? a : b`
+A C-style ternary, implemented as a **parser-only desugar** to a switch **expression** — so it adds
+**no** AST node and **no** semantic/codegen. `parseTernary` (`Parser_Expr.cpp`) sits between
+`parseAssignment` and `parseElvis` in the precedence ladder (`parseAssignment` calls it; it calls
+`parseElvis` for the condition), right-associative (`a ? b : c ? d : e` = `a ? b : (c ? d : e)`).
+- **Desugar**: `cond ? a : b` → `SwitchExpr{ scrutinee: cond, arms: [ case true -> a; default -> b ] }`
+  (a synthesized `true` `LiteralExpr` label + a `default` arm). The condition is an Elvis-level expr;
+  the middle is a full expression (`parseAssignment`); the else recurses (`parseTernary`).
+- **Reuses switch-expression semantics/codegen wholesale**: bool scrutinee compared to `true` via
+  `classifyEquality`, both branches unified to `expectedType_`, exhaustive via `default`, and the
+  result-slot lowering in `genSwitchExpr`. So a **non-bool condition** errors ("incompatible types in
+  switch case: T and bool" — the message leaks the desugar, a known cosmetic wart), and **value-object
+  branches** are rejected ("use a reference") exactly as in a switch expression. `?` lexes as a lone
+  `QUESTION` here (distinct from `?:`/`?.`/the `T?` type suffix), so there's no grammar conflict.
+- Tests: `tests/ternary_tests.cpp` (`[ternary]`).
+
 ### Lambdas & callable objects (`Call` trait)
 Any class implementing the **`Call` trait** is callable: `obj(args)` desugars to `obj.call(args)`.
 Lambdas `(params) -> [Ret] { body }` are **parser-only sugar** — they lower to a hoisted value-object
@@ -439,7 +455,11 @@ signature **and/or return type**. Enums are excluded (single ctor, no member ove
   `foo$i32$f64$ret$void`, ctor `Point_Point$i32$ret$void`. Applied **only when a name is
   actually overloaded** (decl count > 1) so non-overloaded symbols keep their plain names
   (`@foo`, `@Point_dist`) and existing IR-name assertions stay valid. `main`/`extern` never
-  mangled.
+  mangled. **Every mangled component must be a valid unquoted LLVM identifier** (`[A-Za-z$._0-9]`) —
+  `$` separates components, `.` marks a variant (`.ref`, `.arr`, and **nullable → `.opt`**). A nullable
+  type mangles as `<underlying>.opt` (`i32?` → `i32.opt`), **not** `typeName`'s `i32?` — a literal `?`
+  is not a legal symbol char and made clang reject the emitted `.ll` (e.g. an overloaded
+  `parseI32 -> i32?`).
 - **Semantic→codegen handoff**: `SemanticResult::resolvedCallee` (`const void*` call/new node
   address → chosen mangled name; empty ⇒ plain). Codegen: `overloadedBases_` + `freeFnBases_`
   computed in `generate()`; `genFunction`/`genMethod` emit `overloadEmittedName(...)`;
@@ -593,6 +613,16 @@ doesn't affect behavior (members resolve via `Parser.h`):
 Each of the three passes (`prescanTemplates`, `collectClassNames`, `processFile`) resolves an
 `import "..."` path through the **one** shared `resolveImportPath` helper, so they always agree on
 which file an import names.
+
+**Import dedup is case-insensitive on Windows** (`dedupKey`, `ImportResolver.cpp`). Every pass keys its
+visited/processed set on `dedupKey(canonical)` — `weakly_canonical(...).string()`, **lowercased on
+`_WIN32`** — instead of the raw canonical string. `weakly_canonical` normalizes `.`/`..`/separators but
+**preserves case**, so on a case-insensitive filesystem two spellings of one file (`import
+"std/String.gg"` in one file, `import "std/string.gg"` in another) would otherwise produce two distinct
+keys → the file is parsed twice → its classes are redefined ("class 'String' is already defined"). The
+lowercased key folds the spellings into one import. Guarded by `#ifdef _WIN32` so a genuinely
+case-sensitive filesystem keeps the two as distinct files. The real path (original case) is still used
+to read/lex the file; only the dedup *key* is lowercased.
 
 ### Module / import resolution — search roots + the `std/` anchor
 `import "path"` is resolved by `ImportResolver::resolveImportPath(importerDir, rawPath)` against a
@@ -1001,8 +1031,11 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   post-body narrowing (`mergeLoopNarrowing`) so a body can neither leak nor unsoundly keep a cast.
   **Bare local/param bindings only** (not field chains); `&&`-narrowing not done.
 - **Codegen**: nullable references need **no representation change** (still `ptr`); the smart-cast
-  is representation-transparent for references. Tests: `tests/nullable_tests.cpp` `[nullable]`,
-  `e2e/nullable_test.gg`.
+  is representation-transparent for references. A **nullable→nullable cast across payload widths**
+  (`i64? → i32?`) unpacks the `{ i1, iN }` (extract tag + payload), converts the payload through the
+  scalar rules, and re-wraps under the same tag — a plain `trunc`/`ext` on the whole struct is invalid
+  LLVM and was a real emitted-IR bug (only clang's verifier caught it; GG doesn't self-verify its IR
+  before handing off to clang). Tests: `tests/nullable_tests.cpp` `[nullable]`, `e2e/nullable_test.gg`.
 
 ### Brace construction — `Type{args}` (C++-style)
 Braces are an **alternate delimiter for a positional constructor call** — `Point{1, 2}` ≡
@@ -1054,6 +1087,11 @@ Implemented entirely at the literal-typing site: **no new type-kind, no codegen 
   `1 / 2` (no non-literal sibling) stays **integer** division (→ 0.0), and a *decimal* literal never
   adopts an integer sibling (`analyzeLiteral` keeps it f64), so `1.0 / count` stays float division.
   Function-argument literals still keep their default and reach the parameter via silent widening.
+- **Compound assignment** (`analyzeCompoundAssign`): the RHS is analysed with the target's type as the
+  expected type (`analyzeWithExpected(rhs, lhsType)`), so a bare literal adopts it — `u64 x; x *= 10;`
+  types `10` as u64 (no spurious i32→u64 narrowing warning). Literal-only, like the other binding
+  contexts: a **non-literal** RHS (an `i32` variable into a `u8 +=`) still warns on a genuine lossy
+  conversion via `checkCast`.
 - **Codegen** (`genLiteral`): emits the literal at its resolved semantic type. Integer literals are
   **masked to the target width** (`unsigned long long` parse, `& ((1<<bits)-1)`) so the constant is
   always a valid `iN` even when out of range — `i8 = 300` → `store i8 44`, not the malformed
@@ -1097,8 +1135,19 @@ byte-identical to before** — every check is gated on the flag.
   `emitOverflowTrap`. An **explicit `as` cast never traps** — `genCast` calls `emitCast(..., checked=false)`
   (intentional truncation, matching Rust/C); `emitCast`'s new trailing `bool checked = true` param
   defaults on so all *implicit* conversion sites are checked, and only `genCast` opts out.
-- **Trap** = `emitOverflowTrap(badCond)` (`CodeGen_Emit.cpp`): mirrors `emitBoundsCheck` — cond-branch
-  to an `abort()`+`unreachable` block (reusing `ensureAbortDeclared`), continue in a fresh block.
+- **Trap** = `emitOverflowTrap(badCond, what)` (`CodeGen_Emit.cpp`): mirrors `emitBoundsCheck` —
+  cond-branch to a block that prints a diagnostic then `abort()`s + `unreachable`, continue in a fresh
+  block. `what` is `"integer overflow"` (arithmetic) or `"value out of range in narrowing conversion"`
+  (checked `emitCast`).
+- **Runtime-panic messages** (`emitPanicMessage`, shared by the overflow, bounds/`str`-index, and `!!`
+  null-unwrap traps): before `abort()`, the trap block writes `GG runtime error: <what> at <file:line>`
+  to **stderr** via `fputs` + `__acrt_iob_func(2)` (the MinGW/UCRT stderr accessor; GG's target triple
+  is fixed to `x86_64-w64-windows-gnu`). The message is a compile-time-constant private `[N x i8]`
+  (no runtime formatting). The line comes from `currentStmtLine_` — tracked **unconditionally** by
+  `dbgStmtLine` (called at the top of `genStmt`), independent of `--debug`; the **filename** only
+  appears when `--debug` is on (that's the only time `dbgSourceFile_` is set), else the message reads
+  `at line N`. The bounds/`str` and `!!` traps always carry a message (they're not flag-gated); the
+  overflow message only exists when `--overflow-checks` emits the trap, so **default IR is unchanged**.
 - **Cost / rationale**: the overflow bit is free from the ALU; the added cost is a well-predicted
   not-taken branch (+ lost auto-vectorization at higher `-O`). At the default `-O0` the overhead is
   small. Compile-time-known-safe conversions (our untyped-literal adoption) never emit a check.
@@ -1442,6 +1491,12 @@ static fields keep external linkage, a no-op until separate compilation exists).
 - Lowering: one global per static field, `@ClassName$field = global <ir> zeroinitializer`.
   Initializers run before main in `@gg_static_init()`. Parser stores the initializer
   on `FieldDecl::initializer` (a `unique_ptr<Expr>`); `FieldDecl` also has `isStatic`.
+- **Static-field initializers adopt the field's declared type** (`analyzeClassDecl`, via
+  `analyzeWithExpected(*fd.initializer, fieldType)` — mirrors the local-var path): a bare numeric
+  literal takes the field type, so `static i64 X = 9223372036854775807;` types the literal **i64** and
+  stores the full 64-bit value — previously it defaulted to `i32`, warned "overflows i32", and
+  **truncated the constant** (a real miscompile for wide constants, not just a spurious warning). A
+  literal that genuinely doesn't fit the declared type still warns accurately ("does not fit in 'i32'").
 - `ClassName::field` / `ClassName::method(...)` parse to the same
   `MemberAccessExpr`/`MemberAssignExpr`/`MethodCallExpr` nodes as `obj.field` / `obj.m()`
   (the left identifier is resolved as a type name in semantics/codegen).
@@ -1473,6 +1528,70 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1176 test cases / 2201 assertions** (as of a **compound-assignment literal-adoption fix** — the RHS
+of a compound assignment is now analysed with the target's type as the expected type
+(`analyzeWithExpected`, mirroring var-init/assignment), so a bare literal adopts it: `u64 x; x *= 10;`
+types `10` as u64 instead of the i32 default, dropping a spurious "i32→u64 may lose data" warning. A
+non-literal RHS still warns on a genuine lossy conversion. See the numeric-literal adoption invariant;
+`tests/cast_tests.cpp` (`[numlit]`, +2 cases). Prior baseline was
+**1174 test cases / 2198 assertions** (as of **runtime-panic diagnostics** — the overflow,
+bounds/`str`-index, and `!!` null-unwrap traps now print `GG runtime error: <what> at <file:line>` to
+stderr (`fputs` + `__acrt_iob_func(2)`) before `abort()`, instead of dying silently. A shared
+`emitPanicMessage(what)` emits a compile-time-constant message; the line comes from `currentStmtLine_`
+(tracked unconditionally in `genStmt`, no `--debug` needed), the filename only when `--debug` is on.
+Overflow-trap messages are still flag-gated (default IR unchanged); bounds/`!!` always carry one. See
+the overflow-checks invariant; `tests/cast_tests.cpp` (`[overflow]`, +2) + `tests/str_tests.cpp`
+(bounds message). Prior baseline was
+**1172 test cases / 2192 assertions** (as of a **nullable-return overload-mangling fix** — an
+overloaded function returning a nullable primitive (e.g. `parseI32 -> i32?` vs `-> i64?`) emitted the
+LLVM symbol `@parseI32$str$ret$i32?` — but `?` is not a valid unquoted LLVM identifier char, so clang
+rejected the `.ll` ("expected '(' in function argument list"). `mangleType` didn't handle
+`Type::isNullable` and fell through to `typeName` (which renders `i32?`); it now mangles a nullable
+type as `<underlying>.opt` (`i32?` → `i32.opt`). See the overloading-mangling invariant;
+`tests/nullable_tests.cpp` (`[nullable]`, +1 case asserting no `?` in the IR). Prior baseline was
+**1171 test cases / 2189 assertions** (as of the **ternary conditional `cond ? a : b`** — a C-style
+ternary added as a **parser-only desugar** to a switch expression (`switch (cond) { case true -> a;
+default -> b; }`), so it needs **no** new AST node and **no** semantic/codegen. `parseTernary` sits
+between assignment and Elvis, right-associative. Reuses the switch-expression machinery wholesale
+(bool scrutinee, branch-type unification, exhaustiveness via `default`, result-slot codegen) — so a
+non-bool condition and value-object branches error exactly as in a switch expression. `?` lexes as a
+lone `QUESTION`, distinct from `?:`/`?.`/`T?`, so no grammar conflict. See the "Ternary conditional"
+invariant; `tests/ternary_tests.cpp` (`[ternary]`, 12 cases — incl. a QA pass confirming short-circuit
+evaluation via the null-guard idiom + separate-block lowering, nested ternary in the middle without
+parens, compound-assign RHS, and if-condition use; no ternary bugs found). Prior baseline was
+**1159 test cases / 2174 assertions** (as of a **QA-hardening pass over the two recent fixes** — no
+new bugs found; added regression coverage for the previously-untested code paths: nullable **widening**
+casts (`i32? → i64?` sext, `f64? → f32?` fptrunc — distinct from the narrowing case originally tested)
+and static fields of **non-i64** types (`u8`/`f32` literal adoption with no spurious narrowing warning,
+plus a genuinely-out-of-range `static u8 = 300` still warning accurately). Verified widening/float/
+unsigned/null across nullable width casts and f32/u8/negated-MIN/static-local for the initializer fix,
+all correct. `tests/nullable_tests.cpp` (+2), `tests/static_tests.cpp` (+3). Prior baseline was
+**1154 test cases / 2160 assertions** (as of a **static-field-initializer expected-type fix** — a
+static field's initializer is now analysed with the field's declared type as the expected type
+(`analyzeWithExpected`, mirroring the local-var path), so a bare numeric literal adopts it:
+`static i64 X = 9223372036854775807;` types the literal **i64** and stores the full value. Previously
+the literal defaulted to `i32`, warned "overflows i32", and **truncated the constant** — a real
+miscompile of wide stdlib constants (`Math.gg`'s `MAX_64_BIT_VALUE` etc.), masked as a mere warning.
+Genuinely-out-of-range literals still warn accurately ("does not fit in 'i32'"). See the static-members
+invariant; `tests/static_tests.cpp` (`[static]`, +2 cases). Prior baseline was
+**1152 test cases / 2156 assertions** (as of a **nullable-to-nullable width-cast codegen fix** — a
+cast between nullable primitives of different payload widths (`i64? → i32?`, e.g. `parseInt(...) as
+i32?` in `stdlib/Math.gg`) emitted `trunc { i1, i64 } to { i1, i32 }` — an invalid cast on the whole
+`{ i1, iN }` struct that only clang's verifier caught (a raw, non-human-readable error, since GG
+doesn't run the LLVM verifier on its own IR). `emitCast` gained a nullable→nullable-width case that
+unpacks the tag + payload, converts the payload through the scalar rules, and re-wraps under the same
+present-tag. Verified: value preserved, `null` preserved, explicit-cast truncation. See the nullable
+invariant; `tests/nullable_tests.cpp` (`[nullable]`, +2 cases). Prior baseline was
+**1150 test cases / 2151 assertions** (as of a **case-insensitive import dedup fix** — on Windows's
+case-insensitive filesystem, importing one file under two spellings — `import "std/String.gg"` in one
+file and `import "std/string.gg"` in another — parsed it **twice** and redefined its classes ("class
+'String' is already defined"), because the resolver's dedup key was `weakly_canonical(...).string()`,
+which normalizes `.`/`..` but preserves case. Fixed with a `dedupKey(canonical)` helper (lowercased on
+`_WIN32`) keyed by every pass's visited/processed set; the real-case path is still used to read the
+file. `#ifdef _WIN32`-guarded so a case-sensitive filesystem keeps the two as distinct files. Motivated
+by `samples/std_lib.gg` (which imports `string.gg` directly and `IO.gg` → `String.gg`). See the
+ImportResolver invariant; `tests/import_tests.cpp` (`[import]`, +1 Windows-guarded case). Prior baseline
+was
 **1149 test cases / 2150 assertions** (as of a **nullable-operand soundness fix** — a nullable
 primitive was silently accepted by arithmetic/comparison/unary operators: the operand's `Type::kind`
 is the underlying kind (`i32?` → `kind == I32`), so `isNumeric(kind)` waved it through and codegen

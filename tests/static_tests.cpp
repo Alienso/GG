@@ -564,3 +564,60 @@ TEST_CASE("Static - local inside a method mangles with the method prefix", "[sta
     )");
     REQUIRE(ir.find("@Counter_tick$n = internal global i32 zeroinitializer") != std::string::npos);
 }
+
+// A static field's initializer is analysed with the field's declared type as the expected type, so a
+// bare numeric literal adopts it — `static i64 X = <big>;` types the literal i64, not the wrapping
+// i32 default. (Regression: previously it warned "overflows i32" and truncated the constant.)
+TEST_CASE("Static - a wide-typed field initializer adopts the field type (no i32-overflow warning)",
+          "[static][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Limits { static i64 MAX = 9223372036854775807; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+    REQUIRE_FALSE(cap.contains("overflows the default type 'i32'"));   // literal adopts i64, no warning
+}
+
+TEST_CASE("Static - a wide field constant keeps its full value at runtime", "[static][codegen]") {
+    // The i64 constant is stored at full width (not truncated to i32 and sign-extended back).
+    auto ir = codegenString(R"(
+        class Limits { static i64 MAX = 9223372036854775807; }
+        fn main() -> i64 { return Limits::MAX; }
+    )");
+    REQUIRE(ir.find("@Limits$MAX = global i64 zeroinitializer") != std::string::npos);
+    REQUIRE(ir.find("store i64 9223372036854775807") != std::string::npos);   // full 64-bit value
+}
+
+TEST_CASE("Static - a u8 field adopts its type with no narrowing warning", "[static][semantic]") {
+    // 200 fits u8 (0..255); adopting the field type means no spurious i32->u8 narrowing warning.
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class C { static u8 BYTE = 200; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+    REQUIRE_FALSE(cap.contains("does not fit"));
+    REQUIRE_FALSE(cap.contains("may lose data"));
+}
+
+TEST_CASE("Static - an f32 field adopts a decimal literal (no f64 default)", "[static][codegen]") {
+    // 1.5 adopts f32; emitted as an LLVM hex-float constant for the `float` global.
+    auto ir = codegenString(R"(
+        class C { static f32 K = 1.5; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(ir.find("@C$K = global float zeroinitializer") != std::string::npos);
+    REQUIRE(ir.find("store float 0x") != std::string::npos);   // hex-float, not an f64 constant
+}
+
+TEST_CASE("Static - a genuinely out-of-range field literal still warns accurately", "[static][semantic]") {
+    // The adoption doesn't silence real errors: 300 does not fit u8, so it still warns (and truncates).
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class C { static u8 BYTE = 300; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+    REQUIRE(cap.contains("does not fit in 'u8'"));   // accurate, field-typed message
+}

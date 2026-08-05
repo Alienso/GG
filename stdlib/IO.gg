@@ -88,9 +88,43 @@ fn print(u32 n) { print(n as u64); }
 fn print(u16 n) { print(n as u64); }
 fn print(u8  n) { print(n as u64); }
 
-fn print(f64 x) {  }
-fn print(bool b) {  }
-fn print(String& s) {  }
-fn print(str s) {  }
 
+fn print(f32 x) {  }
+fn print(f64 x) {  }
+
+fn print(bool b) {
+    if (b){
+        puts("true");
+    } else {
+        puts("false");
+    }
+}
+
+fn print(String& s) {
+    puts(s.data);
+}
+
+fn print(str s) {
+    puts(s.data);
+}
+
+
+//Print Line
+//-----------------------------
+
+fn println(i64 n) { print(n); putchar(10); }
 fn println(i32 n) { print(n); putchar(10); }
+fn println(i16 n) { print(n); putchar(10); }
+fn println(i8 n) { print(n); putchar(10); }
+
+fn println(u64 n) { print(n); putchar(10); }
+fn println(u32 n) { print(n); putchar(10); }
+fn println(u16 n) { print(n); putchar(10); }
+fn println(u8 n) { print(n); putchar(10); }
+
+fn println(f32 x) { print(x); putchar(10); }
+fn println(f64 x) { print(x); putchar(10); }
+
+fn println(bool b) { print(b); putchar(10); }
+fn println(String& s) { print(s); putchar(10); }
+fn println(str s) { print(s); putchar(10); }

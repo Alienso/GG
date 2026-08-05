@@ -21,7 +21,7 @@ import "crt/cmem.gg";
 import "crt/cstring.gg";
 
 class String {
-    private mut ptr data;   // owned, null-terminated UTF-8 byte buffer
+    private mut ptr data;   // owned, null-terminated UTF-8 byte buffer //TODO make this str
     private mut u64 size;   // byte length (excluding the null terminator)
 
     // Construct from a `str` literal, copying its bytes into an owned buffer. The byte length is

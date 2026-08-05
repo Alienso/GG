@@ -139,7 +139,7 @@ private:
     // Overflow-check emission (gated by overflowChecks_).
     // emitOverflowTrap: branch on an i1 "bad" condition to an abort()+unreachable block.
     // emitCheckedArith: integer +/-/* via llvm.{s,u}{add,sub,mul}.with.overflow.iN, trapping on overflow.
-    void        emitOverflowTrap(const std::string& badCond);
+    void        emitOverflowTrap(const std::string& badCond, const std::string& what = "integer overflow");
     std::string emitCheckedArith(TokenType op, const Type& type,
                                  const std::string& lhs, const std::string& rhs);
 
@@ -409,6 +409,11 @@ private:
     // Runtime-length variant: `lengthValue` is an i64 SSA operand (e.g. a `str`'s .len), not a
     // compile-time constant. Traps (abort) when indexValue (i64) is out of [0, lengthValue).
     void emitBoundsCheckValue(const std::string& indexValue, const std::string& lengthValue);
+    // Emit `fputs("GG runtime error: <what> at <file:line>\n", stderr)` in the current (trap) block,
+    // so a runtime panic (overflow / bounds / null-unwrap) says what and where instead of a bare
+    // abort. `currentStmtLine_` supplies the line; the file comes from the (debug) source path if set.
+    void emitPanicMessage(const std::string& what);
+    int  currentStmtLine_ = 0;   // leading line of the statement being generated (for panic messages)
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

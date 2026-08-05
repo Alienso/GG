@@ -328,8 +328,9 @@ void CodeGen::dbgSetLine(int line) {
 }
 
 void CodeGen::dbgStmtLine(const Stmt& stmt) {
-    if (!debug_ || currentSubprogram_ < 0) return;
     int line = stmtLine(stmt);
+    if (line > 0) currentStmtLine_ = line;   // tracked always — feeds runtime-panic messages (no --debug needed)
+    if (!debug_ || currentSubprogram_ < 0) return;
     if (line > 0) dbgSetLine(line);
 }
 

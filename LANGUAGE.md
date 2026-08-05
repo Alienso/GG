@@ -580,6 +580,22 @@ i32 y = switch (n) {
 - The scrutinee is evaluated once. A switch expression may produce a primitive, `bool`, `char`,
   enum, or reference — **not** a value object (bind it through a reference instead).
 
+### Ternary conditional — `cond ? a : b`
+
+A C-style conditional expression: `cond` must be a `bool`; the result is `a` when it's true, else `b`.
+
+```
+i32 x = y == 5 ? 3 : 2;              // 3 if y == 5, else 2
+i32 sign = n > 0 ? 1 : (n < 0 ? -1 : 0);   // right-associative; parenthesize for clarity
+print(ok ? "yes" : "no");           // usable anywhere an expression is
+```
+
+- It is **right-associative** and binds just below assignment, so `x = c ? a : b` reads as
+  `x = (c ? a : b)`.
+- Both branches must have a **common type** (like a switch expression). It can yield a primitive,
+  `bool`, `char`, `enum`, `str`, or a reference — **not** a value object (use a reference).
+- Don't confuse it with **Elvis `a ?: b`** (below), which is null-coalescing, not a boolean choice.
+
 ### Tuples — `(T1, T2, …)`
 
 A **tuple** groups two or more values of possibly-different types without declaring a named class —

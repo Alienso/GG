@@ -7,7 +7,7 @@
 // ============================================================
 
 void CodeGen::genStmt(const Stmt& stmt) {
-    if (debug_) dbgStmtLine(stmt);
+    dbgStmtLine(stmt);   // tracks currentStmtLine_ always (for runtime-panic messages); !dbg only when --debug
     std::visit(overloaded{
         [&](const ExprStmt& exprStmt)      { genExpr(exprStmt.expression); flushTempReleases(); },
         [&](const BlockStmt& blockStmt)    { genBlock(blockStmt); },

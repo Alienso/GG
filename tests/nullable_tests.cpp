@@ -756,3 +756,72 @@ TEST_CASE("Nullable - `!!` unwrap re-enables arithmetic", "[nullable][semantic]"
     )");
     REQUIRE_FALSE(r.hadError);
 }
+
+// Casting between nullable primitives of different payload widths (`i64? -> i32?`) must unpack the
+// tag+payload, convert the payload, and re-wrap — NOT trunc/ext the whole { i1, iN } struct, which is
+// invalid LLVM. (Regression: this emitted `trunc { i1, i64 } to { i1, i32 }` and clang rejected it.)
+TEST_CASE("Nullable - a nullable-to-nullable width cast emits valid IR", "[nullable][codegen]") {
+    auto ir = codegenString(R"(
+        fn wide() -> i64? { return 5; }
+        fn main() -> i32 { i32? n = wide() as i32?; return 0; }
+    )");
+    // The whole-struct trunc must NOT appear; the payload is trunc'd after being extracted.
+    REQUIRE(ir.find("trunc { i1, i64 }") == std::string::npos);
+    REQUIRE(ir.find("extractvalue { i1, i64 }") != std::string::npos);   // unpack tag + payload
+    REQUIRE(ir.find("trunc i64")                != std::string::npos);   // convert the payload
+    REQUIRE(ir.find("insertvalue { i1, i32 }")  != std::string::npos);   // re-wrap as i32?
+}
+
+// A nullable return type must not leak its `?` into an overload-mangled LLVM symbol — `?` is not a
+// valid unquoted identifier char (clang rejects it). `mangleType` encodes nullability as `.opt`.
+// (Regression: overloaded `parseI32 -> i32?`/`-> i64?` in stdlib emitted `@…$ret$i32?` and clang
+// errored "expected '(' in function argument list".)
+TEST_CASE("Nullable - a nullable return in an overload mangles to a valid symbol (`.opt`, not `?`)",
+          "[nullable][codegen]") {
+    auto ir = codegenString(R"(
+        fn f(i32 x) -> i32? { return x; }
+        fn f(i64 x) -> i64? { return x; }
+        fn main() -> i32 { i32? a = f(1); i64? b = f(9000000000); return 0; }
+    )");
+    REQUIRE(ir.find("?") == std::string::npos);              // no '?' anywhere in the emitted IR
+    REQUIRE(ir.find("$ret$i32.opt") != std::string::npos);   // nullable return mangled as `.opt`
+    REQUIRE(ir.find("$ret$i64.opt") != std::string::npos);
+}
+
+TEST_CASE("Nullable - a nullable WIDENING cast sign-extends the payload", "[nullable][codegen]") {
+    // i32? -> i64? must sext the payload (not trunc/whole-struct-cast), preserving negative values.
+    auto ir = codegenString(R"(
+        fn narrow() -> i32? { return 0 - 5; }
+        fn main() -> i32 { i64? n = narrow() as i64?; return 0; }
+    )");
+    REQUIRE(ir.find("extractvalue { i1, i32 }") != std::string::npos);   // unpack the i32? payload
+    REQUIRE(ir.find("sext i32")                 != std::string::npos);   // widen the payload
+    REQUIRE(ir.find("insertvalue { i1, i64 }")  != std::string::npos);   // re-wrap as i64?
+    REQUIRE(ir.find("sext { i1")                == std::string::npos);   // never on the whole struct
+}
+
+TEST_CASE("Nullable - a nullable float width cast converts the payload", "[nullable][codegen]") {
+    auto ir = codegenString(R"(
+        fn wide() -> f64? { return 3.5; }
+        fn main() -> i32 { f32? n = wide() as f32?; return 0; }
+    )");
+    REQUIRE(ir.find("extractvalue { i1, double }") != std::string::npos);
+    REQUIRE(ir.find("fptrunc double")              != std::string::npos);   // payload double -> float
+    REQUIRE(ir.find("insertvalue { i1, float }")   != std::string::npos);
+}
+
+TEST_CASE("Nullable - a nullable width cast preserves value and null at runtime", "[nullable][semantic]") {
+    // Value flows through the payload; null flows through the tag. (Compile-level check; the e2e
+    // covers the executed values.)
+    auto r = analyzeString(R"(
+        fn wide(i64 v, bool p) -> i64? { if (p) { return v; } return null; }
+        fn main() -> i32 {
+            i32? a = wide(1000, true) as i32?;
+            i32? b = wide(0, false) as i32?;
+            if (a == null) { return 1; }
+            if (b != null) { return 2; }
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}

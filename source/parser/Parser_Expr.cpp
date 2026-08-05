@@ -237,7 +237,7 @@ Expr Parser::parseAssignment() {
                 return makeExpr(CompoundAssignExpr{ name, operatorToken, box(std::move(value)) });
         }
     }
-    Expr expression = parseElvis();
+    Expr expression = parseTernary();
 
     // Indexed assignment: arr[i] = expr (detected after parsing the LHS)
     if (expression.node && std::holds_alternative<IndexExpr>(*expression.node)
@@ -273,6 +273,40 @@ Expr Parser::parseAssignment() {
     }
 
     return expression;
+}
+
+// Ternary `cond ? a : b` — sits between assignment and Elvis; right-associative. Desugars to a
+// switch EXPRESSION `switch (cond) { case true -> a; default -> b; }`, so it reuses all of the
+// switch-expression machinery (bool scrutinee, result-type unification, exhaustiveness via `default`,
+// and the codegen result-slot lowering) — no new semantic/codegen. `cond` is a full Elvis-level
+// expression; the middle is a full expression; the else branch recurses (right-associative), so
+// `a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`.
+Expr Parser::parseTernary() {
+    Expr cond = parseElvis();
+    if (!match({ TokenType::QUESTION })) return cond;
+
+    Token q = previous();
+    Expr thenExpr = parseAssignment();   // middle: a full expression (terminated by ':')
+    consume(TokenType::COLON, "expected ':' in ternary expression 'cond ? a : b'");
+    Expr elseExpr = parseTernary();      // right-associative
+
+    // `case true -> thenExpr`
+    std::vector<std::unique_ptr<Expr>> thenLabels;
+    thenLabels.push_back(box(makeExpr(LiteralExpr{ Token{ TokenType::TRUE, "true", q.line } })));
+    SwitchArm thenArm{ std::move(thenLabels), /*isDefault=*/false,
+                       box(std::move(thenExpr)), /*block=*/nullptr,
+                       Token{ TokenType::ARROW, "->", q.line } };
+    // `default -> elseExpr`
+    SwitchArm elseArm{ {}, /*isDefault=*/true,
+                       box(std::move(elseExpr)), /*block=*/nullptr,
+                       Token{ TokenType::ARROW, "->", q.line } };
+
+    std::deque<SwitchArm> arms;
+    arms.push_back(std::move(thenArm));
+    arms.push_back(std::move(elseArm));
+
+    return makeExpr(SwitchExpr{ Token{ TokenType::SWITCH, "switch", q.line },
+                                box(std::move(cond)), std::move(arms) });
 }
 
 // Elvis `a ?: b` — sits just below assignment, above logical-or; right-associative.

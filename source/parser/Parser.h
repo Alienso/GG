@@ -402,6 +402,7 @@ private:
     // ---- Expression parsers (low to high precedence) ----
     [[nodiscard]] Expr parseExpression();
     [[nodiscard]] Expr parseAssignment();
+    [[nodiscard]] Expr parseTernary();
     [[nodiscard]] Expr parseElvis();
     [[nodiscard]] Expr parseLogicalOr();
     [[nodiscard]] Expr parseLogicalAnd();

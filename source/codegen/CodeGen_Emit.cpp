@@ -9,6 +9,65 @@ void CodeGen::ensureAbortDeclared() {
     module.declares.push_back(abortDecl);
 }
 
+// Emit, into the current (trap) block, a `fputs("GG runtime error: <what> at <file:line>\n", stderr)`
+// so a runtime panic explains itself instead of aborting silently. The message is a compile-time
+// constant (no runtime formatting); the line comes from `currentStmtLine_`, the file from the debug
+// source path when available. stderr is obtained via `__acrt_iob_func(2)` — the MinGW/UCRT accessor
+// (GG's target triple is fixed to x86_64-w64-windows-gnu).
+void CodeGen::emitPanicMessage(const std::string& what) {
+    // Build the human-readable message.
+    std::string loc;
+    if (currentStmtLine_ > 0) {
+        std::string file;
+        if (!dbgSourceFile_.empty()) {
+            auto pos = dbgSourceFile_.find_last_of("/\\");
+            file = (pos == std::string::npos) ? dbgSourceFile_ : dbgSourceFile_.substr(pos + 1);
+        }
+        // With a known source file (from `--debug`): "at file.gg:42"; otherwise just "at line 42".
+        loc = file.empty() ? (" at line " + std::to_string(currentStmtLine_))
+                            : (" at " + file + ":" + std::to_string(currentStmtLine_));
+    }
+    std::string msg = "GG runtime error: " + what + loc + "\n";
+
+    // Encode the message as an LLVM c-string constant, escaping non-identifier bytes as \HH and
+    // counting the exact byte length (message + trailing NUL).
+    std::string encoded;
+    for (unsigned char c : msg) {
+        if (c == '\\' || c == '"' || c < 0x20 || c >= 0x7F) {
+            char buf[5];
+            std::snprintf(buf, sizeof(buf), "\\%02X", c);
+            encoded += buf;
+        } else {
+            encoded += static_cast<char>(c);
+        }
+    }
+    encoded += "\\00";
+    size_t byteLen = msg.size() + 1;   // + NUL
+
+    std::string g = "@.panic." + std::to_string(stringCounter++);
+    module.globals.push_back(g + " = private unnamed_addr constant [" + std::to_string(byteLen)
+                             + " x i8] c\"" + encoded + "\", align 1");
+
+    // Declare the CRT hooks once.
+    const std::string iobDecl   = "declare ptr @__acrt_iob_func(i32)";
+    const std::string fputsDecl = "declare i32 @fputs(ptr, ptr)";
+    bool haveIob = false, haveFputs = false;
+    for (const auto& d : module.declares) {
+        if (d == iobDecl)   haveIob = true;
+        if (d == fputsDecl) haveFputs = true;
+    }
+    if (!haveIob)   module.declares.push_back(iobDecl);
+    if (!haveFputs) module.declares.push_back(fputsDecl);
+
+    std::string strm = freshTemp();
+    emit("%" + strm + " = call ptr @__acrt_iob_func(i32 2)");   // stderr
+    std::string ptr = freshTemp();
+    emit("%" + ptr + " = getelementptr inbounds [" + std::to_string(byteLen)
+         + " x i8], ptr " + g + ", i32 0, i32 0");
+    std::string ret = freshTemp();
+    emit("%" + ret + " = call i32 @fputs(ptr %" + ptr + ", ptr %" + strm + ")");
+}
+
 void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {
     emitBoundsCheckValue(indexValue, std::to_string(arraySize));
 }
@@ -23,6 +82,7 @@ void CodeGen::emitBoundsCheckValue(const std::string& indexValue, const std::str
     emitCondBr("%" + cmp, okLabel, oobLabel);
 
     switchBlock(oobLabel);
+    emitPanicMessage("index out of bounds");
     emit("call void @abort()");
     emit("unreachable");
     currentBasicBlock->terminated = true;
@@ -34,13 +94,14 @@ void CodeGen::emitBoundsCheckValue(const std::string& indexValue, const std::str
 
 // Branch on an i1 "overflow / out-of-range happened" condition to an abort()+unreachable block;
 // execution continues in a fresh block when the condition is false. Mirrors emitBoundsCheck.
-void CodeGen::emitOverflowTrap(const std::string& badCond) {
+void CodeGen::emitOverflowTrap(const std::string& badCond, const std::string& what) {
     ensureAbortDeclared();
     std::string okLabel  = freshLabel("ovf.ok");
     std::string badLabel = freshLabel("ovf.bad");
     emitCondBr(badCond, badLabel, okLabel);
 
     switchBlock(badLabel);
+    emitPanicMessage(what);
     emit("call void @abort()");
     emit("unreachable");
     currentBasicBlock->terminated = true;
@@ -345,6 +406,22 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
         emit("%" + t + " = extractvalue " + irTypeName(from) + " " + value + ", 1");
         return "%" + t;
     }
+    // Nullable → nullable with a different payload type/width (`i64? → i32?`): unpack the tag and
+    // payload, convert the payload through the scalar rules, then re-wrap under the SAME present-tag.
+    // A plain trunc/zext/sext on the whole `{ i1, iN }` struct is not a valid LLVM cast.
+    if (isOptPrim(from) && isOptPrim(to) && from.kind != to.kind) {
+        std::string fromIr = irTypeName(from);
+        std::string toIr   = irTypeName(to);
+        std::string tag = freshTemp(), pay = freshTemp();
+        emit("%" + tag + " = extractvalue " + fromIr + " " + value + ", 0");
+        emit("%" + pay + " = extractvalue " + fromIr + " " + value + ", 1");
+        std::string newPay = emitCast("%" + pay, Type{from.kind}, Type{to.kind}, checked);
+        std::string toPayIr = irTypeName(Type{to.kind});
+        std::string t0 = freshTemp(), t1 = freshTemp();
+        emit("%" + t0 + " = insertvalue " + toIr + " poison, i1 %" + tag + ", 0");
+        emit("%" + t1 + " = insertvalue " + toIr + " %" + t0 + ", " + toPayIr + " " + newPay + ", 1");
+        return "%" + t1;
+    }
 
     // `str` → `ptr` decay: extract the data pointer (field 0) from the { ptr, i64 } view.
     if (from.kind == TypeKind::Str && to.kind == TypeKind::Ptr) {
@@ -404,7 +481,7 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
                 emit("%" + back + " = " + std::string(ext) + " " + toIrType + " %" + tv + " to " + fromIrType);
                 std::string bad = freshTemp();
                 emit("%" + bad + " = icmp ne " + fromIrType + " " + value + ", %" + back);
-                emitOverflowTrap("%" + bad);
+                emitOverflowTrap("%" + bad, "value out of range in narrowing conversion");
                 return "%" + tv;
             }
             if (toBits == fromBits && isSignedInt(from.kind) != isSignedInt(to.kind)) {
@@ -412,7 +489,7 @@ std::string CodeGen::emitCast(const std::string& value, const Type& from, const 
                 // (a negative signed value, or an unsigned value above the signed max).
                 std::string bad = freshTemp();
                 emit("%" + bad + " = icmp slt " + fromIrType + " " + value + ", 0");
-                emitOverflowTrap("%" + bad);
+                emitOverflowTrap("%" + bad, "value out of range in narrowing conversion");
                 return value;   // same IR bits — reinterpret only
             }
         }

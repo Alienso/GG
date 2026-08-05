@@ -495,7 +495,10 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         checkRawPtrAllowed(fd.typeName, fd.name);
         if (fd.isStatic && fd.initializer) {
             Type fieldType = resolveTypeToken(fd.typeName);
-            Type initType  = analyzeExpr(*fd.initializer);
+            // Analyse the initializer WITH the field's declared type as the expected type — so a bare
+            // numeric literal adopts it (e.g. `static i64 X = 9223372036854775807;` types the literal
+            // i64, not the wrapping i32 default). Mirrors the local-var-decl path (analyzeVarDecl).
+            Type initType  = analyzeWithExpected(*fd.initializer, fieldType);
             checkCast(initType, fieldType, fd.name, "static field initializer");
         }
     }

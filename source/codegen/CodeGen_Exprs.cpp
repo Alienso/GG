@@ -120,6 +120,7 @@ std::string CodeGen::genUnwrap(const UnwrapExpr& unwrap) {
     }
     emitCondBr("%" + cmp, panicLabel, okLabel);
     switchBlock(panicLabel);
+    emitPanicMessage("'!!' on a null value");
     emit("call void @abort()");
     emit("unreachable");
     currentBasicBlock->terminated = true;

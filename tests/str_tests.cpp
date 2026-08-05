@@ -202,6 +202,8 @@ TEST_CASE("str - indexing bounds-checks the index against .len", "[str][codegen]
     REQUIRE(ir.find("extractvalue { ptr, i64 }") != std::string::npos);   // .len (field 1)
     REQUIRE(ir.find("icmp ult i64")              != std::string::npos);   // idx < len
     REQUIRE(ir.find("@abort()")                  != std::string::npos);   // OOB trap
+    // The trap prints a diagnostic to stderr before aborting.
+    REQUIRE(ir.find("GG runtime error: index out of bounds") != std::string::npos);
 }
 
 TEST_CASE("str - an indexed byte is usable in arithmetic as a char", "[str]") {

@@ -614,6 +614,27 @@ TEST_CASE("Overflow - unsigned + emits uadd.with.overflow", "[overflow][codegen]
     REQUIRE(ir.find("llvm.uadd.with.overflow.i32") != std::string::npos);
 }
 
+TEST_CASE("Overflow - the trap prints a diagnostic before aborting", "[overflow][codegen]") {
+    // The trap block writes "GG runtime error: integer overflow …" to stderr (fputs + __acrt_iob_func)
+    // before abort, so a panic explains itself instead of dying silently.
+    auto ir = codegenString(R"(
+        fn add(i32 a, i32 b) -> i32 { return a + b; }
+        fn main() -> i32 { return add(1, 2); }
+    )", checkedOpts());
+    REQUIRE(ir.find("GG runtime error: integer overflow") != std::string::npos);
+    REQUIRE(ir.find("@__acrt_iob_func(i32 2)") != std::string::npos);   // stderr
+    REQUIRE(ir.find("@fputs(ptr")              != std::string::npos);
+    REQUIRE(ir.find("call void @abort()")      != std::string::npos);   // still aborts after
+}
+
+TEST_CASE("Overflow - a narrowing conversion trap has its own message", "[overflow][codegen]") {
+    auto ir = codegenString(R"(
+        fn narrow(i64 v) -> i32 { return v; }   // implicit i64 -> i32 narrowing, checked
+        fn main() -> i32 { return narrow(5); }
+    )", checkedOpts());
+    REQUIRE(ir.find("GG runtime error: value out of range in narrowing conversion") != std::string::npos);
+}
+
 TEST_CASE("Overflow - subtraction and multiplication are checked", "[overflow][codegen]") {
     auto ir = codegenString(R"(
         fn f(i64 a, i64 b) -> i64 { return a - b; }
@@ -740,6 +761,26 @@ TEST_CASE("Numlit - two literals in a subexpression still keep the default (no s
     auto ir = codegenString("fn main() -> i32 { f64 d = 1 / 2; return 0; }");
     REQUIRE(ir.find("sdiv i32") != std::string::npos);
     REQUIRE(ir.find("fdiv")     == std::string::npos);
+}
+
+TEST_CASE("Numlit - a compound-assignment RHS literal adopts the target type", "[numlit][semantic]") {
+    // `u64Var *= 10;` types the literal 10 as u64 — no spurious i32->u64 narrowing warning.
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn main() -> i32 { mut u64 x = 100; x *= 10; x += 5; x -= 1; return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+    REQUIRE_FALSE(cap.contains("may lose data"));
+}
+
+TEST_CASE("Numlit - a non-literal compound-assignment RHS still warns on a lossy conversion",
+          "[numlit][semantic]") {
+    // The adoption is literal-only: an i32 variable on the RHS of a u8 `+=` still warns.
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        fn main() -> i32 { mut u8 b = 0; i32 n = 5; b += n; return 0; }
+    )");
+    REQUIRE(cap.contains("may lose data"));
 }
 
 // ---- Overflow checks on ++/-- and unary negation (parity with += / -=) ----

@@ -1348,7 +1348,11 @@ Type SemanticAnalyzer::analyzeCompoundAssign(const CompoundAssignExpr& compoundA
         analyzeExpr(*compoundAssign.value);
         return Type{TypeKind::Error};
     }
-    Type rhsType = analyzeExpr(*compoundAssign.value);
+    // Analyse the RHS WITH the target's type as the expected type, so a bare numeric literal adopts
+    // it — `u64Var *= 10;` types `10` as u64 (no spurious i32→u64 narrowing warning), mirroring the
+    // var-init / assignment paths. A non-literal RHS (e.g. an i32 variable) is unaffected: it keeps
+    // its own type and `checkCast` below still warns on a genuine lossy conversion.
+    Type rhsType = analyzeWithExpected(*compoundAssign.value, lhsType);
 
     if (isError(lhsType) || isError(rhsType)) return Type{TypeKind::Error};
 

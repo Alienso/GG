@@ -290,6 +290,14 @@ std::string typeName(const Type& t) {
 // ============================================================
 
 std::string mangleType(const Type& t) {
+    // Nullable types: mangle the underlying type + a `.opt` marker. `typeName` would render `i32?`,
+    // but `?` is NOT a valid unquoted LLVM identifier character — it must never reach a symbol name.
+    // `.` is valid (used for `.ref`/`.arr`), so `i32?` → `i32.opt`, `Class&?` → `Class.ref.opt`.
+    if (t.isNullable) {
+        Type base = t;
+        base.isNullable = false;
+        return mangleType(base) + ".opt";
+    }
     switch (t.kind) {
         case TypeKind::Object:    return t.className;
         case TypeKind::Enum:      return t.className;

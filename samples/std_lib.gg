@@ -4,7 +4,7 @@ import "std/crt/cstring.gg";
 
 import "std/array.gg";
 import "std/string.gg";
-import "std/number.gg";
+import "std/math.gg";
 
 import "std/io.gg";
 
@@ -25,9 +25,14 @@ fn main() -> i32 {
     array[0] = 54;
     putchar(array[0]);*/
 
-    i32? x = Integer.parseInt("500");
+    i32? x = parseI32("-500");
     if (x != null){
-        print(x);
+        println(x);
+    }
+
+    u64? y = parseU64("500");
+    if (y != null){
+        println(y);
     }
 
     return 0;

@@ -37,6 +37,12 @@ struct GenericInstantiation {
     std::string                     templateName;
     std::string                     mangledName;
     std::vector<std::vector<Token>> args;     // each type argument's token slice
+    // Generic METHOD instantiation: when non-empty, this request is a `fn m<T>` on a class, not a
+    // free-function/class template. `ownerClass` is the concrete (possibly mangled) class the
+    // instantiated method must be injected into; `bareMethodName` is the source method name (so the
+    // template key is `ownerClass + "::" + bareMethodName` and `mangledName` is e.g. `m$i32`).
+    std::string                     ownerClass;
+    std::string                     bareMethodName;
 };
 // A generic `impl<T…> Trait for Class<T…> { … }`. Captured like a class template and
 // instantiated automatically whenever `Class<args>` is instantiated: the impl's type
@@ -54,6 +60,18 @@ struct GenericRegistry {
     std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
     std::unordered_set<std::string>                  funcNames;     // generic function names
     std::unordered_set<std::string>                  classNames;    // generic class names
+    // ---- Generic methods (`fn m<T>` on a class) ----
+    // A generic method is captured as a template keyed by `OwnerClass::method` (the owner is the
+    // possibly-mangled class the method is declared in — e.g. `Box::wrap` or, during a generic
+    // class's re-parse, `Array$i32::wrap`). At a call site the receiver's class is resolved at parse
+    // time (parser-visible receivers only) and a method instantiation is queued; the concrete method
+    // is re-parsed and injected into the owner class's `ClassDeclStmt::methods` so semantics/codegen
+    // treat it as an ordinary method. `genericMethodNames`/`genericMethodKeys` gate the `obj.m<T>(…)`
+    // call-site disambiguation (a bare name set for a cheap check, a class-qualified set for a precise
+    // one), populated by the brace-aware prescan.
+    std::unordered_map<std::string, GenericTemplate> methodTemplates;    // "Owner::method" → template
+    std::unordered_set<std::string>                  genericMethodNames; // bare "wrap"
+    std::unordered_set<std::string>                  genericMethodKeys;  // "Owner::wrap" (base owner name)
     std::vector<GenericInstantiation>                worklist;      // instantiation requests
     std::unordered_set<std::string>                  instantiated;  // mangled names already queued
     std::vector<GenericImplTemplate>                 implTemplates;    // generic `impl<T> … for Class<T>` blocks
@@ -164,6 +182,14 @@ private:
     // Instance fields of the class currently being parsed (name → type token), so a lambda inside
     // a method can capture an enclosing field by value. Populated as fields are parsed.
     std::unordered_map<std::string, Token>              classFieldScope_;
+    // Name of the class currently being parsed (possibly the mangled name during a generic class's
+    // re-parse), or empty at top level. Set/restored around a class/impl member list; lets a generic
+    // method call resolve a `this` receiver's class at parse time (deduceArgTypeToken's ThisExpr case).
+    std::string                                         currentClassName_;
+    // Generic-method instantiations whose owner class / method template is not yet available (a
+    // generic class's methods are registered only when its `Class$args` body is re-parsed). Drained
+    // to a fixpoint after the main worklist. See runMonomorphization.
+    std::vector<GenericInstantiation>                   pendingMethodInsts_;
     // Active while parsing a lambda body: names resolved to a scope index < captureBase_ are
     // captured by value into `captures_` (deduped). Nested lambdas are rejected in v1.
     bool                                       capturing_   = false;
@@ -252,6 +278,19 @@ private:
                                   const std::vector<std::vector<Token>>& args) const;
     void recordInstantiation(const std::string& templateName, const std::string& mangled,
                              std::vector<std::vector<Token>> args);
+    // ---- Generic methods (`fn m<T>` on a class) ----
+    // Capture a generic method template inside a class body (called from parseMemberList before the
+    // param list is parsed). `ownerClass` is the enclosing (possibly mangled) class name. Stores the
+    // synthetic method decl tokens under `ownerClass::name` and registers the call-site gates.
+    void captureMethodTemplate(const std::string& ownerClass, bool isStatic, bool isPublic);
+    // Queue a generic-method instantiation (`ownerClass::mangled`, e.g. `Box::wrap$i32`), deduped on
+    // that class-qualified key so the same method name on two classes doesn't collide.
+    void recordMethodInstantiation(const std::string& ownerClass, const std::string& bareMethodName,
+                                   const std::string& mangled, std::vector<std::vector<Token>> args);
+    // Substitute + re-parse a single generic-method instantiation and inject the concrete MethodDecl
+    // into its owner class's ClassDeclStmt. Returns false if the owner class / method template is not
+    // yet available (a generic class whose body hasn't been re-parsed) — the caller defers + retries.
+    bool instantiateMethod(const GenericInstantiation& inst, Program& program);
     // Generic type-argument DEDUCTION for a `f(args)` call written WITHOUT explicit `<…>`.
     // Infers each type parameter of the template `fnName` from the call arguments' types, so
     // `f(x)` works like `f<T>(x)`. v1 handles the common shape: a type parameter appearing as a

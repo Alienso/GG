@@ -313,6 +313,10 @@ void Parser::parseMemberList(const Token& name,
                              bool allowDestructor,
                              bool isEnum) {
     classFieldScope_.clear();   // fresh per class (no nested classes); populated as fields are parsed
+    std::string savedClassName = currentClassName_;
+    currentClassName_ = name.lexeme;   // for `this.m<T>()` receiver resolution in generic-method calls
+    struct ClassNameGuard { std::string* slot; std::string saved;
+        ~ClassNameGuard() { *slot = saved; } } cnGuard{ &currentClassName_, savedClassName };
     while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
         // A member may be prefixed with `@Name(...)` annotations; attach them to whatever member
         // this iteration parses (each branch ends by pushing exactly one field/method).
@@ -327,6 +331,21 @@ void Parser::parseMemberList(const Token& name,
                 if (match({ TokenType::PRIVATE })) { mPublic = false; continue; }
                 if (match({ TokenType::STATIC  })) { mStatic = true;  continue; }
                 break;
+            }
+            // Generic method: `fn name<T…>(params) …`. Captured as a template (keyed by the owning
+            // class) and diverted here BEFORE the normal name/param parse; the concrete instantiation
+            // is re-parsed + injected per call at monomorphization. Detected by a `<` after the name
+            // whose type-param list closes and is followed by `(` (so `name < x` stays a decl error).
+            if (check(TokenType::IDENTIFIER) && peekNext().type == TokenType::LESS) {
+                std::vector<std::string> tp; std::vector<std::vector<std::string>> bd; std::vector<bool> pk;
+                size_t close = scanTypeParamList(current + 2, tp, bd, pk);
+                if (close != 0 && close + 1 < tokens.size()
+                    && tokens[close + 1].type == TokenType::LEFT_PAREN) {
+                    if (!memberAnns.empty())
+                        throw error(peek(), "annotations on a generic method are not supported yet");
+                    captureMethodTemplate(name.lexeme, mStatic, mPublic);
+                    continue;
+                }
             }
             // Unified method: `fn name(params) [mut] [-> RetType [alias]] { }`.
             Token mname = consume(TokenType::IDENTIFIER, "expected method name after 'fn'");

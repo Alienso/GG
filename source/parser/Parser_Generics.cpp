@@ -21,23 +21,45 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
         if (toks[i].type == TokenType::ENUM && toks[i + 1].type == TokenType::IDENTIFIER)
             classNames.insert(toks[i + 1].lexeme);
     }
-    // Register generic function template names so call sites are recognised regardless of
-    // declaration order. Every generic function is `fn name < ... > ( ... )` — the name
-    // follows `fn` directly and is immediately followed by '<'.
-    for (size_t i = 0; i + 3 < toks.size(); ++i) {
-        if (toks[i].type != TokenType::FN) continue;
-        size_t nameIdx = i + 1;
-        if (toks[nameIdx].type != TokenType::IDENTIFIER || toks[nameIdx + 1].type != TokenType::LESS)
-            continue;
-        size_t j = nameIdx + 2; int depth = 1;
-        while (j < toks.size() && depth > 0) {
-            if (toks[j].type == TokenType::LESS)             depth++;
-            else if (toks[j].type == TokenType::GREATER)     depth--;
-            else if (toks[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
-            j++;
+    // Register generic-template NAMES (regardless of declaration order) with brace awareness, so a
+    // `fn name<…>(` is classified by WHERE it appears: at top level it's a generic FREE function
+    // (`funcNames`); inside a `class`/`enum` body it's a generic METHOD of that class
+    // (`genericMethodKeys`/`genericMethodNames`, keyed by the — possibly generic — class name); inside
+    // an `impl`/`trait`/other brace it's neither (capture handles/rejects it). `classBody` stacks the
+    // enclosing class/enum name per brace level ("" for a non-class brace: fn body, impl, trait, block).
+    std::vector<std::string> classBody;
+    std::string pendingClass;   // class/enum name seen, attached to the next '{'
+    for (size_t i = 0; i < toks.size(); ++i) {
+        TokenType tt = toks[i].type;
+        if ((tt == TokenType::CLASS || tt == TokenType::ENUM)
+            && i + 1 < toks.size() && toks[i + 1].type == TokenType::IDENTIFIER) {
+            pendingClass = toks[i + 1].lexeme;   // `class Foo` / `class Foo<T>` / `enum E`
+        } else if (tt == TokenType::LEFT_BRACE) {
+            classBody.push_back(pendingClass); pendingClass.clear();
+        } else if (tt == TokenType::RIGHT_BRACE) {
+            if (!classBody.empty()) classBody.pop_back();
+        } else if (tt == TokenType::FN
+                   && i + 2 < toks.size()
+                   && toks[i + 1].type == TokenType::IDENTIFIER
+                   && toks[i + 2].type == TokenType::LESS) {
+            size_t nameIdx = i + 1, j = nameIdx + 2; int depth = 1;
+            while (j < toks.size() && depth > 0) {
+                if (toks[j].type == TokenType::LESS)             depth++;
+                else if (toks[j].type == TokenType::GREATER)     depth--;
+                else if (toks[j].type == TokenType::SHIFT_RIGHT) depth -= 2;
+                j++;
+            }
+            if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN) {
+                const std::string& mname = toks[nameIdx].lexeme;
+                if (classBody.empty()) {
+                    gen_->funcNames.insert(mname);                        // top-level generic function
+                } else if (!classBody.back().empty()) {
+                    gen_->genericMethodKeys.insert(classBody.back() + "::" + mname);  // generic method
+                    gen_->genericMethodNames.insert(mname);
+                }
+                // else: inside an impl/trait/other brace → neither (v1 rejects it at capture).
+            }
         }
-        if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN)
-            gen_->funcNames.insert(toks[nameIdx].lexeme);
     }
 }
 
@@ -457,7 +479,139 @@ void Parser::recordInstantiation(const std::string& templateName, const std::str
                                  std::vector<std::vector<Token>> args) {
     if (gen_->instantiated.count(mangled)) return;
     gen_->instantiated.insert(mangled);
-    gen_->worklist.push_back(GenericInstantiation{ templateName, mangled, std::move(args) });
+    gen_->worklist.push_back(GenericInstantiation{ templateName, mangled, std::move(args),
+                                                   /*ownerClass=*/"", /*bareMethodName=*/"" });
+}
+
+// ---- Generic methods ----
+
+// Capture a generic method `fn [static] [private] NAME<T…>(params) [mut] [-> Ret alias] { body }`
+// as a template. Called from parseMemberList with `current` at NAME (the `fn` + modifiers already
+// consumed, passed as bools). The captured tokens are a synthetic ORDINARY method decl with the
+// `<…>` list stripped, so the per-call re-parse (via a shell class + parseMemberList) sees a normal
+// method. Stored under `ownerClass::NAME`; the call site keys on genericMethodNames/Keys.
+void Parser::captureMethodTemplate(const std::string& ownerClass, bool isStatic, bool isPublic) {
+    size_t nameIdx = current;             // NAME; nameIdx+1 == '<'
+    Token  nameTok = tokens[nameIdx];
+    int    line    = nameTok.line;
+
+    std::vector<std::string>              typeParams;
+    std::vector<std::vector<std::string>> bounds;
+    std::vector<bool>                     isPack;
+    size_t j = scanTypeParamList(nameIdx + 2, typeParams, bounds, isPack);   // returns closing '>'
+    for (bool p : isPack)
+        if (p) throw error(nameTok, "variadic methods are not supported yet "
+                           "(only `fn m<T>` generic methods on a class)");
+    size_t afterGt = j + 1;               // the '(' (caller verified this)
+
+    std::vector<Token> captured;
+    captured.push_back(Token{ TokenType::FN, "fn", line });
+    if (isStatic)  captured.push_back(Token{ TokenType::STATIC,  "static",  line });
+    if (!isPublic) captured.push_back(Token{ TokenType::PRIVATE, "private", line });
+    captured.push_back(nameTok);          // method name (renamed to the mangled name at instantiation)
+
+    size_t k = afterGt;
+    int parenDepth = 0;
+    do {
+        if (tokens[k].type == TokenType::LEFT_PAREN)  parenDepth++;
+        else if (tokens[k].type == TokenType::RIGHT_PAREN) parenDepth--;
+        captured.push_back(tokens[k]); ++k;
+    } while (k < tokens.size() && parenDepth > 0);
+
+    // `[mut] [-> RetType alias]` up to the body.
+    while (k < tokens.size() && tokens[k].type != TokenType::LEFT_BRACE) { captured.push_back(tokens[k]); ++k; }
+    if (k < tokens.size() && tokens[k].type == TokenType::LEFT_BRACE) {
+        int braceDepth = 0;
+        do {
+            if (tokens[k].type == TokenType::LEFT_BRACE)  braceDepth++;
+            else if (tokens[k].type == TokenType::RIGHT_BRACE) braceDepth--;
+            captured.push_back(tokens[k]); ++k;
+        } while (k < tokens.size() && braceDepth > 0);
+    }
+
+    std::string key = ownerClass + "::" + nameTok.lexeme;
+    gen_->methodTemplates[key] = GenericTemplate{ std::move(typeParams), std::move(bounds),
+                                                  std::move(isPack), std::move(captured) };
+    gen_->genericMethodNames.insert(nameTok.lexeme);
+    gen_->genericMethodKeys.insert(key);
+    current = k;                          // advance past the captured method
+}
+
+void Parser::recordMethodInstantiation(const std::string& ownerClass, const std::string& bareMethodName,
+                                       const std::string& mangled, std::vector<std::vector<Token>> args) {
+    std::string dedupKey = ownerClass + "::" + mangled;   // e.g. "Box::wrap$i32" (never a class/fn name)
+    if (gen_->instantiated.count(dedupKey)) return;
+    gen_->instantiated.insert(dedupKey);
+    GenericInstantiation inst;
+    inst.templateName   = ownerClass + "::" + bareMethodName;   // the methodTemplates key
+    inst.mangledName    = mangled;
+    inst.args           = std::move(args);
+    inst.ownerClass     = ownerClass;
+    inst.bareMethodName = bareMethodName;
+    gen_->worklist.push_back(std::move(inst));
+}
+
+bool Parser::instantiateMethod(const GenericInstantiation& inst, Program& program) {
+    auto tmplIt = gen_->methodTemplates.find(inst.templateName);   // "Owner::method"
+    if (tmplIt == gen_->methodTemplates.end()) return false;       // template not registered yet → defer
+    // Find the owner class declaration to inject into (a generic class's `Array$i32` exists only after
+    // its body is re-parsed — defer until then).
+    ClassDeclStmt* owner = nullptr;
+    for (Stmt& s : program.declarations)
+        if (auto* cd = std::get_if<ClassDeclStmt>(s.node.get()))
+            if (cd->name.lexeme == inst.ownerClass) { owner = cd; break; }
+    if (!owner) return false;
+
+    const GenericTemplate& tmpl = tmplIt->second;
+    std::unordered_map<std::string, std::vector<Token>> sub;
+    for (size_t i = 0; i < tmpl.typeParams.size() && i < inst.args.size(); ++i)
+        sub.emplace(tmpl.typeParams[i], inst.args[i]);
+
+    // Bound obligations, reusing the same machinery as free-fn/class templates.
+    for (size_t i = 0; i < tmpl.typeParams.size() && i < inst.args.size(); ++i) {
+        if (i >= tmpl.bounds.size() || tmpl.bounds[i].empty() || inst.args[i].empty()) continue;
+        const Token& argHead = inst.args[i].front();
+        for (const std::string& tr : tmpl.bounds[i])
+            program.genericBoundChecks.push_back(
+                GenericBoundCheck{ argHead.lexeme, tr, inst.ownerClass + "_" + inst.mangledName,
+                                   argHead.line });
+    }
+
+    // Substitute type-param tokens + rename the method-name token (the FIRST IDENTIFIER — the
+    // preceding `fn`/`static`/`private` are keyword tokens, not IDENTIFIER) to the mangled name.
+    std::vector<Token> out;
+    bool renamed = false;
+    for (const Token& t : tmpl.tokens) {
+        if (!renamed && t.type == TokenType::IDENTIFIER) {
+            out.push_back(Token{ TokenType::IDENTIFIER, inst.mangledName, t.line });
+            renamed = true;
+            continue;
+        }
+        if (t.type == TokenType::IDENTIFIER) {
+            auto sit = sub.find(t.lexeme);
+            if (sit != sub.end()) { for (const Token& a : sit->second) out.push_back(a); continue; }
+        }
+        out.push_back(t);
+    }
+
+    // Shell re-parse: wrap the concrete method tokens in a throwaway class NAMED THE REAL OWNER (so a
+    // `this.m<U>()` recursion inside the body resolves `this` to the right class), then transplant the
+    // single MethodDecl into the real owner. The shell ClassDeclStmt is discarded.
+    std::vector<Token> shell;
+    shell.push_back(Token{ TokenType::CLASS, "class", 0 });
+    shell.push_back(Token{ TokenType::IDENTIFIER, inst.ownerClass, 0 });
+    shell.push_back(Token{ TokenType::LEFT_BRACE, "{", 0 });
+    for (const Token& t : out) shell.push_back(t);
+    shell.push_back(Token{ TokenType::RIGHT_BRACE, "}", 0 });
+    shell.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
+
+    tokens  = std::move(shell);
+    current = 0;
+    Stmt shellDecl = parseDeclaration();
+    auto* shellClass = std::get_if<ClassDeclStmt>(shellDecl.node.get());
+    if (!shellClass || shellClass->methods.empty()) return false;   // (shouldn't happen)
+    owner->methods.push_back(std::move(shellClass->methods.front()));
+    return true;
 }
 
 std::string Parser::genericArgBaseName(const Token& t) {
@@ -604,6 +758,8 @@ std::optional<Token> Parser::deduceArgTypeToken(const Expr* arg) const {
             { base = c->callee.lexeme; line = c->callee.line; }        // `Class(...)` constructor
     } else if (const auto* ne = std::get_if<NewExpr>(&node)) {
         base = ne->className.lexeme; line = ne->className.line;        // `new Class(...)`
+    } else if (const auto* th = std::get_if<ThisExpr>(&node)) {
+        if (!currentClassName_.empty()) { base = currentClassName_; line = th->keyword.line; }  // `this`
     }
     if (base.empty()) return std::nullopt;
     return Token{ primTokenFor(base), base, line };
@@ -907,9 +1063,20 @@ void Parser::runMonomorphization(Program& program) {
                 concreteImplKeys.insert("Call@" + im->typeName.lexeme);
         }
 
+    // Outer loop: drain the main worklist, then retry any deferred generic-method instantiations (a
+    // generic class's methods become available only after its body is re-parsed); repeat to a fixpoint.
+    for (;;) {
     while (!gen_->worklist.empty()) {
         GenericInstantiation inst = std::move(gen_->worklist.back());
         gen_->worklist.pop_back();
+
+        // Generic METHOD instantiation: substitute + re-parse the single method and inject it into
+        // its owner class. Defer if the owner class / method template isn't available yet.
+        if (!inst.ownerClass.empty()) {
+            if (!instantiateMethod(inst, program))
+                pendingMethodInsts_.push_back(std::move(inst));
+            continue;
+        }
 
         auto it = gen_->templates.find(inst.templateName);
         if (it == gen_->templates.end())
@@ -1033,6 +1200,24 @@ void Parser::runMonomorphization(Program& program) {
             }
         }
     }
+
+    // Main worklist drained. Retry deferred generic-method instantiations — a method's owner class /
+    // template becomes ready once that class's body is re-parsed; a successful re-parse may enqueue
+    // more class/method work, so the outer loop drains that too. Stop when nothing is pending, or
+    // when a pass makes no progress and the worklist is empty (an owner that never instantiated).
+    if (pendingMethodInsts_.empty()) break;
+    bool gmProgress = false;
+    std::vector<GenericInstantiation> stillPending;
+    for (auto& mInst : pendingMethodInsts_) {
+        if (instantiateMethod(mInst, program)) gmProgress = true;
+        else stillPending.push_back(std::move(mInst));
+    }
+    pendingMethodInsts_ = std::move(stillPending);
+    if (!gmProgress && gen_->worklist.empty()) break;
+    }   // for (;;)
+    if (!pendingMethodInsts_.empty())
+        throw error(tokens.empty() ? Token{TokenType::END_OF_FILE, "", 0} : tokens.back(),
+                    "could not instantiate a generic method — its owner class was never instantiated");
 
     // Surface bounded generic templates for definition-time body checking (semantic pass
     // checkGenericBodies). Re-parse each template's ORIGINAL body (no type substitution) with

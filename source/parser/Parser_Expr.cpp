@@ -468,6 +468,66 @@ Expr Parser::parsePostfix() {
             bool safe = check(TokenType::QUESTION_DOT);
             advance();  // consume '.', '?.' or '::'
             Token member = consume(TokenType::IDENTIFIER, "expected member name after '.'");
+
+            // Generic-method call `recv.m<T…>(args)` / `Class::m<T…>(args)`: resolve the receiver's
+            // class at parse time (parser-visible receivers only), mangle the method, queue the
+            // instantiation, and emit a MethodCallExpr whose method token is the mangled name. Gated
+            // so `recv.m < x` (a comparison of a field named `m`) still parses as less-than.
+            if (gen_->genericMethodNames.count(member.lexeme) && check(TokenType::LESS)) {
+                std::string recvClass;
+                if (const auto* id = std::get_if<IdentifierExpr>(expression.node.get())) {
+                    if (classNames.count(id->name.lexeme) || gen_->classNames.count(id->name.lexeme))
+                        recvClass = id->name.lexeme;                       // static form `Class::m<T>()`
+                    else if (auto t = deduceArgTypeToken(&expression)) recvClass = genericArgBaseName(*t);
+                } else if (auto t = deduceArgTypeToken(&expression)) {     // `this`, bare field, etc.
+                    recvClass = genericArgBaseName(*t);
+                }
+                std::string baseClass = recvClass.substr(0, recvClass.find('$'));   // Array$i32 → Array
+                bool haveMethod = !recvClass.empty()
+                               && gen_->genericMethodKeys.count(baseClass + "::" + member.lexeme) > 0;
+                // Does a well-formed `<…>` close and get followed by `(`? Then it's unambiguously a
+                // generic-method-call SHAPE — `name<…>(` — rather than a `<` comparison. (Note a
+                // comparison of that exact shape, `field < X > (…)`, is always an invalid chained
+                // comparison `(field < X) > (…)` — bool vs numeric — so treating it as a generic call
+                // here never rejects a VALID program; it only yields a clearer generic-method error.)
+                auto looksLikeGenericCall = [&]() -> bool {
+                    size_t j = current + 1; int d = 1;   // `current` is the '<'
+                    while (j < tokens.size() && d > 0) {
+                        TokenType t = tokens[j].type;
+                        if (t == TokenType::LESS) d++;
+                        else if (t == TokenType::GREATER) d--;
+                        else if (t == TokenType::SHIFT_RIGHT) d -= 2;
+                        j++;
+                    }
+                    return d <= 0 && j < tokens.size() && tokens[j].type == TokenType::LEFT_PAREN;
+                };
+                if (haveMethod || looksLikeGenericCall()) {
+                    if (!haveMethod) {
+                        if (recvClass.empty())
+                            throw error(member, "cannot determine the receiver's type for a "
+                                "generic-method call to '" + member.lexeme + "'; bind the receiver to "
+                                "a local first (generic-method calls need a parser-visible receiver)");
+                        throw error(member, "class '" + baseClass + "' has no generic method '"
+                                    + member.lexeme + "'");
+                    }
+                    std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
+                    std::string mangledMethod = mangleInstantiation(member.lexeme, typeArgs);
+                    recordMethodInstantiation(recvClass, member.lexeme, mangledMethod, std::move(typeArgs));
+                    consume(TokenType::LEFT_PAREN, "expected '(' after generic-method type arguments");
+                    std::vector<Token> gmNames;
+                    std::vector<bool>  gmSpreads;
+                    std::vector<std::unique_ptr<Expr>> gmArgs =
+                        parseCallArgs(gmNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &gmSpreads);
+                    for (bool s : gmSpreads) if (s) { unwrapSpreadArgs(gmArgs, gmNames, gmSpreads); break; }
+                    expression = makeExpr(MethodCallExpr{
+                        box(std::move(expression)),
+                        Token{ TokenType::IDENTIFIER, mangledMethod, member.line },
+                        std::move(gmArgs), std::move(gmNames), safe });
+                    continue;
+                }
+                // else: a `<` comparison of a member named like a generic method — fall through.
+            }
+
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('
                 std::vector<Token> argNames;

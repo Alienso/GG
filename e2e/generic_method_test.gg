@@ -1,0 +1,48 @@
+// e2e/generic_method_test.gg — generic methods (`fn m<T>` on a class, with its own type parameters).
+// A call `obj.m<i32>(...)` resolves the receiver's class at parse time, mangles the method, and the
+// concrete method is injected into the owner class (`@Class_m$i32`). Exercises: instance + static
+// generic methods on a NON-generic class, a `this`-receiver generic call, and a generic method on a
+// GENERIC class (the deferral fixpoint). Exit 0 = all checks held.
+
+class Box {
+    mut i32 v;
+    Box(i32 x) { v = x; }
+    fn identity<T>(T x) -> T { return x; }              // instance generic method
+    fn static of<T>(T x) -> T { return x; }             // static generic method
+    fn doubleVia(i32 n) -> i32 { return this.identity<i32>(n) + this.identity<i32>(n); }  // this-receiver
+}
+
+// Generic method ON a generic class — the method instantiates into the mangled class `Holder$i32`.
+class Holder<E> {
+    mut E value;
+    Holder(E v) { value = v; }
+    fn get() -> E { return value; }
+    fn passThrough<U>(U y) -> U { return y; }
+}
+
+fn main() -> i32 {
+    Box b(0);
+
+    // Instance generic method over two concrete types.
+    i32  a = b.identity<i32>(5);        // 5
+    bool t = b.identity<bool>(true);    // true
+    if (a != 5)  { return 11; }
+    if (!t)      { return 12; }
+
+    // Static generic method.
+    i32 s = Box::of<i32>(9);            // 9
+    if (s != 9) { return 13; }
+
+    // this-receiver generic call.
+    i32 d = b.doubleVia(4);             // 8
+    if (d != 8) { return 14; }
+
+    // Generic method on a generic class.
+    Holder<i32> h(100);
+    i32 g = h.get();                    // 100
+    i32 p = h.passThrough<i32>(7);      // 7 → Holder$i32::passThrough$i32
+    if (g != 100) { return 15; }
+    if (p != 7)   { return 16; }
+
+    return 0;
+}

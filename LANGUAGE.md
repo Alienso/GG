@@ -1605,6 +1605,43 @@ echo(5);                         // error: a bare literal has no syntactic type 
 
 Explicit type arguments always work; deduction is just a convenience for the common case.
 
+### Generic methods
+
+A method may have its **own** type parameters, independent of any the class has:
+
+```gg
+class Box {
+    fn wrap<T>(T x) -> T { return x; }            // instance generic method
+    fn static of<T>(T x) -> T { return x; }       // static generic method
+}
+
+class Holder<E> {                                 // …even on a generic class
+    mut E value;
+    Holder(E v) { value = v; }
+    fn convert<U>(U y) -> U { return y; }
+}
+
+fn main() -> i32 {
+    Box b;
+    i32  a = b.wrap<i32>(5);        // 5
+    i32  s = Box::of<i32>(9);       // static form
+    Holder<i32> h(1);
+    i32  c = h.convert<i32>(7);     // generic method on a generic class
+    return a + s + c;
+}
+```
+
+The **type arguments are required** (`b.wrap<i32>(5)`, not `b.wrap(5)`) — a generic-method call must
+be written with explicit `<…>`. The receiver must be something whose type is obvious at the call site:
+a local, a parameter, a field, `this`, or the `Class::method<T>(...)` static form. A receiver that is
+itself a call result or a longer chain (`makeBox().wrap<i32>(5)`, `a.b.wrap<i32>(5)`) is not
+supported — bind it to a local first. Bounds work as elsewhere (`fn run<T: Show>(T* x) -> i32 { return
+x.show(); }`).
+
+**v1 limitations** (clean errors): explicit `<T>` required (no argument inference); generic methods in
+`impl`/`trait` blocks, variadic methods (`fn m<...Ts>`), and non-obvious receivers are not supported
+yet.
+
 ### Cross-file generics
 Templates defined in imported files are available at use sites:
 ```gg

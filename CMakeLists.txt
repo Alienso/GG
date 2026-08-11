@@ -147,6 +147,7 @@ add_executable(GG_tests
         tests/tuple_tests.cpp
         tests/match_tests.cpp
         tests/variadic_tests.cpp
+        tests/generic_method_tests.cpp
         tests/class_tests.cpp
         tests/enum_tests.cpp
         tests/static_tests.cpp

@@ -855,6 +855,53 @@ capture). `inferGenericTypeArgs` (`Parser.cpp`), called from the `name(args)` pr
   `e2e/annotation_test.gg` uses `valid(u)`/`sumLive(u)` (inferred) alongside `renameKeyBytes<User>()`
   (explicit — `T` only in the body).
 
+### Generic methods — `fn m<T>(...)` on a class (own type parameters)
+A method with its **own** type parameters, distinct from any class type params. Like free-function
+generics, it's a **parser/monomorphizer** feature (semantics/codegen only ever see the concrete
+`@Class_m$i32`). **The central difficulty**: a call `obj.m<i32>(...)` depends on the receiver's
+*type*, which the parser (where monomorphization lives) doesn't know — unlike `f<i32>()` (callee names
+the fn) or `Vec<i32>` (names the class). Resolved by reusing the parser's `scopes_`/`classFieldScope_`
+type-token tracking: **v1 supports a generic-method call only where the receiver's class is
+parser-visible** — a bare in-scope local/param/field, `this`, or the static `Class::m<T>(...)` form.
+- **Capture** (`captureMethodTemplate`, `Parser_Generics.cpp`): a `fn NAME<…>(` inside a class body is
+  diverted in `parseMemberList` (before the param list) and stored as a `GenericTemplate` keyed
+  `Owner::NAME` in `gen_->methodTemplates` (the `Owner` is `parseMemberList`'s class-name param — the
+  **mangled** name during a generic class's re-parse, so `Array$i32::wrap` registers automatically);
+  the captured tokens are a synthetic ordinary method (`<…>` stripped, `fn`/`static`/`private`
+  synthesized from bools). No `MethodDecl` is emitted for the template itself. `genericMethodNames`
+  (bare) + `genericMethodKeys` (`Owner::m`) gate the call site; populated by a now **brace-aware**
+  `prescanTemplateNames` (a `fn NAME<` at depth 0 → `funcNames`; in a class/enum body → a method key;
+  in an impl/trait/other brace → neither).
+- **Call site** (`parsePostfix`, `Parser_Expr.cpp`): gated on `member ∈ genericMethodNames && check(<)`.
+  Resolves the receiver class via `deduceArgTypeToken` (which gained a `ThisExpr` case →
+  `currentClassName_`, a new parser field set around `parseMemberList`) or the leading class name for
+  the static form; strips a `$…` mangling suffix for the key check. Disambiguates `obj.m < x` from
+  `obj.m<T>(...)` by whether the `<…>` closes and is followed by `(` (a `looksLikeGenericCall`
+  lookahead): if so an unresolved/absent method is a clean error, else it falls through to less-than.
+  On a hit: `parseTypeArgList` → mangle `m$i32` → `recordMethodInstantiation` (dedup key
+  `Owner::m$i32`) → emit a `MethodCallExpr` whose `method` token is the mangled name.
+- **Monomorphization** (`instantiateMethod`, run from `runMonomorphization`): substitute type-param
+  tokens + rename the method-name token to the mangled name (reusing the existing splice), then a
+  **shell re-parse** — wrap the concrete method tokens in `class <Owner> { … }`, `parseDeclaration()`,
+  and **transplant** the single `MethodDecl` into the real owner's `ClassDeclStmt::methods` deque
+  (found by name). Naming the shell the real owner makes a `this.m<U>()` recursion inside the body
+  resolve correctly. From there `collectClasses`/`genMethod` pick it up with **zero** new
+  semantic/codegen code. Bound obligations (`<T: Trait>`) reuse the existing `GenericBoundCheck` push.
+- **Generic classes** (the ordering fix): a method on `Array<T>` can only instantiate after `Array$i32`
+  is re-parsed (which registers `Array$i32::wrap`). A method instantiation whose owner class / template
+  isn't ready is **deferred** to `pendingMethodInsts_`; after the main worklist drains,
+  `runMonomorphization` retries deferred methods to a **fixpoint** (a method body may enqueue more
+  class/method work), stopping when nothing's pending or no pass makes progress (→ a clear error).
+- **v1 limits** (clean errors, never a miscompile): explicit `<T>` required (no argument inference for
+  method calls); impl/trait-block generic methods rejected; variadic methods (`fn m<...Ts>`) rejected
+  (the follow-up this unblocks — combined, `Array<T>::emplaceBack<...Us>` becomes reachable);
+  `@annotation` on a generic method rejected; non-parser-visible receivers (call results, `a.b.m<T>()`
+  chains, and a **`var`-typed** local — `var` records a sentinel type at parse time, same limitation as
+  generic type-argument inference over `var`) → the "cannot determine receiver" error. A bare
+  `obj.m(args)` with no `<…>` reports the
+  terse "no method 'm'" (semantics can't see generic-method names — a documented cosmetic gap).
+  Tests: `tests/generic_method_tests.cpp` (`[genericmethod]`), `e2e/generic_method_test.gg`.
+
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
 trait(s) — user traits **and** built-in operator traits (`Add`/`Ord`/…). Enforced **both** at each
@@ -1611,6 +1658,28 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1234 test cases / 2316 assertions** (as of **generic methods** — `fn m<T>(...)` on a class, with
+its own type parameters distinct from any class type params. A parser/monomorphizer feature (like
+free-function generics): the generic method is captured as a per-class template
+(`gen_->methodTemplates`, keyed `Owner::method`), a call `obj.m<i32>(...)` resolves the receiver's
+class **at parse time** (the new hard part — only parser-visible receivers: a bare local/param/field,
+`this`, or the static `Class::m<T>()` form), and the concrete method is re-parsed via a shell class +
+**transplanted** into the owner's `ClassDeclStmt::methods` so semantics/codegen emit `@Class_m$i32`
+with zero new downstream code. Works on **generic classes** too (`Holder<i32>::passThrough<U>`) via a
+deferral fixpoint in `runMonomorphization` (a method instantiates only after its mangled class is
+re-parsed). Bounds (`<T: Trait>`) reuse the existing `GenericBoundCheck` path; static/`mut`/object-
+return/`this`-receiver methods all fall out of the transplanted `MethodDecl`. Two prerequisite fixes:
+a brace-aware `prescanTemplateNames` (a `fn m<T>(` inside a class body is a method, not a free
+function) and a new parser `currentClassName_` (for `this` receivers). v1 defers argument inference
+(explicit `<T>` required), impl/trait-block generic methods, and variadic methods — the last being the
+follow-up this unblocks toward `Array<T>::emplaceBack<...Us>`. A QA pass added coverage for
+recursion (`this.m<T>()` self-call — the shell class is named the real owner precisely so this
+resolves), multiple type params (`<K,V>`), gm-calling-gm, default params, `?.` safe calls, a
+generic-free-fn + generic-method same-name coexistence, nested type args, param receivers, and the
+`var`-receiver limitation; it also confirmed the `<`-disambiguation is sound (a `field < X > (…)`
+collision only ever affects an already-invalid chained comparison, never valid code). See the
+"Generic methods" invariant; `tests/generic_method_tests.cpp` (`[genericmethod]`, 22 cases),
+`e2e/generic_method_test.gg`. Prior baseline was
 **1212 test cases / 2278 assertions** (as of **spreading a variadic pack into a non-variadic
 call** — `f(fixed…, xs...)` now works even when `f` is NOT itself pack-bearing: the pack tuple is
 **unwrapped** into N ordinary positional arguments (`xs._0, …, xs._{N-1}`) at parse time

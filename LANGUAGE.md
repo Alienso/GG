@@ -1986,6 +1986,25 @@ This is what lets `String` and the generic `Array<T>` be stored by value inside 
 (`Array<String>`, `Array<Array<Point>>`). Without a `Clone` impl, using a buffer-owning value object
 as an `Array` element is a compile error that points you here.
 
+**Copying a buffer owner requires `Clone`.** More generally, any attempt to **copy** a value object
+that owns a raw `ptr` (directly or through a field) without a `Clone` impl is a compile error — a
+memberwise copy would duplicate the pointer, leaking one buffer and double-freeing the other:
+
+```gg
+class Buf { mut ptr<i32> data; Buf(i32 n) { data = malloc(n); } ~Buf() { free(data); } }
+
+Buf a(4);
+Buf b = a;      // error: 'Buf' owns a raw pointer and has no 'impl Clone' — copying would alias it
+b = Buf(2);     // error: same reason (assignment also copies)
+
+Buf& r = a;     // OK — a reference binds without copying
+Buf c = Buf(4); // OK — constructs a fresh object in place (no copy)
+```
+
+The check is precise: it only fires on an actual copy (a value binding/assignment from an existing
+object), not on constructing a fresh one, and it recognizes a class that merely *embeds* a `Clone`
+field (that field deep-copies itself, so the outer copy is safe).
+
 **Explicit `.clone()`.** Every object also supports a built-in **`obj.clone()`** — a zero-argument
 call that returns a fresh value-object copy of the receiver (works on both a value object and a
 reference):

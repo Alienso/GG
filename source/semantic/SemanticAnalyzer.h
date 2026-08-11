@@ -392,6 +392,15 @@ private:
     // True if a class (transitively) owns a raw ptr/ptr<T> field — can't be a by-value ptr<T> element.
     [[nodiscard]] bool classOwnsRawPtr(const std::string& className,
                                        std::unordered_set<std::string>& seen) const;
+    // A value object that transitively owns a raw ptr and does NOT implement `Clone` cannot be
+    // copied by value — memberwise clone shallow-copies the raw pointer, aliasing the buffer (leaking
+    // the old one, double-freeing the new). Errors + returns true in that case; otherwise no-op false.
+    bool rejectUncloneablePtrOwner(const Type& objType, const Token& at);
+    // True if a class's GENERATED memberwise clone would shallow-copy (alias) a raw pointer. A class
+    // implementing `Clone` deep-copies through its impl, so it's safe and STOPS the recursion; else a
+    // direct raw-ptr field, or an embedded value-object field that is itself unsafe, makes it unsafe.
+    [[nodiscard]] bool memberwiseCopyAliasesRawPtr(const std::string& className,
+                                                   std::unordered_set<std::string>& seen) const;
     [[nodiscard]] Type analyzeThis(const ThisExpr& thisExpr);
     [[nodiscard]] Type analyzeMemberAccess(const MemberAccessExpr& memberAccess);
     [[nodiscard]] Type analyzeMemberAssign(const MemberAssignExpr& memberAssign);

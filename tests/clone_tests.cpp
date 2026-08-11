@@ -120,3 +120,72 @@ TEST_CASE("Clone - the built-in trait cannot be redeclared", "[clone][semantic]"
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("built-in"));
 }
+
+// ============================================================
+// Copy guard: a value object that (transitively) owns a raw ptr and does NOT impl Clone cannot be
+// COPIED by value — memberwise clone shallow-copies the pointer, aliasing the buffer (leak + double
+// free). This turns a silent heap-corruption crash into a clean compile error. Constructing a fresh
+// value, or binding/passing by reference, is unaffected; a Clone impl deep-copies and is allowed.
+// ============================================================
+
+static const char* RAW_NO_CLONE = R"(
+    extern malloc(u64 size) -> ptr;
+    extern free(ptr p);
+    class Buf {
+        mut ptr<i32> data;
+        Buf(i32 s) { data = malloc(16); }
+        ~Buf() { free(data); }
+    }
+)";
+
+TEST_CASE("Clone - assigning a raw-ptr class without Clone is a clean error", "[clone][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(RAW_NO_CLONE) + R"(
+        fn main() -> i32 { mut Buf b(1); b = Buf(2); return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("impl Clone for Buf"));
+}
+
+TEST_CASE("Clone - copy-initializing a raw-ptr class without Clone is a clean error", "[clone][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(RAW_NO_CLONE) + R"(
+        fn main() -> i32 { Buf a(1); Buf c = a; return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("owns a raw pointer"));
+}
+
+TEST_CASE("Clone - directly constructing a raw-ptr class without Clone is allowed (no copy)", "[clone][semantic]") {
+    // `Buf a = Buf(1)` builds the object in place — no copy, no alias — so it must NOT be rejected.
+    auto result = analyzeString(std::string(RAW_NO_CLONE) + R"(
+        fn main() -> i32 { Buf a = Buf(1); return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Clone - binding a raw-ptr class by reference is allowed (no copy)", "[clone][semantic]") {
+    auto result = analyzeString(std::string(RAW_NO_CLONE) + R"(
+        fn take(Buf* b) -> i32 { return 0; }
+        fn main() -> i32 { Buf a(1); Buf* r = a; return take(r); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Clone - copying a raw-ptr class WITH a Clone impl is allowed", "[clone][semantic]") {
+    // Bytes owns a raw ptr but impls Clone → assignment/copy deep-copies via the impl, so it's fine.
+    auto result = analyzeString(std::string(BYTES_CLONE) + R"(
+        fn main() -> i32 { mut Bytes a(2); Bytes b(3); a = b; Bytes c = b; return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Clone - copying a class embedding a Clone field is allowed (recursion is safe)", "[clone][semantic]") {
+    // `Wrap` doesn't impl Clone, but its only raw ptr is inside an embedded `Bytes` field that DOES —
+    // the generated memberwise clone recurses through @Bytes_clone (deep). So a copy is safe.
+    auto result = analyzeString(std::string(BYTES_CLONE) + R"(
+        class Wrap { mut Bytes b; Wrap() { } }
+        fn main() -> i32 { mut Wrap x; Wrap y = x; return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

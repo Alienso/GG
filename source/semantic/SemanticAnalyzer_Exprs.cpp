@@ -258,6 +258,36 @@ bool SemanticAnalyzer::classOwnsRawPtr(const std::string& className,
     return false;
 }
 
+bool SemanticAnalyzer::memberwiseCopyAliasesRawPtr(const std::string& className,
+                                                   std::unordered_set<std::string>& seen) const {
+    // A class that implements Clone deep-copies through its impl — copying it never shallow-aliases,
+    // so it (and everything it embeds) is safe. This is what makes an embedded `Clone` field (e.g.
+    // `class Wrap { Bytes b; }` where Bytes impls Clone) safe to copy even though Wrap itself doesn't.
+    auto tIt = implementedTraits.find(className);
+    if (tIt != implementedTraits.end() && tIt->second.count("Clone") > 0) return false;
+    if (!seen.insert(className).second) return false;   // cycle-safe
+    auto it = classRegistry.find(className);
+    if (it == classRegistry.end()) return false;
+    for (const std::string& fname : it->second.fieldOrder) {
+        const Type& ft = it->second.fields.at(fname).type;
+        if (ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) return true;   // shallow-copied
+        if (ft.kind == TypeKind::Object && memberwiseCopyAliasesRawPtr(ft.className, seen)) return true;
+    }
+    return false;
+}
+
+bool SemanticAnalyzer::rejectUncloneablePtrOwner(const Type& objType, const Token& at) {
+    if (objType.kind != TypeKind::Object) return false;
+    std::unordered_set<std::string> seen;
+    if (!memberwiseCopyAliasesRawPtr(objType.className, seen)) return false;              // safe to copy
+    error(at, "cannot copy value object of type '" + objType.className + "': it owns a raw pointer "
+          "(directly or through a field), and a memberwise copy would alias that buffer — leaking the "
+          "old one and double-freeing the new. Define an 'impl Clone for " + objType.className
+          + "' to deep-copy it, or bind/pass it by reference ('" + objType.className + "&' / '"
+          + objType.className + "*') instead of copying it by value.");
+    return true;
+}
+
 const std::vector<ClassInfo::Method>* SemanticAnalyzer::currentClassMethods(const std::string& name) const {
     if (currentClassName.empty()) return nullptr;
     auto cit = classRegistry.find(currentClassName);
@@ -1287,6 +1317,11 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     Type lhsType = sym->type;
     Type rhsType = analyzeWithExpected(*assign.value, lhsType);
     checkCast(rhsType, lhsType, assign.name, "assignment");
+    // Value-object assignment ALWAYS deep-copies (clone) into the existing storage — even from a
+    // freshly constructed temporary — so a raw-ptr owner without a `Clone` impl would alias its
+    // buffer (double-free). Reject it. (A reference binding rebinds instead and is unaffected.)
+    if (lhsType.kind == TypeKind::Object)
+        rejectUncloneablePtrOwner(lhsType, assign.name);
     // Rebinding a `mut` reference from a read-only reference is a const→mut coercion.
     if (sym->isMutable)
         warnConstToMut(assign.name, *assign.value, lhsType);
@@ -1713,6 +1748,19 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
                  + varDecl.name.lexeme + "' copies it and frees the heap allocation immediately; bind "
                  "it as '" + declaredType.className + "&' (or use 'var') to reference the object "
                  "without copying");
+        // Copy-initialization of a raw-ptr-owning value object without a `Clone` impl aliases its
+        // buffer (double-free). Only a genuine COPY source triggers this — an existing object place
+        // (identifier / field / element / this) or a `new` result; constructing a fresh value
+        // (`Point p = Point(...)`, a return-slot call) builds in place and is safe, so is not flagged.
+        if (declaredType.kind == TypeKind::Object) {
+            const auto& n = *varDecl.initializer->node;
+            bool copySource = std::holds_alternative<IdentifierExpr>(n)
+                           || std::holds_alternative<MemberAccessExpr>(n)
+                           || std::holds_alternative<IndexExpr>(n)
+                           || std::holds_alternative<ThisExpr>(n)
+                           || std::holds_alternative<NewExpr>(n);
+            if (copySource) rejectUncloneablePtrOwner(declaredType, varDecl.name);
+        }
         // A primitive borrow (`i32*`) must borrow an addressable value. Binding from a fresh
         // primitive (not itself a borrow being passed along) requires an lvalue — a temporary
         // has no address.

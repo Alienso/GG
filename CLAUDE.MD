@@ -1435,6 +1435,19 @@ clone is shallow over a raw `ptr` → double-free).
   fresh, `memcpy`s `src`) and `impl<T> Clone for Array<T>` (a **generic impl** — monomorphizes with the
   class; destroys old elements + frees old buffer, then `malloc`s and element-writes each `src` element,
   routing through `T`'s clone = recursive).
+- **C6 copy guard for plain value copies** (`rejectUncloneablePtrOwner` + `memberwiseCopyAliasesRawPtr`,
+  `SemanticAnalyzer_Exprs.cpp`): a value object whose **generated memberwise clone would shallow-copy a
+  raw pointer** cannot be copied by value — the shallow copy aliases the buffer (leak of the old + double
+  free of the new, previously a **silent heap-corruption crash**). Now a clean compile error suggesting
+  `impl Clone` or a reference binding. Fires at the two whole-object copy sites: **assignment**
+  (`analyzeAssign`, Object LHS — always clones, guarded unconditionally) and **copy-initialization**
+  (`analyzeVarDecl`, Object — only for a genuine copy SOURCE: an identifier / field / element / `this` /
+  `new` result; a direct construct `Point p = Point(...)` or a return-slot call builds in place and is
+  NOT flagged). The predicate is **Clone-aware and recursive**: it returns false (safe) at any class that
+  impls `Clone` (copying routes through its deep impl), so a class embedding a `Clone` field (`Wrap {
+  Bytes b; }` where `Bytes` impls Clone but `Wrap` doesn't) is correctly allowed — its memberwise clone
+  recurses through `@Bytes_clone`. (Distinct from the element guard's `classOwnsRawPtr`, which does not
+  stop at Clone fields; only the copy guard uses the Clone-aware variant.)
 - Tests: `tests/clone_tests.cpp` (`[clone]`), `e2e/array_clone_test.gg` (`Array<String>` +
   `Array<Array<Point>>`, independent-buffer + recursion checks, exit 0).
 
@@ -1658,6 +1671,18 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1240 test cases / 2324 assertions** (as of a **copy guard for raw-pointer-owning value objects** —
+a value object whose generated memberwise clone would shallow-copy a raw `ptr` (aliasing its buffer →
+leak + double-free, previously a silent heap-corruption crash) now cannot be **copied by value** without
+an `impl Clone`: a clean compile error at assignment (`p = Foo(...)`) and copy-init (`Foo p = q`),
+suggesting `impl Clone` or a reference binding. Direct construction (`Foo p = Foo(...)` — builds in
+place) and reference bindings are unaffected. The predicate is Clone-aware + recursive
+(`memberwiseCopyAliasesRawPtr`): it stops at any class implementing `Clone`, so a class embedding a
+`Clone` field is correctly allowed (its memberwise clone recurses through the field's deep copy) — the
+existing `Wrap { Bytes b; }` test would otherwise be a false positive. Reference/nested-object fields
+were already handled correctly by the clone (retain-new/release-old per field), verified empirically;
+this closes the remaining raw-`ptr` hole. See the `Clone` invariant (C6); `tests/clone_tests.cpp`
+(`[clone]`, +6 cases). Prior baseline was
 **1234 test cases / 2316 assertions** (as of **generic methods** — `fn m<T>(...)` on a class, with
 its own type parameters distinct from any class type params. A parser/monomorphizer feature (like
 free-function generics): the generic method is captured as a per-class template

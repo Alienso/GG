@@ -1,0 +1,83 @@
+// e2e/variadic_spread_unwrap_test.gg — spreading a variadic pack into a NON-variadic target.
+// `f(fixed…, xs...)` where `f` is NOT itself pack-bearing unwraps `xs` into N ordinary positional
+// arguments (`xs._0, …, xs._{N-1}`) at parse time, then ordinary overload resolution checks arity and
+// types exactly as if they'd been hand-written. This is the "second gap" toward a real
+// `emplace_back`: combined with the earlier direct-construct optimization for `ptr<T>` buffer
+// elements, an arbitrary compile-time argument pack can now forward straight into a buffer element's
+// own constructor — `data[i] = Box(args...)` — with zero temporary object and zero clone.
+// Exit 0 = all checks held.
+
+import "std/crt/cmem.gg";
+
+class Ctr {
+    mut static i32 live;
+    fn static inc() { Ctr::live = Ctr::live + 1; }
+    fn static dec() { Ctr::live = Ctr::live - 1; }
+    fn static get() -> i32 { return Ctr::live; }
+}
+
+// A tracked heap resource: ctor bumps the counter, dtor drops it.
+class Node {
+    mut i32 v;
+    Node(i32 x) { v = x; Ctr::inc(); }
+    ~Node() { Ctr::dec(); }
+    fn val() -> i32 { return v; }
+}
+
+// A value object owning a Node& reference field. Its ctor's `n = nd` field-assign always releases
+// whatever was previously in that slot, so this proves the direct-construct zero-init still applies
+// correctly when the constructor call arrives via a spread-unwrapped pack (not a hand-written call).
+class Box {
+    mut Node& n;
+    Box(i32 x) { Node& nd = new Node(x); n = nd; }
+    fn get() -> i32 { return n.val(); }
+}
+
+// The flagship scenario: forward an arbitrary compile-time pack straight into a raw buffer element's
+// OWN constructor — combining spread-unwrap (this feature) with direct-construct (the prior feature).
+fn emplaceAt<...Ts>(ptr<Box> data, i32 i, Ts... args) {
+    data[i] = Box(args...);
+}
+
+fn emplaceLoop() -> i32 {
+    mut ptr<Box> data = malloc(5 * sizeof(Box));
+    mut i32 i = 0;
+    while (i < 5) {
+        i32 v = i * 10;
+        emplaceAt(data, i, v);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 5) {
+        if (data[i].get() != i * 10) { free(data); return 51; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 5) { destroy(data[i]); i = i + 1; }
+    free(data);
+    return 0;
+}
+
+// A non-object target: forwarding a pack straight into an ordinary (non-object) free function.
+fn sum3(i32 a, i32 b, i32 c) -> i32 { return a + b + c; }
+fn forwardSum<...Ts>(Ts... args) -> i32 { return sum3(args...); }
+
+// A tail-pack (not just the top-level pack) spread into a plain constructor call.
+class Pair { mut i32 a; mut i32 b; Pair(i32 x, i32 y) { a = x; b = y; } }
+fn secondAndThird<...Ts>(Ts... args) -> i32 {
+    match args {
+        ()     -> { return -1; }
+        (x:xs) -> { Pair p = Pair(xs...); return p.a + p.b; }
+    }
+}
+
+fn main() -> i32 {
+    i32 r1 = emplaceLoop();  if (r1 != 0) { return r1; }
+    if (Ctr::get() != 0) { return 1; }   // every Box constructed via the unwrap path was destroyed
+
+    if (forwardSum(1, 2, 3) != 6) { return 2; }
+
+    if (secondAndThird(1, 2, 3) != 5) { return 3; }   // tail pack (2,3) → Pair(2,3) → 2+3
+
+    return 0;
+}

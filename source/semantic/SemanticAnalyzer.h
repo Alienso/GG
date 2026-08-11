@@ -145,6 +145,10 @@ struct SemanticResult {
     // Inferred `var` locals: VarDeclExpr node → the synthesized type token for the deduced type.
     // Codegen swaps this in for the `var` sentinel token so its existing branches resolve the type.
     std::unordered_map<const void*, Token> inferredVarType;
+    // Built-in `obj.clone()`: MethodCallExpr node → the receiver's class name. Codegen lowers it to
+    // `@Class_clone(slot, recv)` (sret-shaped), reusing the generated memberwise clone or a user
+    // `impl Clone` transparently. Result is a fresh value object.
+    std::unordered_map<const void*, std::string> builtinCloneCalls;
 };
 
 class SemanticAnalyzer {
@@ -201,6 +205,8 @@ private:
     std::unordered_map<const void*, std::vector<int>> callArgOrder_;
     // Inferred `var` local nodes → synthesized type token (copied to SemanticResult).
     std::unordered_map<const void*, Token> inferredVarType_;
+    // Built-in `obj.clone()` nodes → receiver class name (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> builtinCloneCalls_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;

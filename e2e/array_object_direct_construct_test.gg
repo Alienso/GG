@@ -1,0 +1,156 @@
+// End-to-end test for the direct-construct optimization on `ptr<Class>` buffer element writes:
+// `data[i] = Class(args)` now constructs straight into the slot's address (no temp, no clone) when
+// the RHS is a bare constructor call for the element's exact class. This exercises the pattern
+// directly against a raw `--unsafe-ptr` buffer (not through stdlib Array<T>, since Array<T>'s own
+// push/set pass a `T*` borrow parameter, never a bare constructor call — this feature only kicks in
+// for user code writing `data[i] = Class(args)` directly).
+//
+// We prove correctness with a live-object counter (ctor increments, dtor decrements): a balanced
+// counter means every constructed element was destroyed exactly once (no leak); a crash would mean
+// double-free/corruption. The `Box` element owns a `Node&` reference field, so its constructor's
+// `this.n = nd` field-assign always releases whatever was previously in that memory — proving the
+// slot is correctly zero-initialized before every direct-construct call, even when reconstructing a
+// slot that was just destroy()'d (whose raw bytes are stale, not zero).
+// Expected exit code: 0.
+
+import "std/crt/cmem.gg";
+
+class Ctr {
+    mut static i32 live;
+    fn static inc() { Ctr::live = Ctr::live + 1; }
+    fn static dec() { Ctr::live = Ctr::live - 1; }
+    fn static get() -> i32 { return Ctr::live; }
+}
+
+// A tracked heap resource: ctor bumps the counter, dtor drops it.
+class Node {
+    mut i32 v;
+    Node(i32 x) { v = x; Ctr::inc(); }
+    ~Node() { Ctr::dec(); }
+    fn val() -> i32 { return v; }
+}
+
+// A value object that shares a Node via a reference field (its ctor's `n = nd` field-assign always
+// releases the field's PRIOR contents first — a safe null no-op only if the slot was zero-inited).
+class Box {
+    mut Node& n;
+    Box(i32 x) { Node& nd = new Node(x); n = nd; }
+    fn get() -> i32 { return n.val(); }
+}
+
+// A plain, no-constructor value object (proves the "no ctor → zero-init only" no-op path at runtime).
+class Empty { mut i32 pad; }
+
+// A POD value object + a class embedding two of them BY VALUE — direct-constructing a Segment must
+// zero the whole aggregate, then Segment's ctor deep-copies each embedded Point field.
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+class Segment {
+    mut Point a; mut Point b;
+    Segment(i32 x1, i32 y1, i32 x2, i32 y2) { a = Point(x1, y1); b = Point(x2, y2); }
+}
+
+// Overloaded constructors, resolved via the normal overload machinery even under direct-construct.
+class Pair {
+    mut i32 a; mut i32 b;
+    Pair(i32 x, i32 y) { a = x; b = y; }
+    Pair(i32 x) { a = x; b = x; }
+}
+
+// (1) Direct-construct N Boxes into a raw buffer (forcing reuse of the SAME slots is done in (2)),
+// then destroy + free. Balanced counter proves no leak from the direct-construct path itself.
+fn directConstructLoop() -> i32 {
+    mut ptr<Box> data = malloc(10 * sizeof(Box));
+    mut i32 i = 0;
+    while (i < 10) { data[i] = Box(i); i = i + 1; }   // bare ctor call — direct construct
+    i = 0;
+    while (i < 10) {
+        if (data[i].get() != i) { free(data); return 81; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 10) { destroy(data[i]); i = i + 1; }
+    free(data);
+    return 0;
+}
+
+// (2) destroy() a live slot, then direct-construct a NEW Box into the SAME (now stale, non-zero)
+// memory. If the slot weren't zero-inited before the new ctor runs, Box's `n = nd` would release a
+// dangling pointer left over from the destroyed element — a double-free / crash, not just a leak.
+fn destroyThenReconstruct() -> i32 {
+    mut ptr<Box> data = malloc(1 * sizeof(Box));
+    data[0] = Box(111);
+    if (data[0].get() != 111) { free(data); return 82; }
+    destroy(data[0]);              // Node released; data[0]'s raw memory is now stale, not zero
+    data[0] = Box(222);            // direct-construct into the same stale slot
+    if (data[0].get() != 222) { free(data); return 83; }
+    destroy(data[0]);
+    free(data);
+    return 0;
+}
+
+// (3) A class with no user constructor: `data[i] = Empty();` must zero-init the slot and emit no
+// constructor call at all (no runtime effect to check beyond "it doesn't crash").
+fn noCtorClass() -> i32 {
+    mut ptr<Empty> data = malloc(1 * sizeof(Empty));
+    data[0] = Empty();
+    if (data[0].pad != 0) { free(data); return 84; }
+    free(data);
+    return 0;
+}
+
+// (4) Overloaded constructor resolution still works when direct-constructing into a buffer slot.
+fn overloadedCtor() -> i32 {
+    mut ptr<Pair> data = malloc(2 * sizeof(Pair));
+    data[0] = Pair(3, 4);
+    data[1] = Pair(9);
+    if (data[0].a != 3) { free(data); return 85; }
+    if (data[0].b != 4) { free(data); return 86; }
+    if (data[1].a != 9) { free(data); return 87; }
+    if (data[1].b != 9) { free(data); return 88; }
+    free(data);
+    return 0;
+}
+
+// (5) Argument-before-zero-init ordering: reconstruct an element from its OWN current field values.
+// If the slot were zeroed before the args were read, we'd read zeros and get the wrong result.
+fn readModifyWrite() -> i32 {
+    mut ptr<Point> data = malloc(1 * sizeof(Point));
+    data[0] = Point(10, 20);
+    data[0] = Point(data[0].x + 1, data[0].y + 2);   // must read OLD 10/20, not zeros
+    if (data[0].x != 11) { free(data); return 89; }
+    if (data[0].y != 22) { free(data); return 90; }
+    free(data);
+    return 0;
+}
+
+// (6) Embedded value-object fields: direct-constructing a Segment zeros the whole aggregate, then
+// its ctor copies each embedded Point in. Reading them back verifies the deep copy landed correctly.
+fn embeddedValueFields() -> i32 {
+    mut ptr<Segment> data = malloc(2 * sizeof(Segment));
+    data[0] = Segment(1, 2, 3, 4);
+    data[1] = Segment(5, 6, 7, 8);
+    if (data[0].a.x != 1) { free(data); return 91; }
+    if (data[0].b.y != 4) { free(data); return 92; }
+    if (data[1].a.x != 5) { free(data); return 93; }
+    if (data[1].b.y != 8) { free(data); return 94; }
+    free(data);
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 r1 = directConstructLoop();       if (r1 != 0) { return r1; }
+    if (Ctr::get() != 0) { return 1; }
+
+    i32 r2 = destroyThenReconstruct();    if (r2 != 0) { return r2; }
+    if (Ctr::get() != 0) { return 2; }
+
+    i32 r3 = noCtorClass();               if (r3 != 0) { return r3; }
+
+    i32 r4 = overloadedCtor();            if (r4 != 0) { return r4; }
+
+    i32 r5 = readModifyWrite();           if (r5 != 0) { return r5; }
+
+    i32 r6 = embeddedValueFields();       if (r6 != 0) { return r6; }
+
+    return 0;
+}

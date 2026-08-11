@@ -202,7 +202,12 @@ Expr Parser::parseExpression() {
             advance();  // consume '(' or '{'
             // Braces stay positional; `ClassName v(...)` accepts named arguments.
             std::vector<Token> argNames;
-            std::vector<std::unique_ptr<Expr>> args = parseCallArgs(argNames, close, /*allowNames=*/!brace);
+            std::vector<bool>  argSpreads;
+            std::vector<std::unique_ptr<Expr>> args =
+                parseCallArgs(argNames, close, /*allowNames=*/!brace, &argSpreads);
+            // A constructor can never itself be pack-bearing (packs are free-function-only) —
+            // unconditionally unwrap any spread.
+            for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
             // Store as a CallExpr whose callee lexeme == class name — semantic pass detects this
             initializer = box(makeExpr(CallExpr{ typeName, std::move(args), std::move(argNames) }));
         }
@@ -466,8 +471,12 @@ Expr Parser::parsePostfix() {
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('
                 std::vector<Token> argNames;
+                std::vector<bool>  argSpreads;
                 std::vector<std::unique_ptr<Expr>> args =
-                    parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
+                    parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &argSpreads);
+                // A method/static call can never itself be pack-bearing (packs are free-function-only)
+                // — unconditionally unwrap any spread.
+                for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
                 expression = makeExpr(MethodCallExpr{
                     box(std::move(expression)), member, std::move(args), std::move(argNames), safe
                 });
@@ -532,7 +541,12 @@ Expr Parser::parsePrimary() {
         TokenType close = brace ? TokenType::RIGHT_BRACE : TokenType::RIGHT_PAREN;
         // Braces stay positional; parenthesised `new Point(...)` accepts named arguments.
         std::vector<Token> argNames;
-        std::vector<std::unique_ptr<Expr>> args = parseCallArgs(argNames, close, /*allowNames=*/!brace);
+        std::vector<bool>  argSpreads;
+        std::vector<std::unique_ptr<Expr>> args =
+            parseCallArgs(argNames, close, /*allowNames=*/!brace, &argSpreads);
+        // A constructor can never itself be pack-bearing (packs are free-function-only) —
+        // unconditionally unwrap any spread.
+        for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
         return makeExpr(NewExpr{ keyword, className, std::move(args), std::move(argNames) });
     }
 
@@ -589,8 +603,12 @@ Expr Parser::parsePrimary() {
             recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
             consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
             std::vector<Token> genNames;
+            std::vector<bool>  genSpreads;
             std::vector<std::unique_ptr<Expr>> genArgs =
-                parseCallArgs(genNames, TokenType::RIGHT_PAREN, /*allowNames=*/true);
+                parseCallArgs(genNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &genSpreads);
+            // A template called with EXPLICIT type arguments can never be pack-bearing (rejected
+            // above, since the pack is always inferred) — unconditionally unwrap any spread.
+            for (bool s : genSpreads) if (s) { unwrapSpreadArgs(genArgs, genNames, genSpreads); break; }
             return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                       std::move(genArgs), std::move(genNames) });
         }
@@ -631,6 +649,23 @@ Expr Parser::parsePrimary() {
             std::vector<std::unique_ptr<Expr>> args =
                 parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &argSpreads);
             expectedLambdaSig_ = savedSig;   // restore (handles nested calls)
+
+            // Spread into a NON-pack-bearing target: `name` here may resolve to a free function OR a
+            // class name (constructor call) — GG has no separate ctor-call grammar. A pack-bearing
+            // template keeps the existing pack-forward behavior (deduceVariadicInstantiation, below,
+            // reached via the `funcNames`-gated block); anything else (an ordinary function, an
+            // ordinary non-pack generic function, or a constructor) unwraps the spread here so the
+            // rest of this function sees an ordinary, fully positional-or-named argument list.
+            {
+                bool anySpread = false;
+                for (bool s : argSpreads) if (s) { anySpread = true; break; }
+                if (anySpread) {
+                    auto tmplIt = gen_->templates.find(name.lexeme);
+                    bool targetIsPack = tmplIt != gen_->templates.end()
+                                     && !tmplIt->second.isPack.empty() && tmplIt->second.isPack.back();
+                    if (!targetIsPack) unwrapSpreadArgs(args, argNames, argSpreads);
+                }
+            }
 
             // Lambda-literal inference: a generic function with exactly one `Call`-bounded type
             // parameter, called without explicit `<…>`, and a lambda-literal argument → infer that

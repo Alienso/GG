@@ -58,6 +58,8 @@ int main(int argc, char** argv) {
             options.debugInfo = true;
         } else if (arg == "--overflow-checks") {
             options.overflowChecks = true;
+        } else if (arg.rfind("--target=", 0) == 0) {
+            options.targetTriple = arg.substr(std::string("--target=").size());
         } else {
             paths.emplace_back(std::filesystem::absolute(arg).string());
         }

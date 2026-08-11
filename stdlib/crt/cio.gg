@@ -7,3 +7,11 @@ extern puts(ptr s) -> i32;         // write string + newline to stdout; returns 
 extern putchar(i32 c) -> i32;      // write a single character to stdout; returns the character written
 extern getchar() -> i32;           // read a single character from stdin; returns the character or EOF (-1)
 extern fflush(ptr stream) -> i32;  // flush a stdio stream; pass 0 (null) to flush all open streams
+extern fputs(ptr s, ptr stream) -> i32;   // write string (NO trailing newline, unlike puts) to a stream
+
+
+// Portable stdout/stderr FILE* accessors. These are DEFINED by the GG compiler per target platform
+// (Windows/UCRT → __acrt_iob_func; glibc/musl → the `stdout`/`stderr` globals), so stdlib code stays
+// platform-agnostic. Declared here so GG source may call them.
+extern gg_stdout() -> ptr;
+extern gg_stderr() -> ptr;

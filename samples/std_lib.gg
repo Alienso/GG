@@ -12,18 +12,36 @@ class Instance{
     i32 x;
     i32 y;
 
+    static mut i32 nextId = 0;
+    i32 id;
+
     Instance(i32 x, i32 y){
         this.x = x;
         this.y = y;
+
+        this.id = Instance::nextId;
+        nextId++;
+        print("Instance #"); print(id); println(" created!");
+    }
+
+    ~Instance(){
+        print("Instance #"); print(id); println(" destroyed!");
     }
 }
 
 fn main() -> i32 {
 
+    Instance i = new Instance(1, 2);
+
+    return 0;
+}
+
+/*fn main() -> i32 {
+
     puts("Hello world!");
-    /*Array<i32> array();
+    Array<i32> array();
     array[0] = 54;
-    putchar(array[0]);*/
+    putchar(array[0]);
 
     i32? x = parseI32("-500");
     if (x != null){
@@ -36,4 +54,4 @@ fn main() -> i32 {
     }
 
     return 0;
-}
+}*/

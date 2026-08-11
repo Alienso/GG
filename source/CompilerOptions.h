@@ -15,6 +15,14 @@ struct CompilerOptions {
     bool overflowChecks = false; // trap on integer overflow (+/-/*) and out-of-range narrowing
                                  // conversions; enabled by --overflow-checks (Rust-style, opt-in)
     std::string sourceFile;    // main source path, used as the DWARF DIFile when debugInfo is on
+    // LLVM target triple emitted into the .ll and used by codegen to pick platform-specific runtime
+    // (e.g. how stdout/stderr are obtained). Defaults to the HOST so a native build "just works";
+    // override with --target=<triple> to cross-compile.
+#ifdef _WIN32
+    std::string targetTriple = "x86_64-w64-windows-gnu";
+#else
+    std::string targetTriple = "x86_64-pc-linux-gnu";
+#endif
 };
 
 #endif //GG_COMPILEROPTIONS_H

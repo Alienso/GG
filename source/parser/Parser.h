@@ -280,6 +280,15 @@ private:
     [[nodiscard]] std::optional<std::string> deduceVariadicInstantiation(
         const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
         const std::vector<bool>& spreads);
+    // Spread into a NON-pack-bearing target: if `spreads` marks a spread argument, unwraps its (bare
+    // identifier, tuple-typed) target into N positional `xs._0, …, xs._{N-1}` arguments in place and
+    // returns true; returns false (no-op) if `spreads` has no spread flag. Throws a clear error for
+    // more than one spread, a named spread, a non-identifier spread target, or a non-tuple target.
+    // Callers are responsible for first ruling out that the callee is itself a pack-bearing template
+    // (see deduceVariadicInstantiation) — every OTHER call form (ctor, method, `new`) can call this
+    // unconditionally since packs are v1-scoped to free functions only.
+    bool unwrapSpreadArgs(std::vector<std::unique_ptr<Expr>>& args, std::vector<Token>& argNames,
+                         const std::vector<bool>& spreads);
     // Expand a compile-time cons-`match` over a variadic pack IN PLACE (token level, during
     // monomorphization where the pack arity is known): each `match <packValue> { () -> A; (x:xs) -> B }`
     // is replaced by the arm selected by the pack's arity — `A` for arity 0, else `B` with the head `x`

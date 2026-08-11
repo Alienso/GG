@@ -219,6 +219,21 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
 }
 
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
+    // Built-in `obj.clone()`: materialize a fresh value-object temp, deep-copy the receiver into it
+    // via `@Class_clone(dest, src)` (generated memberwise clone, or the user's `impl Clone`), and
+    // yield the temp's address. Same `(dest, src)` shape as an sret return slot.
+    if (builtinCloneCalls_) {
+        auto it = builtinCloneCalls_->find(&mc);
+        if (it != builtinCloneCalls_->end()) {
+            const std::string& cn = it->second;
+            std::string recv = genExpr(*mc.object);       // receiver's address (value obj or ref ptr)
+            std::string slot = materializeSlotTemp(cn);   // alloca %cn, zero-init, dtor-scoped
+            clonesNeeded_.insert(cn);
+            emit("call void @" + cn + "_clone(ptr " + slot + ", ptr " + recv + ")");
+            return slot;
+        }
+    }
+
     // Safe call `x?.m(args)`: evaluate the (nullable) receiver once; if null the result is empty
     // (or the void call is skipped), else call the instance method and wrap the result. `?.` never
     // yields a value object (rejected in semantics), so there is no sret path here.

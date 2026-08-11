@@ -1703,6 +1703,16 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
     if (varDecl.arraySize == 0 && varDecl.initializer) {
         Type initializerType = analyzeWithExpected(*varDecl.initializer, declaredType);
         checkCast(initializerType, declaredType, varDecl.name, "variable initializer");
+        // Footgun: `Instance i = new Instance(...)` — the LHS is a VALUE object but the RHS is a heap
+        // reference (`new`). The Object←Reference coercion silently deep-copies the fresh heap object
+        // into the stack value, then releases the heap allocation immediately. Almost always the author
+        // meant to bind the object, not clone-and-discard it — nudge toward a reference binding.
+        if (declaredType.kind == TypeKind::Object
+            && std::holds_alternative<NewExpr>(*varDecl.initializer->node))
+            warn(varDecl.name, "binding a heap object ('new') to the value variable '"
+                 + varDecl.name.lexeme + "' copies it and frees the heap allocation immediately; bind "
+                 "it as '" + declaredType.className + "&' (or use 'var') to reference the object "
+                 "without copying");
         // A primitive borrow (`i32*`) must borrow an addressable value. Binding from a fresh
         // primitive (not itself a borrow being passed along) requires an lvalue — a temporary
         // has no address.
@@ -2293,6 +2303,23 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
     if (!cls) {
         for (const auto& arg : methodCall.args) analyzeExpr(*arg);
         return Type{TypeKind::Error};
+    }
+
+    // Built-in `obj.clone()` — a zero-argument copy: returns a fresh VALUE object that is a deep copy
+    // of the receiver. It lowers to the generated memberwise `@Class_clone`, or to the user's
+    // `impl Clone` transparently (same symbol). Only kicks in when the class has no user-declared
+    // zero-arg `clone` method; a `Clone`-trait `clone(Self& src)` takes one argument, so it never
+    // collides with this. (`?.clone()` falls through to normal resolution.)
+    if (methodCall.method.lexeme == "clone" && methodCall.args.empty() && !methodCall.safe) {
+        bool userZeroArgClone = false;
+        auto mit = cls->methods.find("clone");
+        if (mit != cls->methods.end())
+            for (const ClassInfo::Method& m : mit->second)
+                if (m.paramTypes.empty()) { userZeroArgClone = true; break; }
+        if (!userZeroArgClone) {
+            builtinCloneCalls_[&methodCall] = objectType.className;
+            return makeObjectType(objectType.className);
+        }
     }
 
     auto methodIt = cls->methods.find(methodCall.method.lexeme);

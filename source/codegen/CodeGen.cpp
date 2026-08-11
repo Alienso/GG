@@ -30,6 +30,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->eqImplementors_ = &semanticResult.eqImplementors;
     this->callableCalls_ = &semanticResult.callableCalls;
     this->braceInitClass_ = &semanticResult.braceInitClass;
+    this->builtinCloneCalls_ = &semanticResult.builtinCloneCalls;
     this->callArgOrder_ = &semanticResult.callArgOrder;
     this->inferredVarType_ = &semanticResult.inferredVarType;
     this->enumRegistry_ = &semanticResult.enumRegistry;
@@ -41,6 +42,10 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     overflowChecks_  = options.overflowChecks;
     debug_           = options.debugInfo;
     dbgSourceFile_   = options.sourceFile;
+    // Target triple → emitted verbatim + drives platform-specific runtime (stdout/stderr access).
+    module.targetTriple = options.targetTriple;
+    targetWindows_      = options.targetTriple.find("windows") != std::string::npos;
+    panicUsesStderr_    = false;
     dbgNextId_ = 0; dbgFileId_ = -1; dbgCUId_ = -1; currentSubprogram_ = -1;
     currentDbgLoc_.clear(); dbgLineCache_.clear(); dbgTypeCache_.clear();
     usesRefcount_    = false;
@@ -348,6 +353,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
 
     // Emit the refcount runtime if any `new`/retain/release was lowered.
     if (usesRefcount_) emitRefcountRuntime();
+
+    // Provide `@gg_stdout`/`@gg_stderr` (platform-specific FILE* accessors) if referenced.
+    emitStdioHelpers();
 
     // Register every pre-main initializer in one @llvm.global_ctors array.
     emitGlobalCtors();

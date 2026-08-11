@@ -711,6 +711,46 @@ sumW(1, true)            // 11
   One pack per function. (Homogeneous `i32...` packing into an array, and binding C variadic functions
   like `printf`, are not part of this.)
 
+#### Spreading a pack into a non-variadic call
+
+`xs...` also works when the target of the call is **not itself variadic** — an ordinary function, a
+constructor, a method, or `new`. In that case the pack is **unwrapped** into separate positional
+arguments instead of being forwarded as one pack:
+
+```gg
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+
+fn makePoint<...Ts>(Ts... args) -> Point p {
+    p = Point(args...);     // Point(i32,i32) is NOT variadic — args unwraps to Point(args._0, args._1)
+}
+```
+
+The **explicit `...` is required** — `Point(args)` (no ellipsis) does *not* auto-unwrap; it stays an
+ordinary single-argument call and fails arity checking like any mismatched call would. This keeps
+"pass a tuple as one value" and "spread a pack across several parameters" visually and semantically
+distinct everywhere in the language.
+
+Combined with direct-construct buffer elements (see `ptr<T>` above), this lets a pack forward all the
+way into a raw buffer slot's own constructor with no intermediate object at all:
+
+```gg
+fn emplaceAt<...Ts>(ptr<Point> data, i32 i, Ts... args) {
+    data[i] = Point(args...);    // constructs directly into data[i] — no temp, no clone
+}
+```
+
+A spread need not be the last argument (`sum3(args..., 9)` splices the pack's fields in place, keeping
+`9` last); the target may be checked for the wrong arity like any call (`sum3(args...)` with a
+2-element pack is an ordinary "expects 3, got 2" error).
+
+**v1 limitations** (clean errors, same spirit as the rest of this feature): at most one spread per
+call; the spread target must be a bare in-scope variable (the pack parameter itself, or a
+cons-match tail-pack `xs`) — spreading a more complex expression (`data[i]...`, `makeThing()...`)
+isn't supported; a spread can't be a named argument (`f(x: xs...)`). Spreading into a generic
+function whose type argument would have to be **inferred** from the spread (`identity(args...)`) is a
+"cannot infer" error — give it explicitly (`identity<i32>(args...)`); constructors, plain functions,
+and methods need no inference and are unaffected.
+
 ---
 
 ## 6. Functions
@@ -1453,6 +1493,30 @@ fn pop() mut -> T out {
 local variable (those are destroyed automatically at scope exit — doing so would double-free); use it
 only on `ptr<T>` elements and fields the compiler does not manage for you.
 
+### Direct construction into a `ptr<T>` element
+
+Assigning a **bare constructor call** into a `ptr<T>` buffer element constructs the object straight
+into that slot — no temporary object is built and no copy runs:
+
+```gg
+ptr<Point> data = malloc(sizeof(Point) * n);
+data[i] = Point(2, 3);     // constructs directly at data[i]'s address — no temp, no clone
+```
+
+This is the same "no copy" treatment an ordinary local declaration already gets (`Point p(2, 3);`
+never builds a temporary either). It only applies when the right-hand side is *literally* a
+constructor call for the element's own class — assigning an existing value (`data[i] = otherPoint;`,
+or `data[i] = data[j];`) still deep-copies as before. A class with no constructor
+(`data[i] = Empty();`) simply zero-initializes the slot, matching what `Empty p;` does for a local.
+
+Because the slot may hold **stale data** (e.g. right after `destroy(data[i])`), the compiler
+zero-initializes it before running the constructor — so a constructor field-assignment like
+`this.ref = x` never tries to release a dangling leftover pointer. Constructor **arguments** are
+still evaluated against the slot's *old* contents first, so an in-place update reads the values it
+expects: `data[i] = Point(data[i].x, data[i].y + 1)` increments `y` correctly rather than reading
+zeros. (Assigning an element to *itself*, e.g. `data[i] = data[i]`, is not safe and not supported —
+this is no different from any other self-assignment through a raw buffer.)
+
 ### `sizeof`
 ```gg
 u64 n = sizeof(i32);    // 4
@@ -1884,6 +1948,20 @@ impl Clone for String {
 This is what lets `String` and the generic `Array<T>` be stored by value inside another `Array`
 (`Array<String>`, `Array<Array<Point>>`). Without a `Clone` impl, using a buffer-owning value object
 as an `Array` element is a compile error that points you here.
+
+**Explicit `.clone()`.** Every object also supports a built-in **`obj.clone()`** — a zero-argument
+call that returns a fresh value-object copy of the receiver (works on both a value object and a
+reference):
+
+```
+Point p(1, 2);
+mut Point q = p.clone();   // independent copy — mutating q doesn't touch p
+q.x = 99;
+```
+
+It uses your `impl Clone` when the type has one, otherwise the default memberwise copy — the same
+logic as an implicit copy, just written out. Use it to make an intentional copy explicit (and to
+silence the `new`-into-a-value-variable warning by binding a reference instead, or copying on purpose).
 
 ---
 

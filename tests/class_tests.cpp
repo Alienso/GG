@@ -1032,3 +1032,64 @@ TEST_CASE("Clone - assigning a value to a reference variable is rejected", "[clo
     )");
     REQUIRE(r.hadError);   // Object -> Reference is not implicit; use new Point(p)
 }
+
+TEST_CASE("Clone - binding `new` to a VALUE variable warns (implicit clone-and-free)", "[clone][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Point { i32 x; Point(i32 a){ this.x=a; } ~Point(){} }
+        fn main() -> i32 { Point p = new Point(1); return 0; }
+    )");
+    REQUIRE_FALSE(r.hadError);                 // it's a warning, not an error
+    REQUIRE(cap.contains("copies it and frees the heap allocation"));
+}
+
+TEST_CASE("Clone - built-in `obj.clone()` yields a value-object copy", "[clone][semantic]") {
+    auto r = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a){ x = a; } }
+        fn main() -> i32 { Point p(1); mut Point q = p.clone(); q.x = 9; return p.x + q.x; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Clone - `obj.clone()` lowers to the @Class_clone helper", "[clone][codegen]") {
+    auto ir = codegenString(R"(
+        class Point { i32 x; Point(i32 a){ x = a; } }
+        fn main() -> i32 { Point p(1); Point q = p.clone(); return q.x; }
+    )");
+    REQUIRE(ir.find("@Point_clone(ptr") != std::string::npos);
+}
+
+TEST_CASE("Clone - `.clone()` works through a reference receiver", "[clone][semantic]") {
+    auto r = analyzeString(R"(
+        class Point { i32 x; Point(i32 a){ x = a; } }
+        fn main() -> i32 { Point& ref = new Point(3); Point c = ref.clone(); return c.x; }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Clone - a class with `impl Clone` uses the user clone for `.clone()`", "[clone][codegen]") {
+    // The built-in call emits @Box_clone — which, for a Clone-impl class, IS the user's clone.
+    // (`Clone` is a built-in trait, so it is NOT redeclared here — only `impl`-ed.)
+    auto ir = codegenString(R"(
+        class Box { mut i32 v; Box(i32 n){ v = n; } }
+        impl Clone for Box { fn clone(Box& src) mut { this.v = src.v; } }
+        fn main() -> i32 { Box a(7); Box b = a.clone(); return b.v; }
+    )", defaultTestOptions());
+    REQUIRE(ir.find("@Box_clone(ptr") != std::string::npos);
+}
+
+TEST_CASE("Clone - `Class&` / `var` / value-to-value binding do NOT warn", "[clone][semantic]") {
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Point { i32 x; Point(i32 a){ this.x=a; } ~Point(){} }
+        fn main() -> i32 {
+            Point& a = new Point(1);   // binds the object — no copy
+            var b = new Point(2);      // infers Point& — no copy
+            Point c(3);                // stack value
+            Point d = c;               // plain value copy (not from `new`)
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+    REQUIRE_FALSE(cap.contains("copies it and frees the heap allocation"));
+}

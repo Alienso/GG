@@ -588,6 +588,31 @@ static CompilerOptions checkedOpts() {
     return o;
 }
 
+// The runtime-panic path references @gg_stderr, whose definition is target-specific: Windows/UCRT
+// obtains the FILE* via __acrt_iob_func; glibc/musl load the external @stderr global. The triple is
+// configurable so GG can target both.
+TEST_CASE("Target - Windows triple defines gg_stderr via __acrt_iob_func", "[target][codegen]") {
+    CompilerOptions o = checkedOpts();
+    o.targetTriple = "x86_64-w64-windows-gnu";
+    auto ir = codegenString("fn f(i32 a) -> i32 { return a + a; } fn main() -> i32 { return f(2); }", o);
+    REQUIRE(ir.find("target triple = \"x86_64-w64-windows-gnu\"") != std::string::npos);
+    REQUIRE(ir.find("call ptr @gg_stderr()")            != std::string::npos);
+    REQUIRE(ir.find("define ptr @gg_stderr()")          != std::string::npos);
+    REQUIRE(ir.find("@__acrt_iob_func(i32 2)")          != std::string::npos);
+    REQUIRE(ir.find("@stderr = external global")        == std::string::npos);
+}
+
+TEST_CASE("Target - Linux triple defines gg_stderr via the @stderr global (no __acrt_iob_func)",
+          "[target][codegen]") {
+    CompilerOptions o = checkedOpts();
+    o.targetTriple = "x86_64-pc-linux-gnu";
+    auto ir = codegenString("fn f(i32 a) -> i32 { return a + a; } fn main() -> i32 { return f(2); }", o);
+    REQUIRE(ir.find("target triple = \"x86_64-pc-linux-gnu\"") != std::string::npos);
+    REQUIRE(ir.find("@stderr = external global ptr")     != std::string::npos);
+    REQUIRE(ir.find("load ptr, ptr @stderr")             != std::string::npos);
+    REQUIRE(ir.find("__acrt_iob_func")                   == std::string::npos);
+}
+
 TEST_CASE("Overflow - off by default: plain add, no intrinsic", "[overflow][codegen]") {
     auto ir = codegenString(R"(
         fn add(i32 a, i32 b) -> i32 { return a + b; }

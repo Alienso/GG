@@ -327,7 +327,37 @@ monomorphization.
   (`deduceArgTypeToken` — literals default-typed `1`→i32/`1.0`→f64/`"x"`→str/bool/char, in-scope
   identifiers, ctor/`new`); build the pack tuple (`requestTupleType`, allows internal unit/1-tuples),
   mangle `f$Tuple$…`, and rewrite the args to `[fixed…, one tuple literal]`. A trailing **spread**
-  `xs...` (parsed by `parseCallArgs`) passes an existing pack tuple through directly.
+  `xs...` (parsed by `parseCallArgs`) passes an existing pack tuple through directly **when the
+  target `f` is itself pack-bearing** (re-tuples/re-instantiates, as above). When the target is
+  **NOT** pack-bearing — an ordinary function, an ordinary non-pack generic function, a constructor,
+  a method, or `new` — the spread instead **unwraps**: `Parser::unwrapSpreadArgs`
+  (`Parser_Generics.cpp`, alongside `deduceVariadicInstantiation`) splices `xs._0, xs._1, …,
+  xs._{N-1}` (`MemberAccessExpr` nodes, `N` read directly off `gen_->tupleRequests[tupleName]` — no
+  mangled-string splitting) into the argument list in place of the spread, so ordinary overload
+  resolution then does all arity/type checking exactly as if they'd been hand-written. Since packs
+  are v1-scoped to **free functions only** (a class or method can never be pack-bearing — see below),
+  only the ONE shared bare `IDENTIFIER ( args )` call site (used for both free-function calls and
+  constructor calls) needs the "is the target pack-bearing" discriminator
+  (`gen_->templates.find(name)` + `isPack.back()`, **not** `gen_->funcNames`, which only tracks
+  generic names and would wrongly skip an ordinary non-pack generic function's spread); every other
+  call form (method, `new`, var-decl constructor sugar `Point p(args...)`/`p{args...}`, explicit-`<T>`
+  generic calls) unconditionally unwraps any spread, since none of those targets can ever be
+  pack-bearing. **v1 limits on unwrap** (clean errors): at most one spread per call (position need
+  not be trailing, unlike the pack-forward case); the spread target must be a bare in-scope
+  identifier — the only two shapes a pack variable ever has (the pack parameter itself, or a
+  cons-match tail-pack local) are always bare identifiers by construction, and there is no
+  `Expr`-clone utility in the codebase to safely duplicate anything more complex (e.g. `data[i]...`)
+  without risking re-evaluating a side-effecting expression N times; a named spread argument
+  (`f(x: xs...)`) is rejected. Spreading into an **inferred** (no-`<…>`) generic function
+  (`identity(args...)`) is a clean "cannot infer" error — the unwrapped `args._k` is a tuple-field
+  access, and generic inference (like `deduceArgTypeToken`) doesn't read a type through a
+  `MemberAccessExpr`; the explicit `identity<i32>(args...)` works (a constructor / plain function /
+  method target needs no inference, so those are unaffected). The brace-form primary expression `ClassName{ args }` (a separate
+  hand-rolled arg-parsing loop, no named-arg support either) doesn't support spread in v1 — the paren
+  form covers the need. This closes the second of two gaps toward a real `Array<T>::emplace_back`
+  (the first — direct-construct `ptr<T>` buffer elements — is documented separately above); combined,
+  `data[i] = Point(args...)` now forwards an arbitrary compile-time pack straight into the element's
+  own constructor with zero temporary object and zero clone.
 - **Monomorphization** (`runMonomorphization`): the pack param `Ts... args` substitutes to
   `Tuple$…* args` (a tuple borrow). For a variadic template, the self-reference rename applies **only
   to the decl name** (`tokens[1]`), NOT recursive *calls* — so `f(…, xs...)` re-deduces the SHORTER
@@ -343,7 +373,8 @@ monomorphization.
   infer", same limitation as generic inference incl. forward-reference); explicit `<…>` on a variadic
   is rejected (the pack is inferred); pack elements are value/primitive (tuple-element rules); pack
   trait bounds deferred (overloaded helpers like `weight(x)` per element suffice). Tests:
-  `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`.
+  `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`,
+  `e2e/variadic_spread_unwrap_test.gg`.
 
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
@@ -859,6 +890,14 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
 
 ### Memory model
 - **Value objects** (`Point p`): stack-allocated struct; copied on assignment.
+- **`new` → value-object binding warns** (`analyzeVarDecl`): `Point p = new Point(...)` binds a heap
+  reference (`new` → `Point&`) to a *value* variable, which silently deep-copies the fresh heap object
+  into the stack value and frees the heap allocation immediately — almost always a mistake. A warning
+  nudges toward `Point& p = new Point(...)` (bind the object) or `var p = new Point(...)` (infers the
+  reference). Gated on `declaredType.kind == Object` + the initializer being a `NewExpr`, so `Point&`,
+  `var`, and a plain value-to-value copy (`Point d = c;`) stay silent. (Copy still runs the generated
+  memberwise `@Class_clone`, **not** the constructor — a copy duplicates state, it doesn't reconstruct;
+  the `Clone` trait is the customization hook.)
 - **Value-object fields (embedding)** — a class field may be another class *value*
   (`class Line { Point start; Point end; }`), lowered to a nested struct member
   (`%Line = type { %Point, %Point }`); its "value" is its address (a GEP), like a local value
@@ -1141,8 +1180,8 @@ byte-identical to before** — every check is gated on the flag.
   (checked `emitCast`).
 - **Runtime-panic messages** (`emitPanicMessage`, shared by the overflow, bounds/`str`-index, and `!!`
   null-unwrap traps): before `abort()`, the trap block writes `GG runtime error: <what> at <file:line>`
-  to **stderr** via `fputs` + `__acrt_iob_func(2)` (the MinGW/UCRT stderr accessor; GG's target triple
-  is fixed to `x86_64-w64-windows-gnu`). The message is a compile-time-constant private `[N x i8]`
+  to **stderr** via `fputs` + the portable `@gg_stderr()` accessor (see the cross-platform runtime note).
+  The message is a compile-time-constant private `[N x i8]`
   (no runtime formatting). The line comes from `currentStmtLine_` — tracked **unconditionally** by
   `dbgStmtLine` (called at the top of `genStmt`), independent of `--debug`; the **filename** only
   appears when `--debug` is on (that's the only time `dbgSourceFile_` is set), else the message reads
@@ -1154,6 +1193,30 @@ byte-identical to before** — every check is gated on the flag.
 - **clang `-O` passthrough**: `compile.ps1 -Opt <0|1|2|3|s|z>` adds `-O<level>` to the clang step
   (default `0` — GG previously always compiled unoptimized). Independent of overflow checks.
 - Tests: `tests/cast_tests.cpp` (`[overflow]`), `e2e/overflow_checks_test.gg` (run with `-OverflowChecks`).
+
+### Target platform — configurable triple + cross-platform runtime
+GG can target **Windows** and **Linux** (both via LLVM). Two things are platform-specific and both are
+now parameterized by the target:
+- **Target triple**: `CompilerOptions::targetTriple` (defaults to the **host** via `#ifdef _WIN32` —
+  `x86_64-w64-windows-gnu` on Windows, `x86_64-pc-linux-gnu` elsewhere; override with `--target=<triple>`).
+  Threaded to `IRModule::targetTriple`, emitted by `IRPrinter`. `CodeGen::targetWindows_` = the triple
+  contains `"windows"`.
+- **stdout/stderr access** (the only libc divergence): centralized behind compiler-emitted helpers
+  `@gg_stdout()` / `@gg_stderr()` (`emitStdioHelpers`, called at the end of `generate()`). Windows/UCRT
+  bodies call `__acrt_iob_func(1|2)`; glibc/musl bodies `load` the external `@stdout`/`@stderr` FILE*
+  globals. Emitted only when referenced — the stdlib declares them `extern gg_stdout/gg_stderr` (in
+  `crt/cio.gg`) and `emitStdioHelpers` **replaces that `declare` with the `define`** (LLVM forbids
+  both), while the panic path (`emitPanicMessage`) forces `@gg_stderr` via `panicUsesStderr_` even with
+  no stdlib import. So `stdlib/IO.gg` (`print` → `fputs(s.data, gg_stdout())`) and `cio.gg` are
+  **platform-agnostic** — the one switch lives in `emitStdioHelpers`. Everything else (malloc/free/
+  abort/puts/putchar/fputs/memcpy/…, the refcount runtime, all check intrinsics) is standard C/LLVM.
+  (The `_WIN32` guard in `ImportResolver` is host-side — case-insensitive import dedup — unrelated to
+  the target.) Tests: `tests/cast_tests.cpp` (`[target]`). **Only the Windows path is runtime-tested
+  here** (no Linux toolchain in-repo); the Linux IR is verified structurally.
+- **Driver scripts**: `compile.ps1` (Windows, drives the mysys2 clang64) and `compile.sh` (Linux,
+  `clang` from `PATH` or `$CLANG`). Both run the same pipeline (GG `--unsafe-ptr` → `build/<stem>.ll`
+  → clang → `build/<stem>[.exe]`) and take the same options (`--show-ir`/`-ShowIR`, `--run`/`-Run`,
+  `--debug`/`-DebugInfo`, `-O<level>`/`-Opt`, `--overflow-checks`/`-OverflowChecks`, plus `--target=`).
 
 ### Local type inference — `var` (const by default)
 `var name = expr;` deduces a local's type from its initializer. **Const by default** (single-
@@ -1293,6 +1356,15 @@ A built-in trait `Clone { fn clone(Self& src) mut; }` (a copy constructor): `thi
 `src` = source; the method deep-copies `src` into `this`. It unblocks storing **buffer-owning value
 objects** (`String`, a nested `Array`) by value in an `Array<T>` (Phase 1 rejected them — memberwise
 clone is shallow over a raw `ptr` → double-free).
+- **Built-in `obj.clone()` method** — a zero-arg call on any class receiver (value or reference) that
+  returns a **fresh value-object copy**. Semantic (`analyzeMethodCall`) intercepts `clone()` with no
+  args (only when the class has no user-declared zero-arg `clone` — a `Clone`-trait `clone(Self&)`
+  takes one arg, so no collision), returns `Object{class}`, and records the node in
+  `SemanticResult::builtinCloneCalls`. Codegen materializes a value-object temp (or, for a var
+  initializer, writes in place via `emitSlotCall`) and emits `@Class_clone(dest, src)` — the **same
+  helper** as every other clone site, so it transparently uses the user's `impl Clone` when present
+  else the generated memberwise clone. This is the explicit, user-callable form of the copy that
+  value-object assignment does implicitly; `?.clone()` falls through to normal resolution.
 - **Key mechanism — transparent replacement, zero call-site changes**: a `clone` impl method mangles
   to `@Class_clone` — the *exact* symbol the generated memberwise clone uses and every clone site
   (value copy, sret slot, `Array` element write) already calls. So a `Clone` impl **replaces** the
@@ -1324,9 +1396,20 @@ A `ptr<T>` buffer can hold **value objects by value** — deep-cloned in, destro
 which is what makes stdlib `Array<Point>` work (primitives-only before). No `comptime if`: codegen
 branches on the concrete element type after monomorphization; primitives are unchanged.
 - **Object element WRITE** (`genIndexAssign`, `CodeGen_Exprs.cpp`): for `elementType.kind == Object`,
-  emit `store %C zeroinitializer, ptr <slot>` then `@C_clone(<slot>, <src>)` (register `clonesNeeded_`).
-  The zero-init makes clone's "release dest's old ref" a null no-op on the **raw** slot, turning
-  copy-assignment into a safe copy-**construct**. Primitive elements keep the scalar store.
+  a **bare constructor-call RHS** (`data[i] = Point(2,3)`, guarded on `cgClasses_.count(callee)` —
+  the same test `genCall`'s own bare-ctor-rvalue branch uses, to exclude the `Call`-trait `obj(args)`
+  sugar) **constructs directly into the slot** — no temp, no clone — the same "result location"
+  treatment a local `Point p(2,3);` already gets in `genVarDecl`. Order matters: the constructor's
+  **arguments are evaluated first** (`buildArgString`, while the slot still holds its old bytes — so
+  `data[i] = Point(data[i].x, data[i].y + 1)` reads the old fields, not zeroed garbage), **then** the
+  slot is zero-initialized, **then** the ctor is called (or nothing at all, for a ctor-less class —
+  the zero-init alone is the default-constructed value). Any other RHS shape falls back to the
+  original path: `store %C zeroinitializer, ptr <slot>` then `@C_clone(<slot>, <src>)` (register
+  `clonesNeeded_`) — the zero-init makes clone's "release dest's old ref" a null no-op on the **raw**
+  slot, turning copy-assignment into a safe copy-**construct**. Primitive elements keep the scalar
+  store. (Full self-aliasing through an address/receiver argument — `data[i] = data[i]` or
+  `data[i] = data[i].scaled(2)` — is a known, pre-existing limitation of the clone fallback, shared
+  with `genMemberAssign`'s field-clone branch; not fixed by the direct-construct fast path.)
 - **Object element READ** (`genIndex`): for an object element, return the `genElementAddress` GEP
   (objects carry their address), **not** an `emitLoad` — so it borrows/clones correctly and
   `Index::get(i) -> T*` works.
@@ -1528,6 +1611,67 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1212 test cases / 2278 assertions** (as of **spreading a variadic pack into a non-variadic
+call** — `f(fixed…, xs...)` now works even when `f` is NOT itself pack-bearing: the pack tuple is
+**unwrapped** into N ordinary positional arguments (`xs._0, …, xs._{N-1}`) at parse time
+(`Parser::unwrapSpreadArgs`, `Parser_Generics.cpp`), so existing overload resolution does all
+arity/type checking unchanged — no semantic or codegen changes needed. Works uniformly across a bare
+constructor call, the var-decl constructor sugar, `new`, a method call, an ordinary (non-pack)
+generic function, and a plain free function; also spreads a cons-match tail-pack (not just the
+top-level pack param) and, as a free side effect, an ordinary hand-declared tuple local unrelated to
+any pack. The discriminator ("is the target itself pack-bearing, so the existing pack-forward
+behavior should apply instead") is only needed at the one shared bare `IDENTIFIER ( args )` call
+site (constructors can never be pack-bearing — packs are v1-scoped to free functions only). v1
+requires exactly one spread per call and restricts the spread target to a bare in-scope identifier
+(the only shape a real pack variable ever has; there's no `Expr`-clone utility to safely duplicate
+anything more complex). This closes the second of the two `emplace_back` gaps — combined with the
+prior direct-construct feature, `data[i] = Point(args...)` now forwards an arbitrary compile-time
+pack straight into a buffer element's own constructor with zero temporary object and zero clone
+(confirmed via IR inspection: the tuple fields are GEP'd and loaded, the slot is zero-inited, then
+the constructor is called directly — no `objtmp`, no `@Class_clone`). See the "Variadic parameters"
+invariant; `tests/variadic_tests.cpp` (`[variadic]`, +19 cases — incl. non-trailing spread position,
+object/value-class pack elements borrowed per field, wrong-arity-after-unwrap, and the
+inferred-generic-target limitation), `e2e/variadic_spread_unwrap_test.gg`. Prior baseline was
+**1193 test cases / 2247 assertions** (as of **direct-construct array/buffer elements** —
+`data[i] = Class(args)` on a `ptr<Class>` buffer element now constructs directly into the slot's
+address (no temp, no clone) when the RHS is a bare constructor call for the element's exact class —
+the same "result location" treatment a local `Point p(2,3);` already gets. Purely a `genIndexAssign`
+codegen change (`CodeGen_Exprs.cpp`); no parser/AST/semantic changes, since `analyzeIndexAssign`
+already accepted a constructor-call RHS and already records the overload-resolved ctor symbol via
+`resolvedCallee`. The constructor's arguments are evaluated **before** the slot is zero-initialized
+(not after), so an in-place update like `data[i] = Point(data[i].x, data[i].y + 1)` reads the old
+field values rather than zeroed garbage; a ctor-less class still gets a zero-init-only no-op. This
+was the first of two identified gaps toward a future `Array<T>::emplace_back` — forwarding a variadic
+argument pack into a fixed-arity constructor call was the separate second gap, closed by the spread
+pack-unwrap feature documented above. See the
+"Owned value-object elements in a ptr<T> buffer" invariant; `tests/array_object_tests.cpp`
+(`[array-object]`, +9 cases — incl. default-param / named-arg constructors, a free-function-sret RHS
+falling through to clone, and a bug-isolating argument-before-zero-init ordering assertion),
+`e2e/array_object_direct_construct_test.gg`. Prior baseline was
+**1184 test cases / 2218 assertions** (as of **cross-platform target support** — GG can now target
+Linux as well as Windows. The `target triple` is configurable (`CompilerOptions::targetTriple`,
+defaulting to the host via `#ifdef _WIN32`; `--target=<triple>` overrides) and emitted by `IRPrinter`.
+The one libc divergence — stdout/stderr access — is centralized behind compiler-emitted `@gg_stdout`/
+`@gg_stderr` helpers (`emitStdioHelpers`): Windows/UCRT call `__acrt_iob_func`, glibc/musl load the
+external `@stdout`/`@stderr` globals. The stdlib (`IO.gg`/`cio.gg`) is now platform-agnostic (calls the
+helpers via `extern`; codegen replaces the declare with the target-specific define). The panic path
+uses `@gg_stderr` too. Windows path runtime-verified; Linux IR verified structurally. See the "Target
+platform" invariant; `tests/cast_tests.cpp` (`[target]`, +2). Prior baseline was
+**1182 test cases / 2209 assertions** (as of a **built-in `obj.clone()` method** — a zero-arg call on
+any class receiver (value or reference) that returns a fresh value-object copy. Semantic intercepts
+`clone()`/no-args (unless the class declares its own zero-arg `clone`; a `Clone`-trait `clone(Self&)`
+takes one arg so never collides) → `Object{class}`, recorded in `builtinCloneCalls`; codegen emits
+`@Class_clone(dest, src)` — the same helper as every other clone site, so it uses the user's
+`impl Clone` when present, else the generated memberwise clone (exactly "user def if any, else
+default"). Var-init writes in place (one clone, no temp); other contexts materialize a value temp.
+See the `Clone` invariant; `tests/class_tests.cpp` (`[clone]`, +4). Prior baseline was
+**1178 test cases / 2205 assertions** (as of a **`new`→value-object implicit-clone warning** —
+`Point p = new Point(...)` binds a heap reference to a *value* variable, which silently deep-copies
+the fresh heap object into the stack value then frees the heap allocation immediately; a warning now
+nudges toward `Point& p = …` or `var p = …`. Gated on a value-`Object` declared type + a `NewExpr`
+initializer, so `Point&`/`var`/value-to-value copies stay silent. Copy semantics are unchanged (the
+generated memberwise `@Class_clone` runs, not the constructor — the `Clone` trait is the hook). See
+the memory-model note; `tests/class_tests.cpp` (`[clone]`, +2). Prior baseline was
 **1176 test cases / 2201 assertions** (as of a **compound-assignment literal-adoption fix** — the RHS
 of a compound assignment is now analysed with the target's type as the expected type
 (`analyzeWithExpected`, mirroring var-init/assignment), so a bare literal adopts it: `u64 x; x *= 10;`

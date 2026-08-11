@@ -113,6 +113,8 @@ private:
     const std::unordered_map<const void*, std::string>* callableCalls_ = nullptr;
     // Untyped brace-init nodes → deduced class name; genBraceInit constructs that class.
     const std::unordered_map<const void*, std::string>* braceInitClass_ = nullptr;
+    // Built-in `obj.clone()` nodes → receiver class name; lowers to `@Class_clone(slot, recv)`.
+    const std::unordered_map<const void*, std::string>* builtinCloneCalls_ = nullptr;
     // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
     const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
     // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
@@ -414,6 +416,11 @@ private:
     // abort. `currentStmtLine_` supplies the line; the file comes from the (debug) source path if set.
     void emitPanicMessage(const std::string& what);
     int  currentStmtLine_ = 0;   // leading line of the statement being generated (for panic messages)
+    // Emit `@gg_stdout`/`@gg_stderr` (platform-specific FILE* accessors) when referenced; called once
+    // at the end of generate(). Windows/UCRT → `__acrt_iob_func(fd)`; glibc/musl → load `@stdout`/`@stderr`.
+    void emitStdioHelpers();
+    bool targetWindows_   = true;    // target OS is Windows (from the triple) — picks the stdio runtime
+    bool panicUsesStderr_ = false;   // a runtime-panic message referenced @gg_stderr (force its define)
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

@@ -702,6 +702,78 @@ std::optional<std::string> Parser::deduceVariadicInstantiation(
     return mangled;
 }
 
+// If `spreads` marks a spread argument (`xs...`) whose target is NOT a pack-bearing template (the
+// caller has already ruled that out — see the call sites in Parser_Expr.cpp), UNWRAP the pack tuple
+// into N ordinary positional arguments (`xs._0, …, xs._{N-1}`) in place, so existing overload
+// resolution handles arity/type checking exactly as if the caller had hand-written them. v1: at most
+// one spread per call (position need not be trailing); the spread argument must be a bare in-scope
+// identifier — the only two shapes a pack variable ever has (the pack parameter itself, or a
+// cons-match tail-pack local materialized by expandPackMatch) are always bare identifiers by
+// construction, and there is no `Expr`-clone utility to safely duplicate anything more complex.
+// Returns false (no-op, `args`/`argNames` untouched) if `spreads` has no `true` entry.
+bool Parser::unwrapSpreadArgs(std::vector<std::unique_ptr<Expr>>& args,
+                              std::vector<Token>& argNames,
+                              const std::vector<bool>& spreads) {
+    std::optional<size_t> spreadIdx;
+    for (size_t i = 0; i < spreads.size(); ++i) {
+        if (!spreads[i]) continue;
+        if (spreadIdx) throw error(previous(), "at most one '...' spread is supported per call");
+        spreadIdx = i;
+    }
+    if (!spreadIdx) return false;
+    size_t idx = *spreadIdx;
+
+    if (idx < argNames.size() && !argNames[idx].lexeme.empty())
+        throw error(previous(), "'...' spread cannot be used as a named argument");
+
+    Expr* spreadExpr = args[idx].get();
+    const auto* id = spreadExpr && spreadExpr->node
+                   ? std::get_if<IdentifierExpr>(spreadExpr->node.get()) : nullptr;
+    if (!id)
+        throw error(previous(), "'...' can only spread a simple pack variable here "
+                    "(bind it to a local first)");
+
+    std::optional<Token> t = deduceArgTypeToken(spreadExpr);
+    auto tupIt = (t && t->lexeme.rfind("Tuple", 0) == 0) ? gen_->tupleRequests.find(t->lexeme)
+                                                          : gen_->tupleRequests.end();
+    if (tupIt == gen_->tupleRequests.end())
+        throw error(previous(), "'...' can only spread a variadic pack (a tuple)");
+    size_t n = tupIt->second.size();
+
+    Token nameTok = id->name;
+    std::vector<std::unique_ptr<Expr>> unwrapped;
+    std::vector<Token> unwrappedNames;
+    unwrapped.reserve(n);
+    unwrappedNames.reserve(n);
+    for (size_t k = 0; k < n; ++k) {
+        unwrapped.push_back(box(makeExpr(MemberAccessExpr{
+            box(makeExpr(IdentifierExpr{ nameTok })),
+            Token{ TokenType::IDENTIFIER, "_" + std::to_string(k), nameTok.line },
+            /*safe=*/false })));
+        unwrappedNames.push_back(Token{ TokenType::IDENTIFIER, "", nameTok.line });
+    }
+
+    // Rebuild both vectors via fresh construction rather than vector::erase/insert — Token has
+    // deleted copy/move assignment (const members), and erase/insert shift elements by assignment
+    // internally, which would not compile for a vector<Token>.
+    std::vector<std::unique_ptr<Expr>> newArgs;
+    std::vector<Token> newNames;
+    newArgs.reserve(args.size() - 1 + n);
+    newNames.reserve(argNames.size() - 1 + n);
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i == idx) {
+            for (auto& e : unwrapped)      newArgs.push_back(std::move(e));
+            for (const Token& nt : unwrappedNames) newNames.push_back(nt);
+        } else {
+            newArgs.push_back(std::move(args[i]));
+            newNames.push_back(argNames[i]);
+        }
+    }
+    args     = std::move(newArgs);
+    argNames = std::move(newNames);
+    return true;
+}
+
 void Parser::expandPackMatch(std::vector<Token>& body, const std::string& pv,
                              const std::vector<Token>& elems) {
     const size_t arity = elems.size();

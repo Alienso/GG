@@ -64,6 +64,7 @@ struct IRFunction {
 };
 
 struct IRModule {
+    std::string targetTriple = "x86_64-w64-windows-gnu";  // emitted as `target triple = "..."`
     std::vector<std::string> typeDecls;  // %ClassName = type { ... } — struct type definitions
     std::vector<std::string> declares;   // declare <retType> @<name>(<params>) — extern functions
     std::vector<std::string> globals;    // @.str.N = private unnamed_addr constant …

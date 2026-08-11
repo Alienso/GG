@@ -105,7 +105,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
                           std::move(resolvedCallee), std::move(addressIdentityCmp_),
                           std::move(structuralValueCmp_), std::move(eqImpls),
                           std::move(callableCalls_), std::move(braceInitClass_),
-                          std::move(callArgOrder_), std::move(inferredVarType_) };
+                          std::move(callArgOrder_), std::move(inferredVarType_),
+                          std::move(builtinCloneCalls_) };
 }
 
 // ============================================================

@@ -48,24 +48,61 @@ void CodeGen::emitPanicMessage(const std::string& what) {
     module.globals.push_back(g + " = private unnamed_addr constant [" + std::to_string(byteLen)
                              + " x i8] c\"" + encoded + "\", align 1");
 
-    // Declare the CRT hooks once.
-    const std::string iobDecl   = "declare ptr @__acrt_iob_func(i32)";
+    // Declare `fputs` once; obtain the stderr FILE* from the platform-neutral `@gg_stderr` helper
+    // (defined per-target by emitStdioHelpers). `panicUsesStderr_` forces that define even when the
+    // stdlib isn't imported.
     const std::string fputsDecl = "declare i32 @fputs(ptr, ptr)";
-    bool haveIob = false, haveFputs = false;
-    for (const auto& d : module.declares) {
-        if (d == iobDecl)   haveIob = true;
-        if (d == fputsDecl) haveFputs = true;
-    }
-    if (!haveIob)   module.declares.push_back(iobDecl);
+    bool haveFputs = false;
+    for (const auto& d : module.declares) if (d == fputsDecl) { haveFputs = true; break; }
     if (!haveFputs) module.declares.push_back(fputsDecl);
+    panicUsesStderr_ = true;
 
     std::string strm = freshTemp();
-    emit("%" + strm + " = call ptr @__acrt_iob_func(i32 2)");   // stderr
+    emit("%" + strm + " = call ptr @gg_stderr()");
     std::string ptr = freshTemp();
     emit("%" + ptr + " = getelementptr inbounds [" + std::to_string(byteLen)
          + " x i8], ptr " + g + ", i32 0, i32 0");
     std::string ret = freshTemp();
     emit("%" + ret + " = call i32 @fputs(ptr %" + ptr + ", ptr %" + strm + ")");
+}
+
+// Emit `@gg_stdout`/`@gg_stderr` definitions for whichever are referenced (their `declare` present,
+// or the panic path forced stderr). One target switch: Windows/UCRT gets `__acrt_iob_func(fd)`;
+// glibc/musl load the external `@stdout`/`@stderr` FILE* globals. Removing the matching `declare`
+// (from the stdlib `extern`) avoids an LLVM declare+define redefinition error.
+void CodeGen::emitStdioHelpers() {
+    auto wanted = [&](const std::string& name) {
+        std::string decl = "declare ptr @" + name + "()";
+        for (auto it = module.declares.begin(); it != module.declares.end(); ++it)
+            if (*it == decl) { module.declares.erase(it); return true; }
+        return false;
+    };
+    bool wantOut = wanted("gg_stdout");
+    bool wantErr = wanted("gg_stderr") || panicUsesStderr_;
+    if (!wantOut && !wantErr) return;
+
+    if (targetWindows_) {
+        const std::string iob = "declare ptr @__acrt_iob_func(i32)";
+        bool have = false;
+        for (const auto& d : module.declares) if (d == iob) { have = true; break; }
+        if (!have) module.declares.push_back(iob);
+        if (wantOut) module.runtime.push_back(
+            "define ptr @gg_stdout() {\nentry:\n  %h = call ptr @__acrt_iob_func(i32 1)\n  ret ptr %h\n}\n");
+        if (wantErr) module.runtime.push_back(
+            "define ptr @gg_stderr() {\nentry:\n  %h = call ptr @__acrt_iob_func(i32 2)\n  ret ptr %h\n}\n");
+    } else {
+        // glibc/musl: `stdout`/`stderr` are external globals holding the FILE* — load through them.
+        if (wantOut) {
+            module.globals.push_back("@stdout = external global ptr");
+            module.runtime.push_back(
+                "define ptr @gg_stdout() {\nentry:\n  %h = load ptr, ptr @stdout\n  ret ptr %h\n}\n");
+        }
+        if (wantErr) {
+            module.globals.push_back("@stderr = external global ptr");
+            module.runtime.push_back(
+                "define ptr @gg_stderr() {\nentry:\n  %h = load ptr, ptr @stderr\n  ret ptr %h\n}\n");
+        }
+    }
 }
 
 void CodeGen::emitBoundsCheck(const std::string& indexValue, size_t arraySize) {

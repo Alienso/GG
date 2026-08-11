@@ -5,8 +5,8 @@
 #include "IRPrinter.h"
 
 void IRPrinter::print(const IRModule& module, std::ostream& out) {
-    // Module-level metadata required by LLVM tools
-    out << "target triple = \"x86_64-w64-windows-gnu\"\n\n";
+    // Module-level metadata required by LLVM tools. The triple is target-configurable (default: host).
+    out << "target triple = \"" << module.targetTriple << "\"\n\n";
 
     // Struct type declarations
     for (const auto& td : module.typeDecls)

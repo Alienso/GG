@@ -1102,6 +1102,17 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
 
     if (std::holds_alternative<MethodCallExpr>(node)) {
         const auto& mc = std::get<MethodCallExpr>(node);
+        // Built-in `obj.clone()` bound directly to a value variable: deep-copy the receiver straight
+        // into the variable's slot (one clone, no intermediate temp).
+        if (builtinCloneCalls_) {
+            auto it = builtinCloneCalls_->find(&mc);
+            if (it != builtinCloneCalls_->end()) {
+                std::string recv = genExpr(*mc.object);
+                clonesNeeded_.insert(it->second);
+                emit("call void @" + it->second + "_clone(ptr " + slotPtr + ", ptr " + recv + ")");
+                return true;
+            }
+        }
         // Static call via type name: Class::method(...).
         if (std::holds_alternative<IdentifierExpr>(*mc.object->node)) {
             const auto& id = std::get<IdentifierExpr>(*mc.object->node);
@@ -1543,12 +1554,46 @@ std::string CodeGen::genIndexAssign(const IndexAssignExpr& indexAssign) {
                                 ? typedPtrElement(objType)
                                 : Type{objType.elementKind};
 
-    // Object element (`ptr<Class>` buffer): deep-copy the source into the slot, not a scalar store.
-    // The slot is raw (uninitialised) buffer memory, so we zero-init it first — that makes
-    // @Class_clone's "release dest's old reference field" a null no-op, turning the copy-assignment
-    // clone into a safe copy-CONSTRUCT on the raw slot. The RHS (a value object, a `Class&`, or a
-    // `Class*` borrow) evaluates to the source object's address (see the value-object assign path).
+    // Object element (`ptr<Class>` buffer): the slot is raw (uninitialised) buffer memory.
     if (elementType.kind == TypeKind::Object) {
+        // Direct-construct fast path: a bare constructor-call RHS (`data[i] = Point(2,3)`) for the
+        // element's own class constructs straight into the slot's address — no temp, no clone (the
+        // same "result location" treatment a local `Point p(2,3);` already gets in genVarDecl).
+        // Guarded on `cgClasses_.count(...)` (mirroring genCall's own bare-ctor-rvalue test) rather
+        // than trusting "any Object-typed CallExpr", since the callable-object sugar `obj(args)` is
+        // also a CallExpr that can yield an Object by value.
+        //
+        // Ordering matters: the constructor's ARGUMENTS are evaluated first (buildArgString), while
+        // the slot still holds its old contents — so `data[i] = Point(data[i].x, data[i].y + 1)`
+        // reads the old fields, not zeroed garbage — and only THEN is the slot zero-initialised
+        // (making the constructor's internal embedded/reference-field stores, which release
+        // "dest's old value" first, see a safe null instead of uninitialised memory) before the
+        // call is emitted. (Full self-aliasing through an address/receiver argument, e.g.
+        // `data[i] = data[i]` or `data[i] = data[i].scaled(2)`, is a separate, pre-existing hazard
+        // shared with the clone path below — not introduced or fixed here.)
+        if (std::holds_alternative<CallExpr>(*indexAssign.value->node)) {
+            const auto& ctorCall = std::get<CallExpr>(*indexAssign.value->node);
+            if (cgClasses_.count(ctorCall.callee.lexeme)) {
+                std::string mangledCtor = calleeName(&ctorCall,
+                    elementType.className + "_" + elementType.className);
+                auto ctorIt = funcParamTypes.find(mangledCtor);
+                std::string argStr;
+                if (ctorIt != funcParamTypes.end())
+                    argStr = buildArgString(ctorCall.args, &ctorIt->second,
+                                            defaultsFor(mangledCtor), orderFor(&ctorCall));
+                emitStore("%" + elementType.className, "zeroinitializer", elemPtr);
+                if (ctorIt != funcParamTypes.end())
+                    emit("call void @" + mangledCtor + "(ptr " + elemPtr
+                         + (argStr.empty() ? "" : ", " + argStr) + ")");
+                // else: class has no constructor — the zero-init above IS the default-constructed value.
+                return elemPtr;   // the constructed object's address is its "value"
+            }
+        }
+
+        // Fallback: deep-copy the source into the slot. Zero-init first makes @Class_clone's
+        // "release dest's old reference field" a null no-op, turning the copy-assignment clone into
+        // a safe copy-CONSTRUCT on the raw slot. The RHS (a value object, a `Class&`, or a `Class*`
+        // borrow) evaluates to the source object's address (see the value-object assign path).
         std::string src = genExpr(*indexAssign.value);
         emitStore("%" + elementType.className, "zeroinitializer", elemPtr);
         clonesNeeded_.insert(elementType.className);

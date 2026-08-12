@@ -534,8 +534,39 @@ Expr Parser::parsePostfix() {
                 std::vector<bool>  argSpreads;
                 std::vector<std::unique_ptr<Expr>> args =
                     parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &argSpreads);
-                // A method/static call can never itself be pack-bearing (packs are free-function-only)
-                // — unconditionally unwrap any spread.
+
+                // Variadic method call `recv.m(fixed…, pack…)` (no explicit `<…>` — the pack is inferred
+                // from the trailing args, like a variadic free function). Resolve the receiver's class,
+                // collect the pack into a tuple, and queue the concrete `Owner::m$Tuple$…` instantiation.
+                if (gen_->variadicMethodNames.count(member.lexeme)) {
+                    std::string recvClass;
+                    if (const auto* id = std::get_if<IdentifierExpr>(expression.node.get())) {
+                        if (classNames.count(id->name.lexeme) || gen_->classNames.count(id->name.lexeme))
+                            recvClass = id->name.lexeme;                     // static form `Class::m(...)`
+                        else if (auto t = deduceArgTypeToken(&expression)) recvClass = genericArgBaseName(*t);
+                    } else if (auto t = deduceArgTypeToken(&expression)) {
+                        recvClass = genericArgBaseName(*t);
+                    }
+                    std::string baseClass = recvClass.substr(0, recvClass.find('$'));   // Array$Point → Array
+                    auto fcIt = gen_->variadicMethodFixedCount.find(baseClass + "::" + member.lexeme);
+                    bool positional = true;
+                    for (const Token& an : argNames) if (!an.lexeme.empty()) { positional = false; break; }
+                    if (!recvClass.empty() && positional && fcIt != gen_->variadicMethodFixedCount.end()) {
+                        if (auto mangled = deduceVariadicMethodInstantiation(
+                                recvClass, member.lexeme, fcIt->second, args, argSpreads)) {
+                            std::vector<Token> posNames(args.size(),
+                                Token{ TokenType::IDENTIFIER, "", member.line });   // all positional now
+                            expression = makeExpr(MethodCallExpr{
+                                box(std::move(expression)),
+                                Token{ TokenType::IDENTIFIER, *mangled, member.line },
+                                std::move(args), std::move(posNames), safe });
+                            continue;
+                        }
+                    }
+                }
+
+                // A non-variadic method/static call can never itself be pack-bearing (packs are
+                // free-function/variadic-method only) — unconditionally unwrap any spread.
                 for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
                 expression = makeExpr(MethodCallExpr{
                     box(std::move(expression)), member, std::move(args), std::move(argNames), safe

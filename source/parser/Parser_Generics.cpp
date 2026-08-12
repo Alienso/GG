@@ -6,6 +6,10 @@
 #include "Parser_internal.h"
 #include <iostream>
 
+// Number of fixed (non-pack) params in a variadic template's raw param list. Defined below; forward-
+// declared so the prescan can record it for variadic methods.
+static size_t fixedParamCount(const std::vector<Token>& toks);
+
 
 void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
     // Register class names defined in this token stream. A class followed by '<'
@@ -38,11 +42,18 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
             classBody.push_back(pendingClass); pendingClass.clear();
         } else if (tt == TokenType::RIGHT_BRACE) {
             if (!classBody.empty()) classBody.pop_back();
-        } else if (tt == TokenType::FN
-                   && i + 2 < toks.size()
-                   && toks[i + 1].type == TokenType::IDENTIFIER
-                   && toks[i + 2].type == TokenType::LESS) {
-            size_t nameIdx = i + 1, j = nameIdx + 2; int depth = 1;
+        } else if (tt == TokenType::FN) {
+            // Skip any `static`/`private` modifiers (in either order) between `fn` and the name, so a
+            // `fn static m<…>(` / `fn private m<…>(` generic/variadic method is registered too.
+            size_t nameIdx = i + 1;
+            while (nameIdx < toks.size()
+                   && (toks[nameIdx].type == TokenType::STATIC || toks[nameIdx].type == TokenType::PRIVATE))
+                ++nameIdx;
+            if (!(nameIdx + 1 < toks.size()
+                  && toks[nameIdx].type == TokenType::IDENTIFIER
+                  && toks[nameIdx + 1].type == TokenType::LESS))
+                continue;
+            size_t j = nameIdx + 2; int depth = 1;
             while (j < toks.size() && depth > 0) {
                 if (toks[j].type == TokenType::LESS)             depth++;
                 else if (toks[j].type == TokenType::GREATER)     depth--;
@@ -51,11 +62,23 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
             }
             if (j < toks.size() && toks[j].type == TokenType::LEFT_PAREN) {
                 const std::string& mname = toks[nameIdx].lexeme;
+                // A `...` anywhere in the `<…>` list marks this a VARIADIC template.
+                bool variadic = false;
+                for (size_t p = nameIdx + 2; p + 1 < j; ++p)
+                    if (toks[p].type == TokenType::ELLIPSIS) { variadic = true; break; }
                 if (classBody.empty()) {
                     gen_->funcNames.insert(mname);                        // top-level generic function
                 } else if (!classBody.back().empty()) {
-                    gen_->genericMethodKeys.insert(classBody.back() + "::" + mname);  // generic method
+                    const std::string key = classBody.back() + "::" + mname;
+                    gen_->genericMethodKeys.insert(key);                  // generic method
                     gen_->genericMethodNames.insert(mname);
+                    if (variadic) {   // a variadic method — called without explicit `<…>`
+                        gen_->variadicMethodKeys.insert(key);
+                        gen_->variadicMethodNames.insert(mname);
+                        // Count fixed params from `( … )` starting at `j` (the pack is the last param).
+                        std::vector<Token> sig(toks.begin() + j, toks.end());
+                        gen_->variadicMethodFixedCount[key] = fixedParamCount(sig);
+                    }
                 }
                 // else: inside an impl/trait/other brace → neither (v1 rejects it at capture).
             }
@@ -499,9 +522,11 @@ void Parser::captureMethodTemplate(const std::string& ownerClass, bool isStatic,
     std::vector<std::vector<std::string>> bounds;
     std::vector<bool>                     isPack;
     size_t j = scanTypeParamList(nameIdx + 2, typeParams, bounds, isPack);   // returns closing '>'
-    for (bool p : isPack)
-        if (p) throw error(nameTok, "variadic methods are not supported yet "
-                           "(only `fn m<T>` generic methods on a class)");
+    // v1: a variadic method (a pack) may have at most one pack, and it must be the last type param.
+    for (size_t p = 0; p < isPack.size(); ++p)
+        if (isPack[p] && p + 1 != isPack.size())
+            throw error(nameTok, "a variadic pack '...' must be the last type parameter of method '"
+                        + nameTok.lexeme + "'");
     size_t afterGt = j + 1;               // the '(' (caller verified this)
 
     std::vector<Token> captured;
@@ -530,10 +555,19 @@ void Parser::captureMethodTemplate(const std::string& ownerClass, bool isStatic,
     }
 
     std::string key = ownerClass + "::" + nameTok.lexeme;
+    // A pack (variadic) method is called WITHOUT explicit `<…>`, so its call site keys on the variadic
+    // sets, not the generic ones. Register them here too (a backstop for the prescan, which may miss a
+    // `fn static/private m<…>` when the class is defined after a same-file call site).
+    bool isVariadic = !isPack.empty() && isPack.back();
     gen_->methodTemplates[key] = GenericTemplate{ std::move(typeParams), std::move(bounds),
-                                                  std::move(isPack), std::move(captured) };
+                                                  std::move(isPack), captured };
     gen_->genericMethodNames.insert(nameTok.lexeme);
     gen_->genericMethodKeys.insert(key);
+    if (isVariadic) {
+        gen_->variadicMethodNames.insert(nameTok.lexeme);
+        gen_->variadicMethodKeys.insert(key);
+        gen_->variadicMethodFixedCount[key] = fixedParamCount(captured);   // pack is the last param
+    }
     current = k;                          // advance past the captured method
 }
 
@@ -577,14 +611,31 @@ bool Parser::instantiateMethod(const GenericInstantiation& inst, Program& progra
                                    argHead.line });
     }
 
+    // A variadic method's pack type-param materializes as a tuple: `Ts... args` → `Tuple$…* args`.
+    const std::string packName = (!tmpl.isPack.empty() && tmpl.isPack.back())
+                                ? tmpl.typeParams.back() : std::string{};
+
     // Substitute type-param tokens + rename the method-name token (the FIRST IDENTIFIER — the
     // preceding `fn`/`static`/`private` are keyword tokens, not IDENTIFIER) to the mangled name.
+    // Recursive calls inside the body keep the bare name (re-deduced / re-instantiated per call).
+    std::string packValueName;   // the pack VALUE param name (`args` in `Ts... args`)
     std::vector<Token> out;
     bool renamed = false;
-    for (const Token& t : tmpl.tokens) {
+    for (size_t idx = 0; idx < tmpl.tokens.size(); ++idx) {
+        const Token& t = tmpl.tokens[idx];
         if (!renamed && t.type == TokenType::IDENTIFIER) {
             out.push_back(Token{ TokenType::IDENTIFIER, inst.mangledName, t.line });
             renamed = true;
+            continue;
+        }
+        // `PackName ...` → the pack's tuple type + `*` borrow (drop the ELLIPSIS).
+        if (!packName.empty() && t.type == TokenType::IDENTIFIER && t.lexeme == packName
+            && idx + 1 < tmpl.tokens.size() && tmpl.tokens[idx + 1].type == TokenType::ELLIPSIS) {
+            auto sit = sub.find(packName);
+            if (sit != sub.end()) for (const Token& a : sit->second) out.push_back(a);
+            out.push_back(Token{ TokenType::STAR, "*", t.line });
+            if (idx + 2 < tmpl.tokens.size()) packValueName = tmpl.tokens[idx + 2].lexeme;
+            ++idx;   // skip the ELLIPSIS (the value-param name is emitted next iteration)
             continue;
         }
         if (t.type == TokenType::IDENTIFIER) {
@@ -592,6 +643,18 @@ bool Parser::instantiateMethod(const GenericInstantiation& inst, Program& progra
             if (sit != sub.end()) { for (const Token& a : sit->second) out.push_back(a); continue; }
         }
         out.push_back(t);
+    }
+
+    // Expand any compile-time cons-`match` over the pack now that the arity is known (a no-op for a
+    // spread-only body like `data[i] = T(args...)`).
+    if (!packName.empty() && !packValueName.empty()) {
+        auto sit = sub.find(packName);
+        if (sit != sub.end() && !sit->second.empty()) {
+            auto trIt = gen_->tupleRequests.find(sit->second.front().lexeme);
+            std::vector<Token> elems;
+            if (trIt != gen_->tupleRequests.end()) for (const Token& e : trIt->second) elems.push_back(e);
+            expandPackMatch(out, packValueName, elems);
+        }
     }
 
     // Shell re-parse: wrap the concrete method tokens in a throwaway class NAMED THE REAL OWNER (so a
@@ -779,19 +842,62 @@ std::string Parser::requestTupleType(const std::vector<Token>& elems) {
     return mangled;
 }
 
-std::optional<std::string> Parser::deduceVariadicInstantiation(
-        const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
-        const std::vector<bool>& spreads) {
-    auto it = gen_->templates.find(fnName);
-    if (it == gen_->templates.end()) return std::nullopt;
-    const GenericTemplate& tmpl = it->second;
-    if (tmpl.isPack.empty() || !tmpl.isPack.back()) return std::nullopt;   // not variadic
+std::optional<std::vector<std::vector<Token>>> Parser::deducePackTargs(
+        size_t fixedCount, const std::string& diagName,
+        std::vector<std::unique_ptr<Expr>>& args, const std::vector<bool>& spreads) {
+    if (args.size() < fixedCount) return std::nullopt;   // too few args — let the normal path error
 
-    // Count value params in the template's raw param list (last one is the pack).
-    const std::vector<Token>& toks = tmpl.tokens;
+    // A trailing spread anywhere other than the SOLE pack argument is unsupported in v1.
+    for (size_t i = 0; i < spreads.size(); ++i)
+        if (spreads[i] && i != args.size() - 1)
+            throw error(previous(), "'...' spread must be the last argument to '" + diagName + "'");
+
+    // Spread form `f(fixed…, xs...)`: the pack is one spread of an existing pack tuple `xs` — pass it
+    // through directly (no re-tupling). `xs` must be a tuple-typed in-scope binding. `args` stays as-is.
+    bool spreadPack = args.size() == fixedCount + 1 && !spreads.empty()
+                   && spreads.size() == args.size() && spreads.back();
+    if (spreadPack) {
+        std::optional<Token> t = deduceArgTypeToken(args.back().get());
+        if (!t || t->lexeme.rfind("Tuple", 0) != 0)
+            throw error(previous(), "'...' can only spread a variadic pack (a tuple) into '" + diagName + "'");
+        classNames.insert(t->lexeme);
+        gen_->classNames.insert(t->lexeme);
+        std::vector<std::vector<Token>> targs;
+        targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, t->lexeme, 0 } });
+        return targs;
+    }
+
+    // Deduce the trailing pack element types → the pack tuple.
+    std::vector<Token> elems;
+    for (size_t i = fixedCount; i < args.size(); ++i) {
+        std::optional<Token> t = deduceArgTypeToken(args[i].get());
+        if (!t)
+            throw error(previous(), "cannot infer the type of a variadic argument to '" + diagName
+                        + "'; pack arguments must be literals, in-scope variables, or constructor calls");
+        elems.push_back(*t);
+    }
+    std::string tupleName = requestTupleType(elems);
+
+    // Rewrite args: fixed prefix + one tuple literal (BraceInitExpr) holding the pack args.
+    std::vector<std::unique_ptr<Expr>> packArgs;
+    for (size_t i = fixedCount; i < args.size(); ++i) packArgs.push_back(std::move(args[i]));
+    std::vector<std::unique_ptr<Expr>> newArgs;
+    for (size_t i = 0; i < fixedCount; ++i) newArgs.push_back(std::move(args[i]));
+    newArgs.push_back(box(makeExpr(BraceInitExpr{ std::move(packArgs),
+                                                  Token{ TokenType::LEFT_PAREN, "(", 0 } })));
+    args = std::move(newArgs);
+
+    std::vector<std::vector<Token>> targs;               // one type arg = the pack tuple
+    targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, tupleName, 0 } });
+    return targs;
+}
+
+// Count the fixed (non-pack) params in a variadic template's raw param list (the last param is the
+// pack). Scans from the first `(` to its match, counting top-level commas.
+static size_t fixedParamCount(const std::vector<Token>& toks) {
     size_t lp = 0;
     while (lp < toks.size() && toks[lp].type != TokenType::LEFT_PAREN) ++lp;
-    if (lp == toks.size()) return std::nullopt;
+    if (lp == toks.size()) return 0;
     size_t depth = 1, paramCount = 0; bool anyToken = false;
     for (size_t i = lp + 1; i < toks.size() && depth > 0; ++i) {
         TokenType tt = toks[i].type;
@@ -802,59 +908,31 @@ std::optional<std::string> Parser::deduceVariadicInstantiation(
         else if (depth == 1) anyToken = true;
     }
     if (anyToken) ++paramCount;                          // the last / only param
-    size_t fixedCount = paramCount == 0 ? 0 : paramCount - 1;
-    if (args.size() < fixedCount) return std::nullopt;   // too few args — let the normal path error
+    return paramCount == 0 ? 0 : paramCount - 1;         // the pack is the last param
+}
 
-    // A trailing spread anywhere other than the SOLE pack argument is unsupported in v1.
-    for (size_t i = 0; i < spreads.size(); ++i)
-        if (i < spreads.size() && spreads[i] && i != args.size() - 1)
-            throw error(previous(), "'...' spread must be the last argument to '" + fnName + "'");
+std::optional<std::string> Parser::deduceVariadicInstantiation(
+        const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
+        const std::vector<bool>& spreads) {
+    auto it = gen_->templates.find(fnName);
+    if (it == gen_->templates.end()) return std::nullopt;
+    const GenericTemplate& tmpl = it->second;
+    if (tmpl.isPack.empty() || !tmpl.isPack.back()) return std::nullopt;   // not variadic
 
-    std::string tupleName;
+    auto targs = deducePackTargs(fixedParamCount(tmpl.tokens), fnName, args, spreads);
+    if (!targs) return std::nullopt;
+    std::string mangled = mangleInstantiation(fnName, *targs);
+    recordInstantiation(fnName, mangled, std::move(*targs));
+    return mangled;
+}
 
-    // Spread form `f(fixed…, xs...)`: the pack is one spread of an existing pack tuple `xs` — pass it
-    // through directly (no re-tupling). `xs` must be a tuple-typed in-scope binding.
-    bool spreadPack = args.size() == fixedCount + 1 && !spreads.empty()
-                   && spreads.size() == args.size() && spreads.back();
-    if (spreadPack) {
-        std::optional<Token> t = deduceArgTypeToken(args.back().get());
-        if (!t || t->lexeme.rfind("Tuple", 0) != 0)
-            throw error(previous(), "'...' can only spread a variadic pack (a tuple) into '" + fnName + "'");
-        tupleName = t->lexeme;
-        classNames.insert(tupleName);
-        gen_->classNames.insert(tupleName);
-        // args stays as-is (fixed… + the pack tuple `xs`); no BraceInitExpr wrapping.
-        std::vector<std::vector<Token>> targs;
-        targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, tupleName, 0 } });
-        std::string mangled = mangleInstantiation(fnName, targs);
-        recordInstantiation(fnName, mangled, std::move(targs));
-        return mangled;
-    }
-
-    // Deduce the trailing pack element types.
-    std::vector<Token> elems;
-    for (size_t i = fixedCount; i < args.size(); ++i) {
-        std::optional<Token> t = deduceArgTypeToken(args[i].get());
-        if (!t)
-            throw error(previous(), "cannot infer the type of a variadic argument to '" + fnName
-                        + "'; pack arguments must be literals, in-scope variables, or constructor calls");
-        elems.push_back(*t);
-    }
-    tupleName = requestTupleType(elems);
-
-    std::vector<std::vector<Token>> targs;               // one type arg = the pack tuple
-    targs.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, tupleName, 0 } });
-    std::string mangled = mangleInstantiation(fnName, targs);
-    recordInstantiation(fnName, mangled, std::move(targs));
-
-    // Rewrite args: fixed prefix + one tuple literal (BraceInitExpr) holding the pack args.
-    std::vector<std::unique_ptr<Expr>> packArgs;
-    for (size_t i = fixedCount; i < args.size(); ++i) packArgs.push_back(std::move(args[i]));
-    std::vector<std::unique_ptr<Expr>> newArgs;
-    for (size_t i = 0; i < fixedCount; ++i) newArgs.push_back(std::move(args[i]));
-    newArgs.push_back(box(makeExpr(BraceInitExpr{ std::move(packArgs),
-                                                  Token{ TokenType::LEFT_PAREN, "(", 0 } })));
-    args = std::move(newArgs);
+std::optional<std::string> Parser::deduceVariadicMethodInstantiation(
+        const std::string& ownerClass, const std::string& methodName, size_t fixedCount,
+        std::vector<std::unique_ptr<Expr>>& args, const std::vector<bool>& spreads) {
+    auto targs = deducePackTargs(fixedCount, methodName, args, spreads);
+    if (!targs) return std::nullopt;
+    std::string mangled = mangleInstantiation(methodName, *targs);   // e.g. emplaceBack$Tuple$i32$i32
+    recordMethodInstantiation(ownerClass, methodName, mangled, std::move(*targs));
     return mangled;
 }
 

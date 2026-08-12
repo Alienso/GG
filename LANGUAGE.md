@@ -709,7 +709,7 @@ sumW(1, true)            // 11
   forward-referenced function isn't inferable (the same limitation as generic type-argument
   inference). Explicit `<…>` type arguments on a variadic are rejected (the pack is always inferred).
   One pack per function. (Homogeneous `i32...` packing into an array, and binding C variadic functions
-  like `printf`, are not part of this.)
+  like `printf`, are not part of this.) A **method** may also be variadic — see "Variadic methods".
 
 #### Spreading a pack into a non-variadic call
 
@@ -911,7 +911,8 @@ span(1, hi: 3);           // mixed: lo=1 positional, hi=3 named, step defaults
 ### Calling conventions
 - Primitive types pass by value.
 - `ClassName&` passes the heap pointer by value (a borrow — no extra retain/release at the call site).
-- There are **no variadic functions** (use `extern` + C variadics if needed).
+- There are **no runtime C-style variadic functions** (use `extern` + C variadics if needed). GG does
+  have compile-time type packs — see "Variadic parameters" / "Variadic methods".
 
 ### Overloading
 Functions may be **overloaded** — several may share a name if they differ in parameter
@@ -1638,9 +1639,41 @@ itself a call result or a longer chain (`makeBox().wrap<i32>(5)`, `a.b.wrap<i32>
 supported — bind it to a local first. Bounds work as elsewhere (`fn run<T: Show>(T* x) -> i32 { return
 x.show(); }`).
 
-**v1 limitations** (clean errors): explicit `<T>` required (no argument inference); generic methods in
-`impl`/`trait` blocks, variadic methods (`fn m<...Ts>`), and non-obvious receivers are not supported
-yet.
+**v1 limitations** (clean errors): explicit `<T>` required (no argument inference — **except** a
+variadic method, below, whose pack is always inferred); generic methods in `impl`/`trait` blocks and
+non-obvious receivers are not supported yet.
+
+### Variadic methods
+
+A method may be **variadic** — `fn m<...Ts>(Ts... args)` — collecting a heterogeneous compile-time pack
+of trailing arguments, exactly like a variadic free function. The pack is **always inferred** (never
+written with explicit `<…>`), and it must be the last type parameter. The flagship use is a **zero-copy
+`emplaceBack`** that constructs an element straight into a buffer with no temporary and no clone:
+
+```gg
+class Vec<T> {
+    private mut ptr<T> data;
+    private mut u64 count;
+    // …
+    fn emplaceBack<...Ts>(Ts... args) mut {
+        if (count == cap) { grow(); }
+        data[count] = T(args...);     // construct T directly into the slot — no temp, no clone
+        count = count + 1;
+    }
+}
+
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+
+fn main() -> i32 {
+    mut Vec<Point>& v = new Vec<Point>();
+    v.emplaceBack(3, 4);              // forwards the pack straight into Point(3, 4)
+    return 0;
+}
+```
+
+The pack is consumed the same way as in a variadic free function — compile-time cons-`match args { ()
+-> …; (x:xs) -> … }` recursion and `xs...` spread — so a fixed prefix parameter before the pack, and
+recursive `this.m(fixed…, xs...)` calls, both work. The stdlib `Array<T>` provides `emplaceBack`.
 
 ### Cross-file generics
 Templates defined in imported files are available at use sites:

@@ -72,6 +72,13 @@ struct GenericRegistry {
     std::unordered_map<std::string, GenericTemplate> methodTemplates;    // "Owner::method" → template
     std::unordered_set<std::string>                  genericMethodNames; // bare "wrap"
     std::unordered_set<std::string>                  genericMethodKeys;  // "Owner::wrap" (base owner name)
+    // Variadic methods (`fn m<...Ts>(Ts... args)`) — a subset, called WITHOUT explicit `<…>` (the pack
+    // is inferred from the trailing args, like a variadic free function). Keyed by the base (unmangled)
+    // owner so a call `arr.emplaceBack(1,2)` on `Array$Point` is recognized before `Array$Point` exists;
+    // `fixedCount` is the number of non-pack params (so the trailing args are split off as the pack).
+    std::unordered_set<std::string>                  variadicMethodNames; // bare "emplaceBack"
+    std::unordered_set<std::string>                  variadicMethodKeys;  // "Array::emplaceBack" (base owner)
+    std::unordered_map<std::string, size_t>          variadicMethodFixedCount; // key → # fixed params
     std::vector<GenericInstantiation>                worklist;      // instantiation requests
     std::unordered_set<std::string>                  instantiated;  // mangled names already queued
     std::vector<GenericImplTemplate>                 implTemplates;    // generic `impl<T> … for Class<T>` blocks
@@ -319,6 +326,19 @@ private:
     [[nodiscard]] std::optional<std::string> deduceVariadicInstantiation(
         const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
         const std::vector<bool>& spreads);
+    // Core of the above, shared with variadic METHODS: given the number of fixed (non-pack) params,
+    // split the trailing args into the pack, deduce/collect its tuple type, REWRITE `args` to
+    // [fixed prefix…, one tuple literal] (or pass a spread pack through), and return the type-arg slice
+    // (the single `Tuple$…` token). nullopt if there are too few args (caller falls back to the normal
+    // arity error). `diagName` labels errors. Throws on an undeducible / bad-spread pack argument.
+    [[nodiscard]] std::optional<std::vector<std::vector<Token>>> deducePackTargs(
+        size_t fixedCount, const std::string& diagName,
+        std::vector<std::unique_ptr<Expr>>& args, const std::vector<bool>& spreads);
+    // Variadic METHOD call `recv.m(fixed…, pack…)` (no explicit `<…>`): collect the pack into a tuple
+    // and queue the `ownerClass::m$Tuple$…` method instantiation. Returns the mangled method name.
+    [[nodiscard]] std::optional<std::string> deduceVariadicMethodInstantiation(
+        const std::string& ownerClass, const std::string& methodName, size_t fixedCount,
+        std::vector<std::unique_ptr<Expr>>& args, const std::vector<bool>& spreads);
     // Spread into a NON-pack-bearing target: if `spreads` marks a spread argument, unwraps its (bare
     // identifier, tuple-typed) target into N positional `xs._0, …, xs._{N-1}` arguments in place and
     // returns true; returns false (no-op) if `spreads` has no spread flag. Throws a clear error for

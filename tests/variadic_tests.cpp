@@ -428,3 +428,196 @@ TEST_CASE("variadic - spreading into an INFERRED generic function is a clean err
     )");
     REQUIRE(cap.contains("cannot infer type argument(s) for generic function 'identity'"));
 }
+
+// ============================================================
+// Variadic METHODS — `fn m<...Ts>(Ts... args)` on a class, called without explicit `<…>` (the pack is
+// inferred from the trailing args). Built on generic methods + the pack machinery: the concrete
+// `Owner::m$Tuple$…` is injected into the class. The flagship use is `Array<T>::emplaceBack`.
+// ============================================================
+
+// A self-contained mini growable vector with a variadic emplaceBack (the stdlib Array<T> shape).
+static const char* MINI_ARR = R"(
+    extern malloc(u64 size) -> ptr;
+    extern free(ptr p);
+    class Vec<T> {
+        private mut ptr<T> data;
+        private mut u64 count;
+        Vec() { count = 0; data = malloc(64 * sizeof(T)); }
+        fn emplaceBack<...Ts>(Ts... args) mut { data[count] = T(args...); count = count + 1; }
+        fn at(i32 i) -> T* { return data[i]; }
+        fn size() -> u64 { return count; }
+    }
+)";
+
+TEST_CASE("variadic-method - emplaceBack direct-constructs into the buffer (no temp, no clone)", "[variadic][genericmethod]") {
+    std::string ir = codegenString(std::string(MINI_ARR) + R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+        fn main() -> i32 { mut Vec<Point>& v = new Vec<Point>(); v.emplaceBack(3, 4); return 0; }
+    )");
+    // The variadic method takes the pack as a tuple borrow and constructs Point straight into the slot:
+    // zero-init the buffer element then run its ctor in place — no element temp, no clone. (An `objtmp`
+    // DOES appear, but only for the tuple pack ARGUMENT at the call site, not for the Point element.)
+    REQUIRE(ir.find("define void @Vec$Point_emplaceBack$Tuple$i32$i32(ptr ") != std::string::npos);
+    REQUIRE(ir.find("store %Point zeroinitializer") != std::string::npos);   // element built in place...
+    REQUIRE(ir.find("call void @Point_Point(ptr ") != std::string::npos);    // ...via its ctor on the slot
+    REQUIRE(ir.find("@Point_clone(") == std::string::npos);                  // no clone of the element
+}
+
+TEST_CASE("variadic-method - the call site collects the trailing args into a pack tuple", "[variadic][genericmethod]") {
+    std::string ir = codegenString(std::string(MINI_ARR) + R"(
+        class Pair { mut i32 a; mut i32 b; Pair(i32 x, i32 y) { a = x; b = y; } }
+        fn main() -> i32 {
+            mut Vec<Pair>& v = new Vec<Pair>();
+            v.emplaceBack(1, 2);
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("%Tuple$i32$i32 = type { i32, i32 }") != std::string::npos);
+    REQUIRE(ir.find("@Vec$Pair_emplaceBack$Tuple$i32$i32(ptr") != std::string::npos);
+}
+
+TEST_CASE("variadic-method - on a non-generic class, consumed by cons-match (heterogeneous pack)", "[variadic][genericmethod]") {
+    std::string ir = codegenString(R"(
+        class Counter {
+            fn count<...Ts>(Ts... args) -> i32 {
+                match args {
+                    ()     -> { return 0; }
+                    (x:xs) -> { return 1 + this.count(xs...); }
+                }
+            }
+        }
+        fn main() -> i32 { Counter c; return c.count(1, "hi", true); }
+    )");
+    // The recursion unrolls to concrete per-arity method instantiations (this.count(xs...)).
+    REQUIRE(ir.find("@Counter_count$Tuple$i32$str$bool(") != std::string::npos);
+    REQUIRE(ir.find("@Counter_count$Tuple$str$bool(")     != std::string::npos);
+    REQUIRE(ir.find("@Counter_count$Tuple(")              != std::string::npos);   // unit base case
+}
+
+TEST_CASE("variadic-method - a fixed prefix parameter precedes the pack", "[variadic][genericmethod]") {
+    std::string ir = codegenString(R"(
+        class Adder {
+            fn sumFrom<...Ts>(i32 base, Ts... args) -> i32 {
+                match args {
+                    ()     -> { return base; }
+                    (x:xs) -> { return this.sumFrom(base + x, xs...); }
+                }
+            }
+        }
+        fn main() -> i32 { Adder a; return a.sumFrom(100, 1, 2); }
+    )");
+    // Each instantiation keeps the fixed `i32 base` and takes the (shrinking) pack tuple by borrow.
+    REQUIRE(ir.find("@Adder_sumFrom$Tuple$i32$i32(ptr %self, i32") != std::string::npos);
+    REQUIRE(ir.find("@Adder_sumFrom$Tuple(ptr %self, i32")         != std::string::npos);   // base case
+}
+
+TEST_CASE("variadic-method - a variadic pack must be the last type parameter", "[variadic][genericmethod]") {
+    StderrCapture cap;
+    (void)analyzeString(R"(
+        class C { fn bad<...Ts, U>(Ts... args) -> i32 { return 0; } }
+        fn main() -> i32 { C c; return 0; }
+    )");
+    REQUIRE(cap.contains("must be the last type parameter"));
+}
+
+TEST_CASE("variadic-method - a STATIC variadic method resolves via Class::m(...)", "[variadic][genericmethod]") {
+    // Regression: the prescan required `fn IDENTIFIER <` and captureMethodTemplate only backstopped the
+    // GENERIC-method sets — so a `fn static total<...>` (a `static` modifier before the name) was never
+    // registered as variadic and the `Sum::total(...)` call fell through to a plain static call → "no
+    // static method 'total'". The prescan now skips `static`/`private`, and capture backstops the
+    // variadic sets. The instantiations take the pack tuple with NO `%self` (static dispatch).
+    std::string ir = codegenString(R"(
+        class Sum {
+            fn static total<...Ts>(Ts... args) -> i32 {
+                match args {
+                    ()     -> { return 0; }
+                    (x:xs) -> { return x + Sum::total(xs...); }
+                }
+            }
+        }
+        fn main() -> i32 { return Sum::total(1, 2, 3, 4); }
+    )");
+    REQUIRE(ir.find("@Sum_total$Tuple$i32$i32$i32$i32(ptr %args)") != std::string::npos);  // no %self
+    REQUIRE(ir.find("@Sum_total$Tuple(ptr %args)")                 != std::string::npos);  // base case
+}
+
+TEST_CASE("variadic-method - a PRIVATE variadic method is registered (prescan skips the modifier)", "[variadic][genericmethod]") {
+    // Same prescan-modifier root cause as the static case: `fn private tally<...>` must still register.
+    std::string ir = codegenString(R"(
+        class Counter {
+            fn private tally<...Ts>(Ts... args) -> i32 {
+                match args { () -> { return 0; } (x:xs) -> { return 1 + this.tally(xs...); } }
+            }
+            fn go() -> i32 { return this.tally(5, 6, 7); }
+        }
+        fn main() -> i32 { Counter c; return c.go(); }
+    )");
+    REQUIRE(ir.find("@Counter_tally$Tuple$i32$i32$i32(") != std::string::npos);
+}
+
+TEST_CASE("variadic-method - an empty pack (arity 0) and a single-element pack both instantiate", "[variadic][genericmethod]") {
+    std::string ir = codegenString(R"(
+        class C {
+            fn count<...Ts>(Ts... args) -> i32 {
+                match args { () -> { return 0; } (x:xs) -> { return 1 + this.count(xs...); } }
+            }
+        }
+        fn main() -> i32 { C c; return c.count() + c.count(9); }
+    )");
+    REQUIRE(ir.find("@C_count$Tuple(")     != std::string::npos);   // arity 0 — the unit pack
+    REQUIRE(ir.find("@C_count$Tuple$i32(") != std::string::npos);   // arity 1
+}
+
+TEST_CASE("variadic-method - an object-returning variadic method rides the sret convention", "[variadic][genericmethod]") {
+    // A fixed prefix builds the object; the (here empty) pack still threads through. The return slot is
+    // the hidden first `ptr` param, before `%self` and the fixed params.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
+        class Maker {
+            fn make<...Ts>(i32 a, i32 b, Ts... args) -> Point p { p = Point(a, b); return p; }
+        }
+        fn main() -> i32 { Maker m; Point q = m.make(3, 4); return q.x + q.y; }
+    )");
+    REQUIRE(ir.find("define void @Maker_make$Tuple(ptr %p, ptr %self, i32 %a, i32 %b, ptr %args)") != std::string::npos);
+}
+
+TEST_CASE("variadic-method - a pack can be spread-forwarded into a variadic method", "[variadic][genericmethod]") {
+    // A variadic FREE function forwards its pack into a variadic METHOD via `v.count(items...)` — the
+    // method re-tuples and re-instantiates per arity, unrolling to the unit base case.
+    std::string ir = codegenString(R"(
+        class Vec {
+            fn count<...Ts>(Ts... args) -> i32 {
+                match args { () -> { return 0; } (x:xs) -> { return 1 + this.count(xs...); } }
+            }
+        }
+        fn forward<...Us>(Vec* v, Us... items) -> i32 { return v.count(items...); }
+        fn main() -> i32 { Vec v; return forward(v, 10, 20, 30); }
+    )");
+    REQUIRE(ir.find("@Vec_count$Tuple$i32$i32$i32(") != std::string::npos);
+    REQUIRE(ir.find("@Vec_count$Tuple(")             != std::string::npos);
+}
+
+TEST_CASE("variadic-method - receiver resolves via a parameter and via a bare field", "[variadic][genericmethod]") {
+    std::string ir = codegenString(R"(
+        class Bag {
+            fn count<...Ts>(Ts... args) -> i32 {
+                match args { () -> { return 0; } (x:xs) -> { return 1 + this.count(xs...); } }
+            }
+        }
+        fn viaParam(Bag* b) -> i32 { return b.count(1, 2); }
+        class Holder { mut Bag bag; Holder() {} fn viaField() -> i32 { return bag.count(1, 2, 3); } }
+        fn main() -> i32 { Bag b; Holder h; return viaParam(b) + h.viaField(); }
+    )");
+    REQUIRE(ir.find("@Bag_count$Tuple$i32$i32(")     != std::string::npos);   // via the param receiver
+    REQUIRE(ir.find("@Bag_count$Tuple$i32$i32$i32(") != std::string::npos);   // via the field receiver
+}
+
+TEST_CASE("variadic-method - two classes sharing a variadic method name don't collide", "[variadic][genericmethod]") {
+    std::string ir = codegenString(R"(
+        class A { fn tag<...Ts>(Ts... args) -> i32 { return 1; } }
+        class B { fn tag<...Ts>(Ts... args) -> i32 { return 2; } }
+        fn main() -> i32 { A a; B b; return a.tag(1, 2) + b.tag(1, 2, 3); }
+    )");
+    REQUIRE(ir.find("@A_tag$Tuple$i32$i32(")     != std::string::npos);
+    REQUIRE(ir.find("@B_tag$Tuple$i32$i32$i32(") != std::string::npos);
+}

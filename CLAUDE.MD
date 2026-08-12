@@ -376,6 +376,51 @@ monomorphization.
   `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`,
   `e2e/variadic_spread_unwrap_test.gg`.
 
+### Variadic methods — `fn m<...Ts>(Ts... args)` on a class
+A variadic **method** = the generic-method machinery + the variadic-pack machinery, composed. The
+pack is collected at the call site into a tuple and consumed by compile-time cons-`match` / spread,
+identically to a free variadic function; the concrete `@Owner_m$Tuple$…` is injected into the class
+by the generic-method transplant path. The **flagship use is `Array<T>::emplaceBack`** — a zero-copy
+emplace (`data[count] = T(args...)` direct-constructs the element straight into the buffer slot, no
+temp, no clone). Works on **generic classes** (`Array<T>`) via the same `pendingMethodInsts_` deferral
+fixpoint as ordinary generic methods.
+- **Capture** (`captureMethodTemplate`, `Parser_Generics.cpp`): a pack type param (`<...Ts>`) is now
+  **allowed** on a method (the old "variadic methods are not supported yet" rejection is gone); the
+  pack must be the **last type param** (else a clean "must be the last type parameter" error), and
+  `GenericTemplate::isPack` is stored on the method template exactly as for a free function.
+- **Prescan / registry** (`GenericRegistry`): a class-body `fn NAME<...>(` registers into the parallel
+  **variadic** sets `variadicMethodNames` (bare) / `variadicMethodKeys` (`Owner::NAME`) instead of the
+  plain generic-method sets, plus `variadicMethodFixedCount[Owner::NAME]` = the count of **fixed**
+  params before the pack (via `fixedParamCount`). The fixed count is recorded in the **prescan**, not
+  at the call site, because a generic-class variadic method's concrete template (`Array$Point::
+  emplaceBack`) doesn't exist yet when the initial-parse call site runs. The prescan **skips leading
+  `static`/`private` modifiers** between `fn` and the name (so `fn static m<...>` / `fn private m<...>`
+  register — this also fixed a latent cross-file gap for `static`/`private` *generic* methods, which
+  share this prescan). `captureMethodTemplate` **backstops** the variadic sets too (as it already does
+  the generic sets), so a same-file variadic method whose class is declared *after* a call site still
+  resolves without depending on the prescan.
+- **Call site — inferred, no `<…>`** (`parsePostfix`, `Parser_Expr.cpp`, a branch **before** the
+  spread-unwrap): gated on `member ∈ variadicMethodNames`. Resolves the receiver class (an identifier
+  → static form / `deduceArgTypeToken` for this/field/local; `$`-suffix stripped for the base-class
+  key), looks up `variadicMethodFixedCount[baseClass::member]`, requires positional args, then calls
+  `deduceVariadicMethodInstantiation(recvClass, member, fixedCount, args, spreads)`. That reuses the
+  shared `deducePackTargs` core (extracted from the free-function `deduceVariadicInstantiation` — it
+  validates spread position, deduces each pack element's type, `requestTupleType`s the pack, and
+  rewrites the args to `[fixed…, one tuple literal]`), then `mangleInstantiation` +
+  `recordMethodInstantiation`. The mangled method token flows through an ordinary `MethodCallExpr`.
+- **Monomorphization** (`instantiateMethod`): when the method template `isPack.back()`, the pack type
+  param substitutes to a `Tuple$…* args` borrow (capturing the pack value-param name), and after the
+  ordinary type-param splice runs `expandPackMatch(out, packValueName, elems)` — the same token-level
+  cons-`match` expansion as a free variadic function (arity-selected arm, head `x` → `args._0`, tail
+  `xs` materialized as a tail-tuple local). A recursive `this.m(base + x, xs...)` re-instantiates the
+  shorter pack, unrolling to the `()` base case.
+- **v1 limits**: the pack is **always inferred** (explicit `<…>` on a variadic method is not a thing);
+  everything else inherits the free-variadic v1 limits (heterogeneous packs, parser-deducible pack
+  args) and the generic-method v1 limits (parser-visible receivers only; impl/trait-block methods
+  rejected). Tests: `tests/variadic_tests.cpp` (`[variadic][genericmethod]`),
+  `e2e/variadic_method_test.gg`; the stdlib `Array<T>::emplaceBack` (`stdlib/Array.gg`) is the
+  real-world consumer.
+
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
 fall-through, no `break`). Two AST nodes: `SwitchStmt` (Stmt) and `SwitchExpr` (Expr), sharing a
@@ -892,9 +937,11 @@ parser-visible** — a bare in-scope local/param/field, `this`, or the static `C
   isn't ready is **deferred** to `pendingMethodInsts_`; after the main worklist drains,
   `runMonomorphization` retries deferred methods to a **fixpoint** (a method body may enqueue more
   class/method work), stopping when nothing's pending or no pass makes progress (→ a clear error).
+- **Variadic methods** (`fn m<...Ts>(Ts... args)`) build on this — see the "Variadic methods" invariant
+  below; the flagship use is `Array<T>::emplaceBack`.
 - **v1 limits** (clean errors, never a miscompile): explicit `<T>` required (no argument inference for
-  method calls); impl/trait-block generic methods rejected; variadic methods (`fn m<...Ts>`) rejected
-  (the follow-up this unblocks — combined, `Array<T>::emplaceBack<...Us>` becomes reachable);
+  method calls) — **except** a variadic method, whose pack is always inferred from the trailing args;
+  impl/trait-block generic methods rejected;
   `@annotation` on a generic method rejected; non-parser-visible receivers (call results, `a.b.m<T>()`
   chains, and a **`var`-typed** local — `var` records a sentinel type at parse time, same limitation as
   generic type-argument inference over `var`) → the "cannot determine receiver" error. A bare
@@ -1671,6 +1718,33 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1252 test cases / 2348 assertions** (as of a **QA edge-case pass over variadic methods** that found
+and fixed a real bug: a **`static`/`private` variadic method** (`fn static total<...>` / `fn private
+m<...>`) was never registered as variadic, so `Sum::total(...)` fell through to a plain static call →
+"no static method 'total'". Root cause: the prescan required `fn IDENTIFIER <` (no modifier skip) and
+`captureMethodTemplate` only backstopped the *generic*-method sets, not the variadic ones. Fixed by (a)
+skipping leading `static`/`private` in the prescan — which **also** closes a latent cross-file gap for
+`static`/`private` *generic* methods — and (b) backstopping the variadic sets in `captureMethodTemplate`.
+Added coverage for static (regression), private, empty/single-element pack, object-return (sret),
+pack-spread-forwarding into a variadic method, param/field receivers, and same-name-across-two-classes.
+`tests/variadic_tests.cpp` (`[variadic][genericmethod]`, +7 cases). Prior baseline was
+**1245 test cases / 2336 assertions** (as of **variadic methods** — `fn m<...Ts>(Ts... args)` on a
+class, composing the generic-method transplant machinery with the variadic-pack machinery. The pack is
+**inferred** at the call site (no explicit `<…>`), collected into a tuple, and consumed by compile-time
+cons-`match` / spread exactly like a free variadic function; the concrete `@Owner_m$Tuple$…` is injected
+into the class. Capture now **allows** a pack on a method (pack must be last type param); the prescan
+registers parallel `variadicMethodNames`/`variadicMethodKeys` + `variadicMethodFixedCount` (the fixed
+count is recorded in the **prescan**, since a generic-class variadic method's concrete template doesn't
+exist at the initial-parse call site); a new `parsePostfix` branch collects the pack via the shared
+`deducePackTargs` core (extracted from the free-fn `deduceVariadicInstantiation`) + `deduceVariadic
+MethodInstantiation`; `instantiateMethod` substitutes the pack to a `Tuple$…* args` borrow and runs
+`expandPackMatch`. Works on **generic classes** via the same `pendingMethodInsts_` deferral fixpoint.
+The **flagship use is `Array<T>::emplaceBack`** — a zero-copy emplace: `data[count] = T(args...)`
+direct-constructs the element straight into the buffer slot (verified in IR: GEP the slot,
+`store %Point zeroinitializer` + `call @Point_Point` on it, **no element temp, no `@Point_clone`**);
+the stdlib `Array.gg` now carries it. Lifts the "variadic methods deferred" note from the generic-method
+invariant. See the "Variadic methods" invariant; `tests/variadic_tests.cpp` (`[variadic][genericmethod]`,
++5 cases), `e2e/variadic_method_test.gg`. Prior baseline was
 **1240 test cases / 2324 assertions** (as of a **copy guard for raw-pointer-owning value objects** —
 a value object whose generated memberwise clone would shallow-copy a raw `ptr` (aliasing its buffer →
 leak + double-free, previously a silent heap-corruption crash) now cannot be **copied by value** without
@@ -1696,8 +1770,9 @@ re-parsed). Bounds (`<T: Trait>`) reuse the existing `GenericBoundCheck` path; s
 return/`this`-receiver methods all fall out of the transplanted `MethodDecl`. Two prerequisite fixes:
 a brace-aware `prescanTemplateNames` (a `fn m<T>(` inside a class body is a method, not a free
 function) and a new parser `currentClassName_` (for `this` receivers). v1 defers argument inference
-(explicit `<T>` required), impl/trait-block generic methods, and variadic methods — the last being the
-follow-up this unblocks toward `Array<T>::emplaceBack<...Us>`. A QA pass added coverage for
+(explicit `<T>` required — **except** variadic methods, whose pack is inferred) and impl/trait-block
+generic methods. **Variadic methods (`fn m<...Ts>`) are now supported** — see the "Variadic methods"
+invariant; the flagship use is `Array<T>::emplaceBack`. A QA pass added coverage for
 recursion (`this.m<T>()` self-call — the shell class is named the real owner precisely so this
 resolves), multiple type params (`<K,V>`), gm-calling-gm, default params, `?.` safe calls, a
 generic-free-fn + generic-method same-name coexistence, nested type args, param receivers, and the

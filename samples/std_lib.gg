@@ -32,6 +32,8 @@ class Instance{
 fn main() -> i32 {
 
     Instance i = new Instance(1, 2);
+    Array<Instance> array();
+    array.emplaceBack(1,2);
 
     return 0;
 }

@@ -58,6 +58,14 @@ class Array<T> {
         count = count + 1;
     }
 
+    fn emplaceBack<...Ts> (Ts... args) mut {
+        if (count == cap) {
+            grow();
+        }
+        data[count] = T(args...);
+        count++;
+    }
+
     // Remove and return the last element. The caller must ensure the array is not empty (there is
     // no exception mechanism to signal underflow). The element is cloned out to the caller and the
     // buffer copy destroyed — ownership transfer, refcount preserved.

@@ -1,0 +1,65 @@
+// e2e: variadic methods — `fn m<...Ts>(Ts... args)` on a class. The pack is collected at the call
+// site into a tuple, the concrete `Owner::m$Tuple$…` is injected into the class, and the flagship use
+// is a zero-copy `emplaceBack`: the element is constructed straight into the buffer slot (no temp, no
+// clone). Exercises: a generic-class variadic method (emplaceBack over a heap buffer), a fixed-prefix
+// parameter before the pack + compile-time cons-match recursion, and a non-generic class variadic
+// method. Expected exit code: 0.
+
+extern malloc(u64 size) -> ptr;
+extern free(ptr p);
+
+// A minimal growable vector with a variadic emplaceBack (the stdlib Array<T> shape).
+class Vec<T> {
+    private mut ptr<T> data;
+    private mut u64 count;
+    Vec() { count = 0; data = malloc(64 * sizeof(T)); }
+    fn emplaceBack<...Ts>(Ts... args) mut { data[count] = T(args...); count = count + 1; }
+    fn at(i32 i) -> T* { return data[i]; }
+    fn size() -> i32 { return count as i32; }
+    ~Vec() { free(data); }
+}
+
+class Point {
+    mut i32 x;
+    mut i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }
+    fn sum() -> i32 { return x + y; }
+}
+
+// A fixed prefix parameter precedes the pack; recursion consumes it via cons-match.
+class Adder {
+    fn sumFrom<...Ts>(i32 base, Ts... args) -> i32 {
+        match args {
+            ()     -> { return base; }
+            (x:xs) -> { return this.sumFrom(base + x, xs...); }
+        }
+    }
+}
+
+fn main() -> i32 {
+    // Emplace three points directly into the buffer — no temporaries, no clones.
+    mut Vec<Point>& v = new Vec<Point>();
+    v.emplaceBack(3, 4);      // sum 7
+    v.emplaceBack(10, 20);    // sum 30
+    v.emplaceBack(1, 1);      // sum 2
+
+    mut i32 total = 0;
+    total = total + v.at(0).sum();   // 7
+    total = total + v.at(1).sum();   // 30
+    total = total + v.at(2).sum();   // 2
+    // total = 39; size = 3
+
+    // Fixed-prefix + cons-match recursion: 100 + 1 + 2 + 3 = 106.
+    Adder a;
+    mut i32 s = a.sumFrom(100, 1, 2, 3);
+
+    // 39 + 3 + 106 = 148 ... normalize to 0 for the exit-code assertion.
+    if (total == 39) {
+        if (v.size() == 3) {
+            if (s == 106) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}

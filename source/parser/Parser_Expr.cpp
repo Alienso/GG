@@ -174,7 +174,10 @@ Expr Parser::parseExpression() {
         Token  typeName  = advance();
         consume(TokenType::LEFT_BRACKET, "expected '[' after type name");
         Token  sizeToken = consume(TokenType::NUMBER, "expected integer array size");
-        size_t arraySize = std::stoull(sizeToken.lexeme);
+        unsigned long long arraySizeMag = 0;
+        if (!parseIntegerLiteral(sizeToken.lexeme, arraySizeMag))
+            throw error(sizeToken, "invalid array size '" + sizeToken.lexeme + "'");
+        size_t arraySize = static_cast<size_t>(arraySizeMag);
         consume(TokenType::RIGHT_BRACKET, "expected ']' after array size");
         Token  name      = consume(TokenType::IDENTIFIER, "expected variable name after array type");
         std::unique_ptr<Expr> initializer = nullptr;
@@ -702,6 +705,29 @@ Expr Parser::parsePrimary() {
             for (bool s : genSpreads) if (s) { unwrapSpreadArgs(genArgs, genNames, genSpreads); break; }
             return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                       std::move(genArgs), std::move(genNames) });
+        }
+
+        // Generic constructor call (value construction, no `new`): ClassName<typeArgs>(args).
+        // Mirrors the `new ClassName<...>(...)` path — mangle + record the instantiation, then the
+        // mangled class name flows through an ordinary constructor CallExpr (exactly like a plain
+        // `Point(args)` call). Without this branch a bare `Wrap<i32>(x)` mis-parses as the comparison
+        // `Wrap < i32 > (x)`, yielding a misleading "type 'i32' used as a value" error. A bare class
+        // name is never a value, so `ClassName <` is unambiguously a generic construction (same
+        // reasoning the `new` path relies on).
+        if (gen_->classNames.count(name.lexeme) && check(TokenType::LESS)) {
+            std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
+            std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
+            recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
+            classNames.insert(mangled);
+            consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
+            std::vector<Token> ctorNames;
+            std::vector<bool>  ctorSpreads;
+            std::vector<std::unique_ptr<Expr>> ctorArgs =
+                parseCallArgs(ctorNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &ctorSpreads);
+            // A constructor is never pack-bearing (packs are free-function-only) — unwrap any spread.
+            for (bool s : ctorSpreads) if (s) { unwrapSpreadArgs(ctorArgs, ctorNames, ctorSpreads); break; }
+            return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
+                                      std::move(ctorArgs), std::move(ctorNames) });
         }
 
         // Constructor call via braces: ClassName{ args } — an alternate delimiter for

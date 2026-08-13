@@ -1,0 +1,56 @@
+// e2e: hex (0x/0X), octal (0o/0O), and digit-separator ('_') numeric literals.
+// Expected exit code: 0.
+
+fn main() -> i32 {
+    i32 hex   = 0x1F;          // 31
+    i32 hexUp = 0X10;          // 16
+    i32 oct   = 0o17;          // 15
+    i32 octUp = 0O20;          // 16
+    i32 big   = 1_000_000;     // 1000000
+    i64 mixed = 0xFF_FF;       // 65535, separator inside a hex run
+
+    if (hex   != 31)      { return 1; }
+    if (hexUp != 16)      { return 2; }
+    if (oct   != 15)      { return 3; }
+    if (octUp != 16)      { return 4; }
+    if (big   != 1000000) { return 5; }
+    if (mixed != 65535)   { return 6; }
+
+    f64 d = 1_234.5;
+    if (d != 1234.5) { return 7; }
+
+    // hex literal containing 'e'/'E' as a HEX DIGIT, not a float exponent marker.
+    i32 e1 = 0xFE;
+    i32 e2 = 0xE0;
+    if (e1 != 254) { return 8; }
+    if (e2 != 224) { return 9; }
+
+    // hex/octal literal in a FLOAT slot (must convert to decimal, not emit `0xFF.0`).
+    f64 hf = 0xFF;             // 255.0
+    f32 of = 0o10;            // 8.0
+    if (hf != 255.0) { return 10; }
+    if (of != 8.0)   { return 11; }
+
+    // negated hex literal.
+    i32 neg = -0x10;          // -16
+    if (neg != -16) { return 12; }
+
+    // hex literal as an array index.
+    i32[8] arr;
+    arr[0x3] = 7;
+    if (arr[0x3] != 7) { return 13; }
+
+    // hex literal as a switch label, matched at runtime.
+    i32 got = switch (255) {
+        case 0xFF -> 1;
+        default   -> 0;
+    };
+    if (got != 1) { return 14; }
+
+    // separator right after the prefix / double / trailing separators all strip cleanly.
+    if (0x_FF != 255)  { return 15; }
+    if (1__000 != 1000) { return 16; }
+    if (2000_ != 2000)  { return 17; }
+
+    return 0;
+}

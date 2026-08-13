@@ -145,9 +145,12 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
             // types `1.0` as f32 (no narrowing warning). Only *direct* literals adopt — operands of
             // a binary expression are analysed with the expected type cleared (see analyzeBinary).
             const std::string& lex = literal.token.lexeme;
-            bool isDecimal = lex.find('.') != std::string::npos
+            // A hex (`0x`/`0X`) or octal (`0o`/`0O`) literal is never decimal — guard the '.'/'e'/'E'
+            // sniff, since a hex digit run can itself contain 'e'/'E' (e.g. `0xFE`, `0xE0`).
+            bool isDecimal = !isPrefixedIntegerLiteral(lex)
+                          && (lex.find('.') != std::string::npos
                           || lex.find('e') != std::string::npos
-                          || lex.find('E') != std::string::npos;
+                          || lex.find('E') != std::string::npos);
 
             // The contextual numeric target, if any (strip nullable; ignore non-numeric contexts).
             const Type* want = nullptr;
@@ -163,10 +166,10 @@ Type SemanticAnalyzer::analyzeLiteral(const LiteralExpr& literal) {
                 return Type{TypeKind::F64};
             }
 
-            // Integer literal — parse its magnitude (a leading '-' is a separate UnaryExpr).
+            // Integer literal — parse its magnitude (decimal, or 0x/0o-prefixed, '_'-separators
+            // stripped). A leading '-' is a separate UnaryExpr, handled by the caller.
             unsigned long long mag = 0;
-            bool parsed = true;
-            try { mag = std::stoull(lex); } catch (...) { parsed = false; }
+            bool parsed = parseIntegerLiteral(lex, mag);
 
             if (want) {
                 if (isFloat(want->kind)) return Type{want->kind};   // integer literal in a float slot
@@ -268,9 +271,14 @@ bool SemanticAnalyzer::memberwiseCopyAliasesRawPtr(const std::string& className,
     if (!seen.insert(className).second) return false;   // cycle-safe
     auto it = classRegistry.find(className);
     if (it == classRegistry.end()) return false;
+    // A raw-ptr field is only dangerous to shallow-copy if THIS class's destructor frees it — that is
+    // what turns the alias into a double-free. A generated dtor (from reference fields) never frees a
+    // raw ptr, so only a USER destructor counts. A raw-ptr *view* with no destructor (e.g. an iterator
+    // holding a non-owning buffer pointer) never frees the buffer, so copying it is safe.
+    const bool hasUserDtor = it->second.destructor.has_value();
     for (const std::string& fname : it->second.fieldOrder) {
         const Type& ft = it->second.fields.at(fname).type;
-        if (ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) return true;   // shallow-copied
+        if ((ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) && hasUserDtor) return true;
         if (ft.kind == TypeKind::Object && memberwiseCopyAliasesRawPtr(ft.className, seen)) return true;
     }
     return false;
@@ -983,9 +991,11 @@ static std::string labelKey(const Expr& e) {
     const auto& node = *e.node;
     if (const auto* lit = std::get_if<LiteralExpr>(&node)) {
         switch (lit->token.type) {
-            case TokenType::NUMBER:
-                try { return "int:" + std::to_string(std::stoll(lit->token.lexeme, nullptr, 0)); }
-                catch (...) { return "num:" + lit->token.lexeme; }
+            case TokenType::NUMBER: {
+                unsigned long long mag = 0;
+                if (parseIntegerLiteral(lit->token.lexeme, mag)) return "int:" + std::to_string(mag);
+                return "num:" + lit->token.lexeme;
+            }
             case TokenType::TRUE:   return "bool:1";
             case TokenType::FALSE:  return "bool:0";
             case TokenType::CHAR:   return "char:" + lit->token.lexeme;
@@ -996,10 +1006,13 @@ static std::string labelKey(const Expr& e) {
     // Negated integer literal (`case -1`) — a UnaryExpr over a NUMBER.
     if (const auto* un = std::get_if<UnaryExpr>(&node)) {
         if (un->operatorToken.type == TokenType::MINUS && un->operand && un->operand->node) {
-            if (const auto* lit = std::get_if<LiteralExpr>(un->operand->node.get()))
-                if (lit->token.type == TokenType::NUMBER)
-                    try { return "int:" + std::to_string(-std::stoll(lit->token.lexeme, nullptr, 0)); }
-                    catch (...) { return "num:-" + lit->token.lexeme; }
+            if (const auto* lit = std::get_if<LiteralExpr>(un->operand->node.get())) {
+                if (lit->token.type == TokenType::NUMBER) {
+                    unsigned long long mag = 0;
+                    if (parseIntegerLiteral(lit->token.lexeme, mag)) return "int:-" + std::to_string(mag);
+                    return "num:-" + lit->token.lexeme;
+                }
+            }
         }
         return "";
     }
@@ -1317,9 +1330,10 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     Type lhsType = sym->type;
     Type rhsType = analyzeWithExpected(*assign.value, lhsType);
     checkCast(rhsType, lhsType, assign.name, "assignment");
-    // Value-object assignment ALWAYS deep-copies (clone) into the existing storage — even from a
-    // freshly constructed temporary — so a raw-ptr owner without a `Clone` impl would alias its
-    // buffer (double-free). Reject it. (A reference binding rebinds instead and is unaffected.)
+    // Value-object assignment deep-copies (clone) into the storage, so a raw-ptr owner WHOSE DTOR
+    // frees that buffer would alias + double-free without a `Clone` impl. Reject it. (A raw-ptr view
+    // with no destructor — e.g. an iterator — never frees the buffer, so its shallow copy is safe and
+    // rejectUncloneablePtrOwner lets it through.)
     if (lhsType.kind == TypeKind::Object)
         rejectUncloneablePtrOwner(lhsType, assign.name);
     // Rebinding a `mut` reference from a read-only reference is a const→mut coercion.

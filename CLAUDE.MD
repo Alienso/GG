@@ -472,6 +472,82 @@ A C-style ternary, implemented as a **parser-only desugar** to a switch **expres
   `QUESTION` here (distinct from `?:`/`?.`/the `T?` type suffix), so there's no grammar conflict.
 - Tests: `tests/ternary_tests.cpp` (`[ternary]`).
 
+### `for (DECL : ITERABLE)` — Java-style range loop + the `Iterator` trait
+A range `for` loop over anything iterable, implemented as a **parser-only desugar** (like ternary /
+lambdas / tuples) — **no** new AST / semantic / codegen. `for (DECL : COLL) BODY` lowers (in
+`parseForInStmt`, `Parser_Stmt.cpp`) to:
+```
+{ mut var __forit_N = (COLL).iter(); while (__forit_N.hasNext()) { DECL = __forit_N.next(); BODY } }
+```
+The programmer never writes `.iter()` — the desugar inserts it. `next()` returns a `T*` borrow, so
+`DECL` binds it by the ordinary rules: a primitive `i32 x` **loads** the value, a borrow `Point* p`
+binds the pointer directly.
+- **Range detection** (`parseForStmt`): after `for (`, a scan for a `:` at paren-depth 1 that is **not**
+  a ternary colon (tracked by matching `?`) and precedes any `;` → the range form. A `::` (`COLON_COLON`)
+  is a distinct token, so `Class::x` in the header is never mistaken for it; a C-style `for` with a
+  ternary in its condition stays C-style (the `?`-tracking skips that colon).
+- **Loop-variable form** (enforced syntactically in the parser, since element-kind isn't known there):
+  the loop variable must be a **primitive keyword** (`i32 x` — bare value, allowed) or a **borrow**
+  (`T*` — any element type). A bare **object/enum** loop variable (`Point p`, `Color c`) is a clean
+  error ("iterate 'Point' by borrow: … 'Point* p'") — objects/enums are iterated by borrow, only
+  primitives by value. `mut T*` gives a mutable borrow (write-through to the element).
+- **The `Iterator` built-in trait** (`SemanticAnalyzer.cpp`): `Iterator` is a **built-in** trait (added
+  to `isBuiltinTrait` + the `builtinMethod` map like `Index`/`Clone`), recognized by convention —
+  conformance requires the two conventional methods `fn hasNext() -> bool` and `fn next() -> T*`. Being
+  built-in means the trait carries **no written signature**, so `impl<T> Iterator for ArrayIter<T>`
+  supplies the concrete `next() -> T*` (the element type `T` bound by the **impl's** own `<T>`, exactly
+  as `impl<T> Index for Array<T>`'s `get() -> T*` does) — **no parameterized traits / associated types
+  needed**. (An abstract algorithm *bounded* on `Iterator` that consumes the element — `fn sum<I:
+  Iterator>` — would still need associated types to name the element type; that's the only deferred
+  case, and `for-in` sidesteps it because the loop declares the element type explicitly.)
+- **The `Iterable` built-in trait** (the collection side): `Iterable` is a **built-in** trait too
+  (`isBuiltinTrait` + `builtinMethod` map `{"Iterable","iter"}`), the symmetric partner of `Iterator` —
+  a collection declares `impl<T> Iterable for Array<T> { fn iter() -> <cursor> … }` to formally mark
+  itself iterable. Conformance is by convention (the `iter` method must exist — no written signature,
+  so the impl supplies the cursor return type; no associated types needed, same as `Iterator`/`Index`).
+  `impl Iterable` with no `iter()` is a clean "must define method 'iter'" error.
+- **Iterability of the for-in itself is still by convention** (unchanged): `for (x : coll)` lowers to
+  `coll.iter()` and does **not** gate on `Iterable` conformance — a collection needs an `iter()`
+  returning a cursor with `hasNext`/`next`, whether or not it also `impl Iterable`s. A missing `iter()`
+  is the ordinary "no method 'iter'" error (a leaky-desugar wart, same class as ternary's). `Iterable`
+  is the formal marker + `@implements(T, Iterable)` query; wiring the for-in gate onto it is a future
+  polish. A fresh `iter()` per loop → independent cursors, so loops nest and re-run (verified:
+  `e2e/foreach_test.gg` nests two cursors).
+- **Source binding for temp-producing iterables** (`parseForInStmt`): when the iterable is a **call /
+  `new`** (a temporary), the desugar first binds it to `mut var __forsrc_N = ITERABLE;` and iterates
+  `__forsrc_N`. This keeps the collection alive for the whole loop — **without it a reference-returning
+  call iterable is a use-after-free**: the call's `+1` temp is released (running the collection's dtor,
+  freeing the buffer) at the `.iter()` full-expression boundary, *before* the loop body runs (confirmed
+  in IR: `gg_release(…, @Array$i32_dtor)` emitted between the `iter()` call and `while.cond`). A plain
+  **place** (identifier / member / `this` / index) is iterated directly — no `__forsrc`, no copy (so
+  the common `for (x : arr)` is unchanged). Verified: `e2e/foreach_test.gg` iterates a `make() ->
+  IntVec&` whose `IntVec` has a `~IntVec` that frees the buffer, and gets the right sum.
+- **A value-returning (sret) call iterable now works** (`for (x : f())` where `f` returns an object
+  **by value**): the `__forsrc_N` binding is a `mut var`, and inferring a `var` from an sret call was a
+  **pre-existing bug** (`var x = <sret call>` silently failed to declare `x`) — now fixed (see the
+  "`var` inference from an sret method call" invariant / `resolveTypeToken`'s `declaredClassNames_`
+  fallback). Reference-returning calls (`-> T&`), `new`, locals, fields, and index places all work too.
+- **stdlib** (`stdlib/Array.gg`): `class ArrayIter<T>` holds a **non-owning borrow of the collection**
+  (`Array<T>*`) plus an index — NOT a snapshot of the buffer pointer — and reads the length/elements
+  **live** (`fn hasNext() { pos < arr.size() }`, `fn next() { arr.get(pos as i32) }`). `impl<T> Iterable
+  for Array<T>` builds the cursor **in place in the return slot** (`fn iter() -> ArrayIter<T> it { it.arr
+  = this; it.pos = 0; return it; }`) — a stack value object via sret, **no heap allocation per loop**,
+  **no refcount** (`it.arr = this` is the Silent Object→`Class*` coercion, no cast), and **no cursor
+  destructor** (a borrow owns nothing). Because reads go through the live Array, a `push`/`grow()` that
+  reallocates the buffer **during** iteration is harmless — `next()` always uses the current buffer (a
+  snapshot cursor would dangle on the freed old buffer). The borrow field requires `--unsafe-ptr` (see
+  the borrow-fields note under the `T*` invariant); it is safe here because a for-loop cursor never
+  outlives its collection. Verified: `e2e/foreach_realloc_test.gg` grows the Array mid-iteration and
+  does not crash.
+- **Copy-guard refinement (related fix)**: the raw-ptr-owner copy guard (`memberwiseCopyAliasesRawPtr`,
+  `SemanticAnalyzer_Exprs.cpp`) now fires only when the class has a **user destructor** — a raw-ptr
+  *view* with no dtor (an iterator holding a non-owning buffer pointer) never frees the buffer, so its
+  shallow copy is safe. This lets a **stack-value** iterator (`fn iter() -> IntIter it { it =
+  IntIter(…); … }`, no `new`) return/copy without a spurious "cannot copy … owns a raw pointer" error
+  (a generated dtor from ref fields never frees a raw ptr, so keying on the *user* dtor is correct;
+  `[clone]` still green). Invalidation (a mutate-during-iteration `modCount` fail-fast trap) is
+  deferred. Tests: `tests/foreach_tests.cpp` (`[foreach]`), `e2e/foreach_test.gg`.
+
 ### Lambdas & callable objects (`Call` trait)
 Any class implementing the **`Call` trait** is callable: `obj(args)` desugars to `obj.call(args)`.
 Lambdas `(params) -> [Ret] { body }` are **parser-only sugar** — they lower to a hoisted value-object
@@ -820,6 +896,13 @@ Rejects the "value-object → reference borrow" footgun: passing a **stack value
   Generic functions use the **same declaration syntax as regular functions**, just with `<T>` after the name
   (both begin with `fn` — see the `fn` invariant below).
 - Use sites (`Foo<i32>`) queue a `GenericInstantiation` on the worklist.
+- **A bare generic constructor call** `ClassName<T>(args)` (value construction, **no `new`**) is a use
+  site too — `parsePrimary` has a dedicated branch (gated on `gen_->classNames.count(name) &&
+  check(LESS)`, mirroring the `new Class<...>(...)` path) that mangles + `recordInstantiation`s and
+  emits an ordinary constructor `CallExpr` with the mangled name. Without it a bare `Wrap<i32>(x)`
+  mis-parsed as the comparison `Wrap < i32 > (x)` ("type used as a value") — a bare class name is never
+  a value, so `ClassName <` is unambiguously a generic construction. `new`, the var-decl ctor sugar
+  (`Wrap<i32> w(x)`), and generic-method calls were unaffected; only the bare-expression form was missing.
 - `monomorphize()` substitutes type args, re-parses each instantiation into a concrete
   mangled declaration. **Semantic and CodeGen never see type parameters.**
 - **Mangling** (`$` separator; `$` and `.` are valid unquoted LLVM identifier chars):
@@ -1093,7 +1176,29 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
     source be an addressable lvalue (`isLvalueExpr`) — a temporary (`a+b`) is rejected.
 - **Coercions INTO a class borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`Class*`, value
   `Object`→`Class*`, `Class*`→`Class*`. The reverse — a borrow → an owning `Class&` — is **forbidden**.
-- **Not a field**: `buildClassInfo` rejects a borrow field.
+- **Borrow fields — allowed only under `--unsafe-ptr`, class borrows only** (`buildClassInfo`): a
+  `Class*` borrow field is rejected by default (a borrow could outlive its source, which escape
+  analysis can't prove across a stored field), but **permitted when `--unsafe-ptr` is on** — lifetimes
+  become the programmer's responsibility, the same contract as raw `ptr<T>`. A **primitive** borrow
+  field (`i32*`) is **always rejected** (no struct/clone lowering — it would be mistaken for the scalar
+  value and wrongly retained). A borrow field lowers to a plain `ptr` and is **never
+  retained/released** — all three refcount sites branch on `.borrow`:
+  - **assignment** (`genMemberAssign`, `CodeGen_Classes.cpp`): a dedicated borrow branch stores the
+    pointer with **no retain of the new / release of the old** and does **not** `claimTemp` a `+1`
+    producer (a borrow takes no ownership). *(Missing this branch silently retained the target — the
+    stdlib iterator's `it.arr = this` leaked the whole collection every loop; caught only by a
+    live-object counter, since a leak doesn't change the exit code.)*
+  - **clone** (`genCloneFunction`): shallow-copies it (falls through to the primitive/ptr branch, not
+    the reference retain/release).
+  - **dtor** (`genDtor`): skips it. And a borrow field does **not** set `hasRefField`/`needsDtor`
+    (only owning `Class&` fields do).
+  The canonical use is a **non-owning cursor holding a live handle to its collection** — e.g. the stdlib
+  `ArrayIter<T>` holds `Array<T>*` and reads `arr.size()`/`arr.get(pos)` live, so a `grow()`/realloc
+  during iteration is harmless (no snapshot to dangle). `it.arr = this` needs no cast — `this`
+  (Object) → `Class*` is already a Silent coercion (unlike Object→`Class&`/`ptr<Class>`, both rejected).
+  Tests: `tests/ref_tests.cpp` (`[ref]`: gated class-borrow accept/reject, primitive-borrow reject,
+  no-retain assignment), `e2e/foreach_realloc_test.gg` (realloc-safety), `e2e/foreach_borrow_leak_test.gg`
+  (no leak — a `~Vec` live counter returns to 0 after iterating).
 - **A borrow-returning call is NOT a refcount temp**: every borrow-returning call site pushes its
   result to `pendingTemps_` only when `!resolvedType.borrow` (a borrow owns nothing, so releasing
   it would corrupt the real owner's count).
@@ -1235,6 +1340,50 @@ Implemented entirely at the literal-typing site: **no new type-kind, no codegen 
   rejects a non-exactly-representable decimal for `float`.
 - Tests: `tests/cast_tests.cpp` (`[numlit]`).
 
+### Hex / octal literals + digit separators (`0x`/`0X`, `0o`/`0O`, `_`)
+Integer literals may be written in hex (`0x1F`/`0X1F`) or octal (`0o17`/`0O17`), and any numeric
+literal (integer or decimal) may use `_` as a digit separator (`1_000_000`, `1_234.5`) for
+readability. **Deliberately NOT supported**: legacy C-style "a leading zero means octal" (`017`) —
+that's a classic ambiguity footgun (and would collide with a plain `0` literal); an explicit `0o`
+prefix is unambiguous. No hex-float syntax (`0x1.8p3`) — hex/octal literals are integer-only.
+- **Lexer** (`Lexer.cpp`, the digit-scan branch): after a leading `0`, a following `x`/`X` switches to
+  scanning hex digits (`isxdigit`), `o`/`O` to octal digits (`0`-`7`); otherwise the existing decimal
+  scan applies. `_` is accepted anywhere in the digit run (integer part, decimal part, and inside a
+  hex/octal run) and is stripped later by `stripDigitSeparators` — the lexer does no validation on
+  placement (`1_.5`, `_1`-after-prefix, etc. all lex as one `NUMBER` token; a downstream numeric parse
+  is the only validator). A bare prefix with no digits (`0x;`, `0o;`) is a **lex error** ("no digits
+  after '0x'"/"'0o'"), not a silent malformed token.
+- **Shared parsing helper** (`Type.h`/`Type.cpp`, since every literal-magnitude call site needed the
+  same fix): `stripDigitSeparators(lexeme)` removes `_`; `isPrefixedIntegerLiteral(lexeme)` detects a
+  `0x`/`0X`/`0o`/`0O` prefix (used to guard the pre-existing '.'/'e'/'E' "is this decimal?" sniff — a
+  hex digit run can itself contain `e`/`E`, e.g. `0xFE`/`0xE0`, which would otherwise be misdetected as
+  a float); `parseIntegerLiteral(lexeme, magnitude)` strips separators, dispatches on the prefix, and
+  parses the remaining digits at base 16/8/10 via `std::stoull` (false on malformed/> u64, mirroring
+  the try/catch pattern every call site used before). This **replaced 5 independent ad-hoc
+  `std::stoull`/`std::stoll` call sites** (magnitude check in `analyzeLiteral`, IR emission in
+  `genLiteral`, the switch-label dedup key in `labelKey`, the array-size parse in `parseVarDecl`'s
+  array-decl branch, and the constant-index-bounds check) — consolidating them removed the risk of
+  fixing hex/octal support in some call sites but not others.
+- **No new AST/type-system changes** — still a `LiteralExpr`/`NUMBER` token; only which *base* the
+  digits are read in changes. The numeric-literal-**adoption** logic (which type a bare literal takes)
+  is untouched — `0xFF` in an `i8` slot warns "does not fit" exactly like `255` would.
+- **Codegen — a prefixed integer literal in a FLOAT slot must be converted to decimal first**
+  (`genLiteral`): `f64 d = 0xFF;` would otherwise append `.0` to the raw lexeme → `store double
+  0xFF.0` (malformed IR — a real bug caught only by clang's parser, since GG doesn't self-verify its
+  IR; the f32 path fed the raw `0xFF` to `strtof`, which is platform-dependent). Both float paths now
+  parse a prefixed literal to its magnitude and emit the decimal (`255.0` / the hex-float encoding of
+  `255`). A plain decimal literal just has its `_` stripped (`_` is invalid in an LLVM float constant,
+  and `strtof` stops at the first `_`). The integer path emits the parsed *value*, so the source base
+  is irrelevant there.
+- **Lexer requires at least one REAL digit** after a prefix (`sawDigit` flag, not just "consumed
+  something"): `0x`, `0o`, and separator-only `0x_`/`0o_` are all clean lex errors ("no digits after
+  '0x'") rather than slipping through as a `NUMBER` token that later parses to 0 with a misleading
+  "does not fit" warning.
+- Tests: `tests/cast_tests.cpp` (`[numlit]`, lexer/codegen/semantic cases incl. the `0xFE`/`0xE0`
+  hex-digit-vs-float-exponent guard, the hex/octal-in-float-slot regression, `0x_`/`0o_` lex errors, a
+  negated hex literal, an out-of-bounds hex array index, a hex/decimal switch-label duplicate-detection
+  cross-check, and the array-size parser), `e2e/hex_octal_literal_test.gg`.
+
 ### Mixed-arithmetic common type — signed wins (`commonArithmeticType`, `Type.cpp`)
 The unified type for a **symmetric** binary numeric op (both the semantic result type and the codegen
 operand type) is: **float dominates** (`f64` > `f32` > any int); both-same-signedness ints → **wider
@@ -1339,9 +1488,16 @@ codegen gain **no new type-kind and no new branch** beyond the inference site.
   identical IR** to the explicit form (`var r = new Point()` co-owns + releases at scope exit exactly
   like `Point& r = …`). `Token` has const members ⇒ not assignable ⇒ the side table is populated with
   `emplace`, never `map[k]=`.
+- **Inferring from a value-returning (sret) method call** (`var e = v.empty()` where `fn empty() ->
+  Vec e` returns its own class by value) works — but relied on a fix to `resolveTypeToken`: a bare
+  class-name **return type** is resolved inside `buildClassInfo` *before* the owning class is in
+  `classRegistry`, so it must also consult the `declaredClassNames_`/`declaredEnumNames_` name pre-pass
+  sets, else the method's stored `returnType` was `Error` and the `var` binding silently wasn't
+  declared. The explicit-typed path (`Vec e = v.empty()`) never hit this (it uses the declared type);
+  only `var` inference reads the method's return type directly.
 - **v1 limitation**: capturing a `var`-typed local inside a lambda is unsupported (the parser records
   the capture's type at parse time, before inference runs). Rare; a clear failure, not a miscompile.
-- Tests: `tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`.
+- Tests: `tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`, `e2e/var_infer_sret_test.gg`.
 
 ### Compile-time reflection — `@`-sigil builtins + `inline for` (Phases 1 & 2)
 Zig-style compile-time reflection with **zero runtime cost** — no runtime type tags, no vtables, no
@@ -1494,7 +1650,12 @@ clone is shallow over a raw `ptr` → double-free).
   impls `Clone` (copying routes through its deep impl), so a class embedding a `Clone` field (`Wrap {
   Bytes b; }` where `Bytes` impls Clone but `Wrap` doesn't) is correctly allowed — its memberwise clone
   recurses through `@Bytes_clone`. (Distinct from the element guard's `classOwnsRawPtr`, which does not
-  stop at Clone fields; only the copy guard uses the Clone-aware variant.)
+  stop at Clone fields; only the copy guard uses the Clone-aware variant.) **Refinement (for-in
+  iterators)**: the raw-ptr-field danger is gated on the class having a **user destructor** — the
+  double-free requires a dtor that frees the buffer, and a generated dtor (from reference fields) never
+  frees a raw ptr, so a raw-ptr *view* with no destructor (e.g. an iterator holding a non-owning buffer
+  pointer) is safe to shallow-copy and is **not** flagged. So a stack-value iterator returns/copies
+  freely while `String`/`Array` (raw ptr **+** a user/`Clone` path) stay protected.
 - Tests: `tests/clone_tests.cpp` (`[clone]`), `e2e/array_clone_test.gg` (`Array<String>` +
   `Array<Array<Point>>`, independent-buffer + recursion checks, exit 0).
 
@@ -1718,6 +1879,111 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1302 test cases / 2438 assertions** (as of fixing **two pre-existing bugs** flagged earlier:
+(A) **`var` inference from a value-returning (sret) method call** — `var e = v.empty()` where
+`fn empty() -> Vec e` returns its own class by value silently failed to declare `e` ("use of
+undeclared identifier"). Root cause: `resolveTypeToken` resolved a bare class-name return type only
+against `classRegistry`, but a method's return type is resolved inside `buildClassInfo` *before* the
+owning class is registered — so `Vec` → `Error`, leaving the method's stored `returnType` `Error`;
+the explicit-typed path (`Vec e = v.empty()`) masked it by using the *declared* type, and only `var`
+inference reads the method's return type directly. Fixed by having `resolveTypeToken` fall back to the
+`declaredClassNames_`/`declaredEnumNames_` name pre-pass sets (populated before any `buildClassInfo`
+runs). This also fixes the for-in "value-returning sret call iterable" limitation (its `__forsrc` is a
+`mut var`). (B) **A bare generic constructor call `ClassName<T>(args)`** (value construction, no `new`)
+mis-parsed as the comparison `ClassName < T > (args)` → "type used as a value", because `parsePrimary`
+had branches for a generic *function* call and for `new Class<T>(...)` but none for a bare generic
+*class* constructor call (`new Wrap<i32>(...)` always worked). Fixed by adding the missing branch,
+mirroring the `new` path (mangle + `recordInstantiation`, then the mangled name flows through an
+ordinary constructor `CallExpr`). Both were found via focused probes narrowing the reported symptoms:
+bug A turned out method-specific (free-fn sret already worked), bug B turned out unrelated to the
+enclosing type param (a concrete `Wrap<i32>(x)` in a non-generic fn failed too). `tests/var_infer_tests.cpp`
+(`[var]`, +3), `tests/codegen_tests.cpp` (`[generics]`, +3), `e2e/var_infer_sret_test.gg`,
+`e2e/generic_ctor_call_test.gg`. Prior baseline was
+**1296 test cases / 2427 assertions** (as of a **QA edge-case pass over hex/octal literals** that
+found + fixed **two real bugs**: (1) a hex/octal integer literal used in a **float slot** (`f64 d =
+0xFF;`) emitted `store double 0xFF.0` — malformed IR caught only by clang (GG doesn't self-verify its
+IR); the f32 path fed the raw `0xFF` to `strtof` (platform-dependent). Both float paths now convert a
+prefixed literal to its decimal value first. (2) A separator-only prefixed literal `0x_`/`0o_` slipped
+through the lexer as a `NUMBER` token (the digit-presence check counted the `_` as progress) and later
+parsed to 0 with a misleading "does not fit" warning; the lexer now requires at least one REAL digit
+after the prefix → a clean "no digits after '0x'" lex error. The pass also verified (all correct)
+negated hex literals (`-0x10`), hex/octal in a float slot, hex array indices (incl. out-of-bounds →
+compile error), runtime switch-label matching on a hex label, and separator-placement oddities
+(`0x_FF`, `1__000`, `2000_`). `tests/cast_tests.cpp` (`[numlit]`, +7 cases), expanded
+`e2e/hex_octal_literal_test.gg`. Prior baseline was
+**1289 test cases / 2418 assertions** (as of **hex/octal integer literals + digit separators** —
+`0x1F`/`0X1F` (hex) and `0o17`/`0O17` (octal), plus `_` as a digit separator in any numeric literal
+(`1_000_000`, `1_234.5`). Deliberately **not** legacy C-style leading-zero octal (`017`) — an explicit
+`0o` prefix avoids that ambiguity footgun and the collision with a plain `0` literal. All in the
+lexer's digit-scan branch (hex/octal prefix detection via `isxdigit`/`0`-`7`, `_` accepted anywhere in
+the run) plus a new shared `Type.h`/`Type.cpp` helper trio (`stripDigitSeparators` /
+`isPrefixedIntegerLiteral` / `parseIntegerLiteral`) that **replaced 5 independent ad-hoc
+`std::stoull`/`std::stoll` call sites** (literal-magnitude check, IR emission, the switch-label dedup
+key, the array-size parser, and the constant-index-bounds check) — consolidating them is what makes
+hex/octal support consistent everywhere instead of correct in some places and silently wrong in
+others. Also fixed a latent misdetection: the existing "is this a decimal literal?" sniff looked for
+`.`/`e`/`E` in the lexeme, which would have misfired on a hex literal containing `e`/`E` as a hex
+digit (`0xFE`, `0xE0`) — now guarded by `isPrefixedIntegerLiteral`. No new AST/type-kind — only which
+*base* a literal's digits are read in changes; the existing numeric-literal-**adoption** logic is
+untouched. See the "Hex / octal literals + digit separators" invariant; `tests/cast_tests.cpp`
+(`[numlit]`, +16 cases), `e2e/hex_octal_literal_test.gg`. Prior baseline was
+**1273 test cases / 2388 assertions** (as of a **QA edge-case pass over borrow fields** that found +
+fixed a real **memory leak**: `genMemberAssign` retained on **every** reference-field store, so a
+borrow-field store (`it.arr = this`) wrongly retained its target with no matching release (a borrow
+field has no dtor) — silently leaking the entire collection on every `for`-loop. Caught only by a
+live-object counter (a leak doesn't change the exit code). Fixed with a dedicated borrow branch in
+`genMemberAssign` (plain pointer store, no retain/release, no `claimTemp`). The pass also found the
+relaxation wrongly allowed **primitive** borrow fields (`i32*`) — which codegen mishandles (it emitted
+`gg_retain` on the `i32` value → invalid IR); now restricted to **class** borrows only, with a clean
+"primitive borrow" reject. Added coverage: primitive-borrow reject, borrow-store no-retain (codegen),
+mixed borrow+owning-ref leak balance, and `e2e/foreach_borrow_leak_test.gg` (a `~Vec` counter returns
+to 0 after iterating). `tests/ref_tests.cpp` (`[ref]`, +2 cases). Prior baseline was
+**1271 test cases / 2384 assertions** (as of **borrow fields under `--unsafe-ptr` → a realloc-safe
+stdlib iterator**. A `Class*` borrow field — previously always rejected — is now **allowed when
+`--unsafe-ptr` is on** (lifetimes become the programmer's responsibility, like raw `ptr<T>`); it lowers
+to a plain `ptr`, is never retained/released (clone shallow-copies it, dtor skips it), and doesn't set
+`needsDtor`. This lets the stdlib `ArrayIter<T>` hold a **non-owning borrow of the collection**
+(`Array<T>*`) + an index and read `arr.size()`/`arr.get(pos)` **live** instead of snapshotting the
+buffer pointer — so a `grow()`/realloc **during** iteration is harmless (verified: `e2e/
+foreach_realloc_test.gg` grows the Array mid-loop with no crash). `it.arr = this` needs no cast
+(Object→`Class*` is already a Silent coercion). See the borrow-fields note under the `T*` invariant and
+the updated for-in stdlib bullet; `tests/ref_tests.cpp` (`[ref]`, gated accept/reject +1),
+`tests/foreach_tests.cpp` (`[foreach]`, +1 live-cursor case), `e2e/foreach_realloc_test.gg`. Prior
+baseline was
+**1269 test cases / 2380 assertions** (as of adding the **`Iterable` built-in trait** — the symmetric
+collection-side partner of `Iterator`. `Iterable` is convention-recognized (`isBuiltinTrait` +
+`builtinMethod` `{"Iterable","iter"}`), so a collection formally marks itself iterable with
+`impl<T> Iterable for Array<T> { fn iter() -> <cursor> … }` (conformance = has an `iter()` method — no
+associated types, same trick as `Iterator`/`Index`); an `impl Iterable` lacking `iter()` is a clean
+"must define method 'iter'" error, and `@implements(T, Iterable)` reflects membership. The stdlib
+`Array<T>::iter()` moved from the class body into `impl Iterable`. **The for-in desugar is unchanged** —
+it still lowers to `coll.iter()` by convention and does not yet gate on `Iterable` conformance (a future
+polish); `Iterable` is currently the formal marker + reflection query. `tests/foreach_tests.cpp`
+(`[foreach][iterable]`, +3 cases). Prior baseline was
+**1266 test cases / 2375 assertions** (as of a **QA edge-case pass over the for-in range loop** that
+found + fixed a real **use-after-free**: a reference-returning-**call** iterable (`for (x : make())`
+where `make() -> Array&`) released the call's `+1` temp — running the collection's dtor, freeing the
+buffer — at the `.iter()` statement boundary, *before* the loop body ran. Fixed by binding a
+temp-producing iterable (a call/`new`) to a `mut var __forsrc` local that lives for the whole loop
+(a plain place — identifier/member/`this`/index — is still iterated directly, no copy). The pass also
+verified break/continue, empty collections, unbraced bodies, primitive-borrow loop vars, member-access
+and `new` iterables all work, and surfaced a **pre-existing** `var x = <value-returning sret call>`
+non-declaration bug (flagged as a task; it narrowly blocks a value-returning-call iterable — bind to a
+local first). `tests/foreach_tests.cpp` (`[foreach]`, +6 cases), `e2e/foreach_test.gg` (+ref-call UAF
+case). Prior baseline was
+**1260 test cases / 2367 assertions** (as of the **`for (DECL : ITERABLE)` range loop + built-in
+`Iterator` trait** — a Java-style range `for`, implemented as a parser-only desugar to
+`{ mut var __forit = COLL.iter(); while (__forit.hasNext()) { DECL = __forit.next(); BODY } }` (no new
+AST/semantic/codegen). Primitives iterate by value (`i32 x`), objects/enums by borrow (`Point*`,
+`mut Point*` for write-through) — enforced syntactically in the parser. `Iterator` is a **built-in**
+trait (convention-recognized, `hasNext`/`next`, like `Index`), so `impl<T> Iterator for ArrayIter<T>`
+supplies `next() -> T*` with `T` bound by the impl — no parameterized traits needed. The stdlib gains
+`ArrayIter<T>` + `Array<T>::iter()`. Two supporting fixes: the raw-ptr copy guard now keys on a **user
+destructor** (a no-dtor buffer *view* like an iterator is safe to shallow-copy), and a **pre-existing**
+monomorphizer bug was found + flagged (a value construction of a generic type using the enclosing
+class's own type param corrupts parser state — worked around in `Array::iter()` via `new`). See the
+"`for (DECL : ITERABLE)`" invariant; `tests/foreach_tests.cpp` (`[foreach]`, +8 cases),
+`e2e/foreach_test.gg`. Prior baseline was
 **1252 test cases / 2348 assertions** (as of a **QA edge-case pass over variadic methods** that found
 and fixed a real bug: a **`static`/`private` variadic method** (`fn static total<...>` / `fn private
 m<...>`) was never registered as variadic, so `Sum::total(...)` fell through to a plain static call →

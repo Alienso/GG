@@ -88,7 +88,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
         for (const FieldDecl& fd : cls.fields) {
             Type fieldType  = decodeSynthesizedType(fd.typeName);
             if (fieldType.kind == TypeKind::Reference) {
-                if (!fd.isStatic) hasRefField = true;
+                // A borrow field (`Class*`) is non-owning — it is never released, so it does NOT make
+                // the class need a destructor (only owning `Class&` reference fields do).
+                if (!fd.isStatic && !fieldType.borrow) hasRefField = true;
             } else if (isError(fieldType)) {
                 // Bare type name: value-object field (embedding) or enum-value field; or a nullable
                 // primitive/enum field (`i32?` → `{i1,iN}`, `Color?` → ptr; nullable refs `N&?` were

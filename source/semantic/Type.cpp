@@ -338,6 +338,38 @@ bool integerLiteralFits(unsigned long long magnitude, TypeKind t) {
     }
 }
 
+std::string stripDigitSeparators(const std::string& lexeme) {
+    std::string out;
+    out.reserve(lexeme.size());
+    for (char c : lexeme) if (c != '_') out += c;
+    return out;
+}
+
+bool isPrefixedIntegerLiteral(const std::string& lexeme) {
+    return lexeme.size() > 1 && lexeme[0] == '0'
+        && (lexeme[1] == 'x' || lexeme[1] == 'X' || lexeme[1] == 'o' || lexeme[1] == 'O');
+}
+
+bool parseIntegerLiteral(const std::string& lexeme, unsigned long long& magnitude) {
+    std::string clean = stripDigitSeparators(lexeme);
+    int base = 10;
+    size_t digitsStart = 0;
+    if (clean.size() > 1 && clean[0] == '0' && (clean[1] == 'x' || clean[1] == 'X')) {
+        base = 16;
+        digitsStart = 2;
+    } else if (clean.size() > 1 && clean[0] == '0' && (clean[1] == 'o' || clean[1] == 'O')) {
+        base = 8;
+        digitsStart = 2;
+    }
+    if (digitsStart >= clean.size()) return false;   // e.g. "0x" with no digits
+    try {
+        magnitude = std::stoull(clean.substr(digitsStart), nullptr, base);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 TypeKind typeKindFromName(const std::string& name) {
     if (name == "i8")   return TypeKind::I8;
     if (name == "i16")  return TypeKind::I16;

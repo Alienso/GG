@@ -46,6 +46,11 @@ via monomorphization.
 Integer literals are untyped at the source level and infer their type from context.
 The default numeric type when context provides no constraint is `i32`.
 
+Integer literals may also be written in **hex** (`0x1F`, `0X1F`) or **octal** (`0o17`, `0O17`).
+There is no legacy "a leading zero means octal" — a bare `017` is just the decimal `17`; use the
+explicit `0o` prefix for octal. Any numeric literal (integer or decimal) may use `_` as a digit
+separator for readability: `1_000_000`, `0xFF_FF`, `1_234.5`.
+
 ### Floating point
 
 | Type  | Width |
@@ -524,6 +529,37 @@ for (i32 i = 0; i < 10; i++) {
 }
 // All three parts are optional: for (;;) { ... } is an infinite loop
 ```
+
+### for-in (range loop)
+Iterate over any collection with an `iter()` method whose cursor implements the built-in `Iterator`
+trait. You never call `.iter()` yourself — the loop does it:
+```gg
+for (i32 x : nums)   { total = total + x; }     // primitives iterate BY VALUE
+for (Point* p : pts) { total = total + p.sum(); } // objects iterate BY BORROW (use `T*`)
+for (mut Point* p : pts) { p.x = p.x + 1; }     // a mutable borrow writes through to the element
+```
+Rules:
+- **Primitives** may be iterated by value (`i32 x`) or by borrow (`i32* x`); **objects and enums must
+  be borrowed** (`Point*`) — a bare `Point p` is a compile error (a value copy per element is
+  disallowed). `mut T*` gives a mutable borrow.
+- Each loop obtains a **fresh** iterator, so loops nest and re-run over the same collection.
+- The iterable may be a local, field, index, `this`, `new`, or a **reference-returning call**
+  (`for (x : getItems())` where `getItems() -> Items&`). A call that returns a collection **by value**
+  is not supported yet — bind it to a local first (`var c = f(); for (x : c) { … }`).
+- Making a type iterable — two symmetric built-in traits: the **collection** implements `Iterable`
+  (`fn iter() -> <cursor>`), and the **cursor** implements `Iterator` (`hasNext`/`next`):
+```gg
+class MyCursor { /* fields */ }
+impl Iterator for MyCursor {
+    fn hasNext() -> bool { /* … */ }
+    fn next() mut -> T* { /* return a borrow of the current element, advance */ }
+}
+impl Iterable for MyCollection {
+    fn iter() -> MyCursor { /* return a fresh cursor */ }
+}
+```
+`impl Iterable` (like `impl Iterator`) is checked by convention — it just requires the `iter()` method,
+so the cursor return type is whatever you write. The stdlib `Array<T>` is iterable (`for (T* x : arr)`).
 
 ### return
 ```gg
@@ -1416,7 +1452,11 @@ e = 42;              // writes into the buffer through the borrow
 - Both an owning `ClassName&` and a stack value object coerce into a `ClassName*` class borrow; a
   primitive lvalue (a variable or an element `a[i]`) coerces into a primitive borrow.
 - A borrow **cannot** be converted back into an owning `ClassName&` (it has no ownership to give).
-- A borrow **cannot be a class field** — a field must own (`ClassName&`) or embed (a value).
+- A borrow **cannot be a class field** by default — a field must own (`ClassName&`) or embed (a value).
+  Under `--unsafe-ptr` a borrow field **is** allowed (its lifetime becomes your responsibility, like a
+  raw `ptr`): it's non-owning, so it's never retained/released and needs no destructor. The intended
+  use is a non-owning cursor holding a live handle to its collection (e.g. an iterator) — `class Iter {
+  mut Coll* c; mut u64 pos; }` — where the cursor never outlives what it borrows.
 - A primitive borrow must bind an **addressable** value — `i32* x = a + b;` (a temporary) is a
   compile error.
 - Returning a borrow is allowed, but passing a **stack value object** to a `T*` parameter that

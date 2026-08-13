@@ -224,16 +224,31 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
 
     switch (literal.token.type) {
         case TokenType::NUMBER: {
-            bool isDecimal = lexeme.find('.') != std::string::npos
+            // A hex (`0x`/`0X`) or octal (`0o`/`0O`) literal is never decimal — guard the '.'/'e'/'E'
+            // sniff, since a hex digit run can itself contain 'e'/'E' (e.g. `0xFE`, `0xE0`).
+            bool isPrefixed = isPrefixedIntegerLiteral(lexeme);
+            bool isDecimal  = !isPrefixed
+                          && (lexeme.find('.') != std::string::npos
                           || lexeme.find('e') != std::string::npos
-                          || lexeme.find('E') != std::string::npos;
+                          || lexeme.find('E') != std::string::npos);
+
+            // A prefixed (hex/octal) integer literal used in a FLOAT slot (`f64 d = 0xFF;`) must be
+            // converted to its DECIMAL text first — its raw lexeme (`0xFF`) is not a valid LLVM float
+            // constant (emitting `0xFF.0` / feeding `0xFF` to strtof is malformed / platform-
+            // dependent). Parse the magnitude and hand the float paths a plain decimal string.
+            std::string floatText = isPrefixed ? std::string() : stripDigitSeparators(lexeme);
+            if (isPrefixed) {
+                unsigned long long iv = 0;
+                parseIntegerLiteral(lexeme, iv);
+                floatText = std::to_string(iv);   // decimal digits, no '.', no prefix
+            }
 
             // f32 target: emit an LLVM hex-float constant (the double encoding of the value rounded
             // to float). LLVM rejects a plain decimal that isn't exactly representable as `float`,
             // and a direct f32 literal (`f32 f = 0.1;`) is now possible via literal-type adoption —
             // previously f32 was only ever reached by fptrunc from an f64 constant.
             if (resolvedType.kind == TypeKind::F32) {
-                float    fv = std::strtof(lexeme.c_str(), nullptr);
+                float    fv = std::strtof(floatText.c_str(), nullptr);
                 double   dv = static_cast<double>(fv);
                 uint64_t bits;
                 std::memcpy(&bits, &dv, sizeof(bits));
@@ -244,8 +259,10 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
             }
 
             // f64 target (or a decimal literal with no numeric context) → a `double` constant.
+            // `_` separators are already stripped (and a hex/octal literal normalized to decimal) —
+            // the text is emitted verbatim as IR, and neither `_` nor a `0x` prefix is valid there.
             if (resolvedType.kind == TypeKind::F64 || isDecimal) {
-                std::string value = lexeme;
+                std::string value = floatText;
                 if (!value.empty() && value.back() == '.') value += '0';   // "1." → "1.0"
                 if (value.find('.') == std::string::npos && !isDecimal)
                     value += ".0";   // integer lexeme in a double slot → a float constant
@@ -263,7 +280,7 @@ std::string CodeGen::genLiteral(const LiteralExpr& literal, const Type& resolved
                 default:                                bits = 32; break;   // i32/u32/no-context
             }
             unsigned long long v = 0;
-            try { v = std::stoull(lexeme); } catch (...) { v = 0; }   // > u64 → 0 (warned garbage)
+            parseIntegerLiteral(lexeme, v);   // > u64 / malformed → 0 (warned garbage, per semantic)
             if (bits < 64) v &= ((1ULL << bits) - 1);
             return std::to_string(v);
         }

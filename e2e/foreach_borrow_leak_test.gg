@@ -1,0 +1,41 @@
+// e2e: a cursor holding a NON-OWNING BORROW of its collection must not touch the collection's
+// refcount — assigning `it.v = this` must NOT retain, or the collection would leak (the cursor has no
+// destructor, so a retain would never be balanced). Uses a live-object counter (ctor ++ / dtor --):
+// after iterating and dropping the collection, the count must return to 0. Expected exit code: 0.
+
+extern malloc(u64 size) -> ptr;
+extern free(ptr p);
+
+class Vec {
+    mut ptr<i32> data; mut u64 count;
+    mut static i32 live;                       // live-object counter
+    Vec() { data = malloc(64 * sizeof(i32)); count = 0; Vec::live = Vec::live + 1; }
+    ~Vec() { free(data); Vec::live = Vec::live - 1; }
+    fn add(i32 v) mut { data[count] = v; count = count + 1; }
+    fn at(u64 i) -> i32* { return data[i]; }
+    fn size() -> u64 { return count; }
+}
+
+// The cursor borrows the collection (non-owning). No destructor, no refcount traffic.
+class VecIter { mut Vec* v; mut u64 pos; }
+impl Iterator for VecIter {
+    fn hasNext() -> bool { return pos < v.size(); }
+    fn next() mut -> i32* { i32* e = v.at(pos); pos = pos + 1; return e; }
+}
+impl Iterable for Vec { fn iter() -> VecIter it { it.v = this; it.pos = 0; return it; } }
+
+fn run() -> i32 {
+    mut Vec& a = new Vec(); a.add(1); a.add(2); a.add(3);
+    mut i32 s = 0;
+    // Iterate several times — each fresh cursor borrows `a` without retaining it.
+    for (i32 x : a) { s = s + x; }
+    for (i32 x : a) { s = s + x; }
+    return s;                       // 6 + 6 = 12
+}   // `a` released here → Vec freed exactly once → Vec::live back to 0
+
+fn main() -> i32 {
+    mut i32 s = run();
+    // A leaked collection (a retained-but-never-released borrow) would leave Vec::live == 1.
+    if (s == 12) { if (Vec::live == 0) { return 0; } }
+    return 1;
+}

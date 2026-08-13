@@ -1,0 +1,38 @@
+// e2e (regression): a BARE generic constructor call `ClassName<T>(args)` (value construction, no
+// `new`). This used to mis-parse as the comparison `ClassName < T > (args)` → "type used as a value",
+// because parsePrimary had branches for a generic FUNCTION call and for `new Class<T>(...)`, but none
+// for a bare generic CLASS constructor call. `new Wrap<i32>(...)` always worked. Expected exit: 0.
+
+class Wrap<T> {
+    mut T item;
+    Wrap(T* it) { item = it; }
+    fn get() -> T { return item; }
+}
+
+class Box<T> {
+    mut T val;
+    Box(T* v) { val = v; }
+    // A bare generic ctor call using the ENCLOSING class's type param (T → i32 at instantiation).
+    // Before the fix this corrupted parser state and the later `Box<i32>` use site failed.
+    fn wrapped() -> Wrap<T> w { w = Wrap<T>(val); return w; }
+}
+
+fn take(Wrap<i32>* w) -> i32 { return w.get(); }
+
+fn main() -> i32 {
+    mut i32 x = 5;
+
+    // 1. bare generic ctor call bound to a value
+    mut Wrap<i32> w = Wrap<i32>(x);
+    if (w.get() != 5) { return 1; }
+
+    // 2. as a function argument (constructor-call rvalue borrows into a Wrap<i32>* param)
+    if (take(Wrap<i32>(x)) != 5) { return 2; }
+
+    // 3. the enclosing-type-param path + a later Box<i32> use site
+    mut Box<i32> b(7);
+    mut Wrap<i32> bw = b.wrapped();
+    if (bw.get() != 7) { return 3; }
+
+    return 0;
+}

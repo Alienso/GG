@@ -99,6 +99,46 @@ class Array<T> {
     }
 }
 
+
+// A forward cursor holding a NON-OWNING BORROW of the Array plus an index. It reads the Array's length
+// and elements LIVE through the borrow (`arr.size()` / `arr.get(pos)`), never a snapshot of the buffer
+// pointer — so a `push`/`grow()` that reallocates the buffer DURING iteration is harmless: `next()`
+// always goes through the collection's current buffer. (With a snapshotted `ptr<T>`, a mid-iteration
+// realloc would free the old buffer and leave the cursor dangling.)
+//
+// The borrow field requires --unsafe-ptr (a borrow's lifetime is the programmer's responsibility, like
+// any raw `ptr`). It is safe here because a `for`-loop cursor never outlives the collection it views.
+// A borrow is non-owning, so the cursor needs no destructor and does no refcount traffic. The field is
+// package-visible so `iter()` can populate a fresh cursor in place (no heap allocation per loop).
+class ArrayIter<T> {
+    mut Array<T>* arr;   // non-owning borrow of the collection (read live — realloc-safe)
+    mut u64       pos;   // cursor
+}
+
+// The Iterator contract for the cursor: `hasNext()` + `next() -> T*` (a zero-copy borrow of the
+// current element). Reads go through the live Array, so the buffer may move between steps.
+impl <T> Iterator for ArrayIter<T> {
+    fn hasNext() -> bool { return pos < arr.size(); }
+    fn next() mut -> T* {
+        T* e = arr.get(pos as i32);
+        pos = pos + 1;
+        return e;
+    }
+}
+
+// `Array<T>` is iterable: `iter()` produces a fresh forward cursor borrowing `this`. This is what makes
+// `for (T* x : arr)` legal — the range loop requires the collection to implement `Iterable`. Each call
+// returns an independent cursor (so loops are re-runnable and nestable), built IN PLACE in the return
+// slot — a stack value object, no heap allocation per loop.
+impl <T> Iterable for Array<T> {
+    fn iter() -> ArrayIter<T> it {
+        it.arr = this;
+        it.pos = 0;
+        return it;
+    }
+}
+
+
 // `arr[i]` (read) → get; `arr[i] = v` (write) → set. No bounds check, like
 // std::vector::operator[].
 impl <T> Index for Array<T> {

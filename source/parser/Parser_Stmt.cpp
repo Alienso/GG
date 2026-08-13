@@ -3,6 +3,7 @@
 //
 
 #include "Parser.h"
+#include "Parser_internal.h"   // isTypeKeyword
 
 
 Stmt Parser::parseIfStmt() {
@@ -35,6 +36,25 @@ Stmt Parser::parseWhileStmt() {
 Stmt Parser::parseForStmt() {
     consume(TokenType::LEFT_PAREN, "expected '(' after 'for'");
 
+    // Range-for detection: `for (DECL : ITERABLE)`. A COLON at paren-depth 1 that is NOT a ternary
+    // `?:` colon (no pending unmatched `?`) and comes before any `;` marks the range form. A `::`
+    // (COLON_COLON) is a distinct token, so a `Class::x` in the header is never mistaken for it.
+    {
+        size_t i = current; int depth = 1, ternary = 0; bool range = false, decided = false;
+        while (i < tokens.size() && depth > 0 && !decided) {
+            TokenType t = tokens[i].type;
+            if      (t == TokenType::LEFT_PAREN)  ++depth;
+            else if (t == TokenType::RIGHT_PAREN) --depth;
+            else if (depth == 1) {
+                if      (t == TokenType::SEMICOLON) decided = true;                 // C-style
+                else if (t == TokenType::QUESTION)  ++ternary;
+                else if (t == TokenType::COLON) { if (ternary > 0) --ternary; else { range = true; decided = true; } }
+            }
+            ++i;
+        }
+        if (range) return parseForInStmt();
+    }
+
     // Initializer — VarDeclExpr and plain expressions both go through parseExprStmt
     std::unique_ptr<Stmt> init = nullptr;
     if (check(TokenType::SEMICOLON)) {
@@ -60,6 +80,95 @@ Stmt Parser::parseForStmt() {
         std::move(increment),
         box(std::move(body))
     });
+}
+
+// `for (DECL : ITERABLE) BODY` — the Java-style range loop, a parser-only desugar (no new AST /
+// semantic / codegen). `(` is already consumed and the cursor sits at DECL. Lowers to:
+//   { [mut var __forsrc_N = ITERABLE;]                 // only when ITERABLE is a temp-producer
+//     mut var __forit_N = (<src>).iter();
+//     while (__forit_N.hasNext()) { DECL = __forit_N.next(); BODY } }
+// `next()` returns a `T*` borrow, so DECL binds it via the ordinary rules: a primitive `i32 x`
+// loads the value, a borrow `Point* p` binds it directly. A bare object/enum loop variable (a value
+// copy per element) is rejected — objects must be iterated by borrow (`Point*`).
+// The `__forsrc` binding is introduced when ITERABLE is a call/`new` (a temporary): it keeps the
+// collection alive for the whole loop (otherwise a reference-returning-call iterable would release
+// the collection — running its dtor and freeing the buffer — at the `.iter()` statement boundary,
+// BEFORE the loop, a use-after-free) and splits a value-returning-call chain into two steps that
+// each type-check (`var s = call(); var it = s.iter();`). A plain place (local / field / `this` /
+// index) is iterated directly — no binding, no copy.
+Stmt Parser::parseForInStmt() {
+    ParamDecl lv = parseParam();                       // [mut] <type> <name>
+    const Token& lt = lv.typeName;
+    const bool isBorrow = lt.lexeme.rfind("ref:", 0) == 0;   // `T*` → synthesized "ref:T"
+    const bool isPrim   = isTypeKeyword(lt.type);            // i32/f64/bool/char/str/… (bare value ok)
+    if (!isBorrow && !isPrim) {
+        std::string base = lt.lexeme;
+        if (!base.empty() && base.back() == '&') base.pop_back();   // `Point&` → suggest `Point*`
+        throw error(lv.name, "iterate '" + base + "' by borrow: declare the loop variable as '"
+                    + base + "* " + lv.name.lexeme + "' (a value copy per element is not allowed for "
+                    "object/enum elements; only primitives may be iterated by value)");
+    }
+    consume(TokenType::COLON, "expected ':' between the loop variable and the iterable");
+    Expr iterable = parseExpression();
+    consume(TokenType::RIGHT_PAREN, "expected ')' after the for-in iterable");
+
+    // Parse the body in a fresh scope that knows the loop variable (so generic inference / lambda
+    // capture over it inside the body resolve, exactly as for a normally-declared local).
+    const int line = lv.name.line;
+    scopes_.emplace_back();
+    recordLocal(lv.typeName, lv.name);
+    Stmt body = parseStatement();
+    scopes_.pop_back();
+
+    const int idx = forInCounter_++;
+    const std::string foritName = "__forit_" + std::to_string(idx);
+    auto forit = [&] { return makeExpr(IdentifierExpr{ Token{ TokenType::IDENTIFIER, foritName, line } }); };
+    auto call0 = [&](Expr recv, const char* m) {
+        return makeExpr(MethodCallExpr{ box(std::move(recv)),
+            Token{ TokenType::IDENTIFIER, m, line }, {}, {}, /*safe=*/false });
+    };
+
+    std::vector<std::unique_ptr<Stmt>> outer;
+
+    // If ITERABLE is a temp-producer (a call / `new`), bind it to `__forsrc` so it lives for the whole
+    // loop; a plain place (identifier / member / `this` / index) is iterated directly (no copy).
+    Expr iterReceiver;
+    const auto& in = *iterable.node;
+    const bool iterableIsPlace = std::holds_alternative<IdentifierExpr>(in)
+                              || std::holds_alternative<MemberAccessExpr>(in)
+                              || std::holds_alternative<ThisExpr>(in)
+                              || std::holds_alternative<IndexExpr>(in);
+    if (iterableIsPlace) {
+        iterReceiver = std::move(iterable);
+    } else {
+        const std::string srcName = "__forsrc_" + std::to_string(idx);
+        Expr srcDecl = makeExpr(VarDeclExpr{ Token{ TokenType::VAR, "var", line },
+            Token{ TokenType::IDENTIFIER, srcName, line }, box(std::move(iterable)),
+            /*arraySize=*/0, /*isStatic=*/false, /*isMut=*/true });
+        outer.push_back(box(makeStmt(ExprStmt{ std::move(srcDecl) })));
+        iterReceiver = makeExpr(IdentifierExpr{ Token{ TokenType::IDENTIFIER, srcName, line } });
+    }
+
+    // mut var __forit = (<src>).iter();
+    Expr foritInit = call0(std::move(iterReceiver), "iter");
+    Expr foritDecl = makeExpr(VarDeclExpr{ Token{ TokenType::VAR, "var", line },
+        Token{ TokenType::IDENTIFIER, foritName, line }, box(std::move(foritInit)),
+        /*arraySize=*/0, /*isStatic=*/false, /*isMut=*/true });
+
+    // DECL = __forit.next();
+    Expr loopDecl = makeExpr(VarDeclExpr{ lv.typeName, lv.name, box(call0(forit(), "next")),
+        /*arraySize=*/0, /*isStatic=*/false, lv.isMut });
+
+    // while (__forit.hasNext()) { DECL = ...; BODY }
+    std::vector<std::unique_ptr<Stmt>> whileBody;
+    whileBody.push_back(box(makeStmt(ExprStmt{ std::move(loopDecl) })));
+    whileBody.push_back(box(std::move(body)));
+    Stmt whileStmt = makeStmt(WhileStmt{ call0(forit(), "hasNext"),
+        box(makeStmt(BlockStmt{ std::move(whileBody) })) });
+
+    outer.push_back(box(makeStmt(ExprStmt{ std::move(foritDecl) })));
+    outer.push_back(box(std::move(whileStmt)));
+    return makeStmt(BlockStmt{ std::move(outer) });
 }
 
 Stmt Parser::parseReturnStmt() {

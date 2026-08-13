@@ -1,0 +1,88 @@
+// e2e: the `for (DECL : ITERABLE)` range loop (Java-style). Desugars to
+// `{ mut var __it = ITERABLE.iter(); while (__it.hasNext()) { DECL = __it.next(); BODY } }`.
+// Primitives iterate by value (`i32 x`), objects by borrow (`Point* p`). Covers a primitive
+// iterator, an object iterator (borrow), and NESTED independent cursors over the same collection.
+// Expected exit code: 0.
+
+extern malloc(u64 size) -> ptr;
+extern free(ptr p);
+
+// ---- a primitive collection + its iterator ----
+class IntIter {
+    mut ptr<i32> data; mut u64 len; mut u64 pos;
+    IntIter(ptr<i32> b, u64 n) { data = b; len = n; pos = 0; }
+}
+impl Iterator for IntIter {
+    fn hasNext() -> bool { return pos < len; }
+    fn next() mut -> i32* { i32* e = data[pos]; pos = pos + 1; return e; }
+}
+class IntVec {
+    mut ptr<i32> data; mut u64 count;
+    IntVec() { data = malloc(16 * sizeof(i32)); count = 0; }
+    ~IntVec() { free(data); }   // a real destructor — frees the buffer on release
+    fn add(i32 v) mut { data[count] = v; count = count + 1; }
+    fn iter() -> IntIter it { it = IntIter(data, count); return it; }
+}
+
+// Returns a heap IntVec by reference. Iterating `make()` must keep it alive for the whole loop —
+// without the source-binding in the for-in desugar, the temp would be released (running ~IntVec,
+// freeing the buffer) at the `.iter()` statement, BEFORE the loop body runs (a use-after-free).
+fn make() -> IntVec& {
+    mut IntVec& r = new IntVec();
+    r.add(4); r.add(5); r.add(6);
+    return r;
+}
+
+// ---- an object collection + its iterator (borrow) ----
+class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } fn sum() -> i32 { return x + y; } }
+class PIter {
+    mut ptr<Point> data; mut u64 len; mut u64 pos;
+    PIter(ptr<Point> b, u64 n) { data = b; len = n; pos = 0; }
+}
+impl Iterator for PIter {
+    fn hasNext() -> bool { return pos < len; }
+    fn next() mut -> Point* { Point* e = data[pos]; pos = pos + 1; return e; }
+}
+class PVec {
+    mut ptr<Point> data; mut u64 count;
+    PVec() { data = malloc(16 * sizeof(Point)); count = 0; }
+    fn add(i32 a, i32 b) mut { data[count] = Point(a, b); count = count + 1; }
+    fn iter() -> PIter it { it = PIter(data, count); return it; }
+}
+
+fn main() -> i32 {
+    mut IntVec v = IntVec();
+    v.add(10); v.add(20); v.add(30);
+
+    // primitive by value
+    mut i32 total = 0;
+    for (i32 x : v) { total = total + x; }        // 60
+
+    // nested independent cursors over the same collection: sum of all pairwise products' count
+    mut i32 pairs = 0;
+    for (i32 a : v) { for (i32 b : v) { pairs = pairs + 1; } }   // 3*3 = 9
+
+    // objects by borrow, with a mutable-borrow write-through
+    mut PVec p = PVec();
+    p.add(3, 4); p.add(10, 20);
+    mut i32 psum = 0;
+    for (Point* q : p) { psum = psum + q.sum(); }   // 7 + 30 = 37
+    for (mut Point* q : p) { q.x = q.x + 1; }        // mutate each element in place
+    mut i32 psum2 = 0;
+    for (Point* q : p) { psum2 = psum2 + q.sum(); }  // (4+4) + (11+20) = 39
+
+    // reference-returning-call iterable over a dtor-owning collection: must NOT use-after-free
+    mut i32 rsum = 0;
+    for (i32 x : make()) { rsum = rsum + x; }        // 4 + 5 + 6 = 15
+
+    if (total == 60) {
+        if (pairs == 9) {
+            if (psum == 37) {
+                if (psum2 == 39 && rsum == 15) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}

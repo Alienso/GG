@@ -212,10 +212,31 @@ void Lexer::processFile(std::ifstream &file, std::vector<Token>& tokens, const s
 
             default:
                 if (isdigit(c)) {
-                    while (isdigit(peek())) advance();
-                    if (peek() == '.' && isdigit(peekNext())) {
-                        advance(); // consume '.'
-                        while (isdigit(peek())) advance();
+                    // `0x`/`0X` hex and `0o`/`0O` octal prefixes (NOT legacy C-style "leading zero
+                    // means octal" — that's an ambiguity footgun and would collide with a plain `0`
+                    // literal). `_` is a digit separator (e.g. `1_000_000`), stripped later by
+                    // stripDigitSeparators; it is accepted anywhere in the digit run here and left
+                    // for a downstream numeric parse to reject if truly malformed.
+                    if (c == '0' && (peek() == 'x' || peek() == 'X')) {
+                        advance();
+                        bool sawDigit = false;
+                        while (isxdigit(peek()) || peek() == '_') { if (peek() != '_') sawDigit = true; advance(); }
+                        if (!sawDigit)   // `0x`, or only separators (`0x_`) — no real hex digit
+                            throw CompileError(filename + ":" + std::to_string(line)
+                                                + ": error: invalid hex literal (no digits after '0x')");
+                    } else if (c == '0' && (peek() == 'o' || peek() == 'O')) {
+                        advance();
+                        bool sawDigit = false;
+                        while ((peek() >= '0' && peek() <= '7') || peek() == '_') { if (peek() != '_') sawDigit = true; advance(); }
+                        if (!sawDigit)   // `0o`, or only separators (`0o_`) — no real octal digit
+                            throw CompileError(filename + ":" + std::to_string(line)
+                                                + ": error: invalid octal literal (no digits after '0o')");
+                    } else {
+                        while (isdigit(peek()) || peek() == '_') advance();
+                        if (peek() == '.' && isdigit(peekNext())) {
+                            advance(); // consume '.'
+                            while (isdigit(peek()) || peek() == '_') advance();
+                        }
                     }
                     tokens.emplace_back(TokenType::NUMBER,
                                         source.substr(start, current - start), line);

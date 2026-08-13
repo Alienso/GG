@@ -349,3 +349,68 @@ TEST_CASE("var - a string literal infers `str` (safe, not gated by --unsafe-ptr)
     )", CompilerOptions{});   // allowRawPtr = false
     REQUIRE_FALSE(result.hadError);
 }
+
+// ------------------------------------------------------------
+// Inferring from a value-returning (sret) method call
+// ------------------------------------------------------------
+
+TEST_CASE("var - infers from a method returning its OWN class by value (sret)", "[var][semantic]") {
+    // Regression: `fn empty() -> Vec e` returns its own class by value. Its return type was resolved
+    // during buildClassInfo *before* Vec was registered in classRegistry, so resolveTypeToken (which
+    // only consulted classRegistry) yielded Error — leaving the method's stored returnType Error and
+    // silently breaking `var e = v.empty()` inference (the symbol was never declared → "use of
+    // undeclared identifier"). The explicit-typed path `Vec e = v.empty()` masked it (it uses the
+    // declared type). Fixed by falling back to declaredClassNames_ (a name pre-pass) in
+    // resolveTypeToken. See SemanticAnalyzer::resolveTypeToken.
+    auto result = analyzeString(R"(
+        class Vec {
+            mut i32 x;
+            Vec() { x = 0; }
+            fn empty() -> Vec e { e.x = 42; return e; }
+        }
+        fn main() -> i32 {
+            mut Vec v;
+            var e = v.empty();
+            return e.x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("var - inferring from an sret method call yields the correct object type in IR", "[var][codegen]") {
+    auto ir = codegenString(R"(
+        class Vec {
+            mut i32 x;
+            Vec() { x = 0; }
+            fn empty() -> Vec e { e.x = 42; return e; }
+        }
+        fn main() -> i32 {
+            mut Vec v;
+            var e = v.empty();
+            return e.x;
+        }
+    )");
+    REQUIRE(ir.find("%Vec") != std::string::npos);          // e is a Vec value object
+    REQUIRE(ir.find("@Vec_empty(") != std::string::npos);   // the sret call is emitted
+}
+
+TEST_CASE("var - a method return type that forward-references a later class resolves", "[var][semantic]") {
+    // The same root cause, exercised through a forward reference (Maker declared before Widget) —
+    // resolveTypeToken must resolve `Widget` via the name pre-pass even though Widget's ClassInfo is
+    // built after Maker's.
+    auto result = analyzeString(R"(
+        class Maker {
+            fn build() -> Widget w { return w; }
+        }
+        class Widget {
+            mut i32 v;
+            Widget() { v = 7; }
+        }
+        fn main() -> i32 {
+            mut Maker m;
+            var w = m.build();
+            return w.v;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}

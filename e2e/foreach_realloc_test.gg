@@ -1,0 +1,28 @@
+// e2e: the stdlib Array<T> iterator holds a NON-OWNING BORROW of the collection (`Array<T>*`) plus an
+// index, and reads the length/elements LIVE (`arr.size()` / `arr.get(pos)`) rather than snapshotting
+// the buffer pointer. So a `push` that reallocates the buffer DURING iteration is harmless — the
+// cursor always goes through the collection's current buffer. (A snapshot cursor would dangle on the
+// old, freed buffer and crash / read garbage.) Expected exit code: 0.
+
+import "std/Array.gg";
+
+fn main() -> i32 {
+    mut Array<i32>& a = new Array<i32>();   // initial capacity 8
+    a.push(1); a.push(2); a.push(3);
+
+    // Iterate, and on the first element push 20 more — forcing grow() 8 -> 16 -> 32, which reallocs
+    // (and frees) the buffer mid-loop. The loop must not crash, and reads the live buffer throughout.
+    mut i32  sum  = 0;
+    mut bool grew = false;
+    for (i32 x : a) {
+        sum = sum + x;
+        if (!grew) {
+            grew = true;
+            mut i32 k = 0;
+            while (k < 20) { a.push(100); k = k + 1; }
+        }
+    }
+    // Live view: 3 original elements (1+2+3=6) + 20 pushed (20*100=2000) = 2006.
+    if (sum == 2006) { return 0; }
+    return 1;
+}

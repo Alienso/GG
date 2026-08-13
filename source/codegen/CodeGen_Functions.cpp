@@ -479,7 +479,8 @@ void CodeGen::genDestructor(const ClassDeclStmt& classDecl) {
                 emit("call void @" + ft.className + "_dtor(ptr %" + gep + ")");
                 continue;
             }
-            if (ft.kind != TypeKind::Reference) continue;
+            // A borrow field (`Class*`) is non-owning — never release it (it doesn't own the target).
+            if (ft.kind != TypeKind::Reference || ft.borrow) continue;
             usesRefcount_ = true;
             std::string gep = freshTemp();
             emit("%" + gep + " = getelementptr %" + className + ", ptr %self, i32 0, i32 "
@@ -536,7 +537,7 @@ void CodeGen::genCloneFunction(const std::string& className) {
             std::string sgep = freshTemp();
             emit("%" + sgep + " = getelementptr %" + className + ", ptr %src, i32 0, i32 " + idx);
             emit("call void @" + ft.className + "_clone(ptr %" + dgep + ", ptr %" + sgep + ")");
-        } else if (ft.kind == TypeKind::Reference) {
+        } else if (ft.kind == TypeKind::Reference && !ft.borrow) {
             usesRefcount_ = true;
             // new = load src.field; retain(new)
             std::string sgep = freshTemp();

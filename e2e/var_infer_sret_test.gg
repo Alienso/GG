@@ -1,0 +1,27 @@
+// e2e (regression): `var` inference from a method that returns its OWN class by value (sret).
+// The method's return type is resolved during buildClassInfo, before the class is registered in
+// classRegistry — so resolveTypeToken used to yield Error, leaving the stored return type Error and
+// silently failing to declare the `var` binding ("use of undeclared identifier"). The explicit-typed
+// path (`Vec e = v.empty()`) masked it by using the declared type. Expected exit code: 0.
+
+class Vec {
+    mut i32 x;
+    Vec() { x = 0; }
+    fn empty() -> Vec e { e.x = 42; return e; }
+    fn bump() -> Vec e { e.x = x + 1; return e; }
+}
+
+fn main() -> i32 {
+    mut Vec v;
+    mut var e = v.empty();       // infer Vec from an sret method call
+    if (e.x != 42) { return 1; }
+
+    var e2 = v.empty();          // also without `mut`
+    if (e2.x != 42) { return 2; }
+
+    // chained: infer from a call on an inferred value
+    var e3 = e.bump();
+    if (e3.x != 43) { return 3; }
+
+    return 0;
+}

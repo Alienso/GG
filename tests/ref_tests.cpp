@@ -174,15 +174,61 @@ TEST_CASE("Ref - a borrow cannot be converted to an owning reference", "[ref][se
     REQUIRE(cap.contains("cannot implicitly convert"));
 }
 
-TEST_CASE("Ref - a class field cannot be a borrow", "[ref][semantic]") {
+TEST_CASE("Ref - a class field borrow is rejected without --unsafe-ptr", "[ref][semantic]") {
+    // A borrow field can outlive its source, which escape analysis can't prove — so it is rejected by
+    // default. (Under --unsafe-ptr it is ALLOWED: see the next case.)
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { i32 x; Point(i32 v) { x = v; } }
         class Holder { Point* r; }
         fn main() -> i32 { return 0; }
-    )");
+    )", CompilerOptions{});   // allowRawPtr defaults to false
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("borrow"));
+}
+
+TEST_CASE("Ref - a class field borrow is ALLOWED under --unsafe-ptr", "[ref][semantic]") {
+    // The canonical use is a non-owning cursor viewing its collection (e.g. an iterator). A borrow
+    // field lowers to a plain `ptr` and is never retained/released.
+    auto r = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 v) { x = v; } }
+        class Holder { mut Point* r; }
+        fn main() -> i32 { return 0; }
+    )");   // defaultTestOptions(): allowRawPtr = true
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Ref - a PRIMITIVE borrow field is always rejected (even under --unsafe-ptr)", "[ref][semantic]") {
+    // Only CLASS borrows (`Point*`) are permitted as fields; a primitive borrow (`i32*`) has no
+    // struct/clone codegen (it would be mistaken for the scalar value and wrongly retained).
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Holder { mut i32* r; }
+        fn main() -> i32 { return 0; }
+    )");   // allowRawPtr = true — still rejected
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("primitive borrow"));
+}
+
+TEST_CASE("Ref - assigning a class borrow field emits no refcount traffic (non-owning)", "[ref][codegen]") {
+    // A borrow field is a plain pointer: `holder.r = obj` stores the address with NO gg_retain of the
+    // new target and NO gg_release of the old — otherwise the borrowed object would leak (the holder
+    // never releases a borrow). Regression for a leak that silently retained the borrowed collection.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 v) { x = v; } }
+        class Holder { mut Point* r; }
+        fn main() -> i32 {
+            mut Point& p = new Point(5);
+            mut Holder h;
+            h.r = p;
+            return h.r.x;
+        }
+    )");
+    // The Holder has no destructor (a borrow field doesn't own anything), and the borrow store `h.r =
+    // p` emits NO retain — `new Point` claims its own `+1` (no retain call), so the whole program has
+    // zero gg_retain calls. (Before the fix, the borrow store retained `p`, leaking it.)
+    REQUIRE(ir.find("@Holder_dtor(")        == std::string::npos);
+    REQUIRE(ir.find("call void @gg_retain") == std::string::npos);
 }
 
 TEST_CASE("Ref - a primitive borrow reads and writes through the referent", "[ref][semantic]") {

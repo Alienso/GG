@@ -204,6 +204,23 @@ TypeKind    typeKindFromName(const std::string& name);
 // Signed types allow up to 2^(bits-1) — the magnitude of the most-negative value — so a negated
 // literal at the boundary (e.g. `-128` for i8) is accepted. Non-integer `t` returns false.
 bool        integerLiteralFits(unsigned long long magnitude, TypeKind t);
+
+// Removes `_` digit-separator characters from a numeric literal lexeme (e.g. "1_000_000" →
+// "1000000"). Safe to call on any lexeme (decimal, hex, or octal) — used both before parsing a
+// literal's numeric value and before emitting it verbatim as IR text (a `_` is not valid in an
+// LLVM constant).
+std::string stripDigitSeparators(const std::string& lexeme);
+
+// Whether a numeric-literal lexeme has a `0x`/`0X` (hex) or `0o`/`0O` (octal) prefix — NOT a
+// legacy C-style "leading zero means octal" (deliberately: that's an ambiguity footgun, and a
+// leading zero would also collide with `0` as a plain decimal literal).
+bool        isPrefixedIntegerLiteral(const std::string& lexeme);
+
+// Parses an integer literal lexeme — decimal, or `0x`/`0X`-hex, or `0o`/`0O`-octal, with any `_`
+// digit-separators stripped first — into `magnitude`. Returns false (magnitude left at 0) on a
+// malformed or too-large (> u64) literal, mirroring the try/catch-around-std::stoull pattern every
+// call site used before this helper existed.
+bool        parseIntegerLiteral(const std::string& lexeme, unsigned long long& magnitude);
 // Decodes a parser-synthesized type token: "Class&" → Reference, "ptr<Elem>" → TypedPtr.
 // Returns Type{Error} when `tok` is not such a synthesized token.
 Type        decodeSynthesizedType(const Token& tok);

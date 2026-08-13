@@ -976,3 +976,160 @@ TEST_CASE("Arith - a shift's result type follows the left operand's width", "[ar
     )");
     REQUIRE(ir.find("lshr i8") != std::string::npos);
 }
+
+// ============================================================
+// Hex / octal literals + digit separators
+// ============================================================
+
+TEST_CASE("Numlit - a hex literal lexes as a single NUMBER token", "[numlit][lexer]") {
+    auto tokens = lexString("0x1F");
+    REQUIRE(tokens.size() == 2);   // NUMBER, EOF
+    REQUIRE(tokens[0].type   == TokenType::NUMBER);
+    REQUIRE(tokens[0].lexeme == "0x1F");
+}
+
+TEST_CASE("Numlit - an octal literal lexes as a single NUMBER token", "[numlit][lexer]") {
+    auto tokens = lexString("0o17");
+    REQUIRE(tokens.size() == 2);
+    REQUIRE(tokens[0].type   == TokenType::NUMBER);
+    REQUIRE(tokens[0].lexeme == "0o17");
+}
+
+TEST_CASE("Numlit - a digit-separated literal lexes as a single NUMBER token", "[numlit][lexer]") {
+    auto tokens = lexString("1_000_000");
+    REQUIRE(tokens.size() == 2);
+    REQUIRE(tokens[0].type   == TokenType::NUMBER);
+    REQUIRE(tokens[0].lexeme == "1_000_000");
+}
+
+TEST_CASE("Numlit - a bare '0x' with no hex digits is a lex error", "[numlit][lexer]") {
+    REQUIRE_THROWS(lexString("0x;"));
+}
+
+TEST_CASE("Numlit - a bare '0o' with no octal digits is a lex error", "[numlit][lexer]") {
+    REQUIRE_THROWS(lexString("0o;"));
+}
+
+TEST_CASE("Numlit - a hex literal evaluates to its correct decimal value", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { i32 x = 0x1F; return 0; }");
+    REQUIRE(ir.find("store i32 31") != std::string::npos);
+}
+
+TEST_CASE("Numlit - an octal literal evaluates to its correct decimal value", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { i32 x = 0o17; return 0; }");
+    REQUIRE(ir.find("store i32 15") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a digit-separated literal evaluates to its correct value", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { i32 x = 1_000_000; return 0; }");
+    REQUIRE(ir.find("store i32 1000000") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a hex literal containing 'e'/'E' is not mistaken for a decimal", "[numlit][codegen]") {
+    // 0xFE / 0xE0 contain 'e'/'E' as hex digits — must not be routed through the float path.
+    auto ir = codegenString("fn main() -> i32 { i32 x = 0xFE; i32 y = 0xE0; return 0; }");
+    REQUIRE(ir.find("store i32 254") != std::string::npos);
+    REQUIRE(ir.find("store i32 224") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a hex literal adopts a contextual type like a decimal literal", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { i64 x = 0xFFFFFFFFF; return 0; }");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("does not fit"));   // fits i64, would overflow i32
+}
+
+TEST_CASE("Numlit - an out-of-range hex literal warns like a decimal one", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { i8 b = 0xFF; return 0; }");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE(cap.contains("does not fit"));   // 255 > 128 (signed i8 boundary)
+}
+
+TEST_CASE("Numlit - a digit-separated literal in an f64 slot emits valid (unseparated) IR", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { f64 d = 1_000.5; return 0; }");
+    REQUIRE(ir.find("store double 1000.5") != std::string::npos);
+    REQUIRE(ir.find("1_000.5") == std::string::npos);   // never emitted verbatim with the separator
+}
+
+TEST_CASE("Numlit - a digit-separated literal in an f32 slot emits a valid hex-float", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { f32 f = 1_000.5; return 0; }");
+    REQUIRE(ir.find("store float 0x") != std::string::npos);
+}
+
+TEST_CASE("Numlit - u64 max is representable via hex and matches the decimal form", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { u64 m = 0xFFFFFFFFFFFFFFFF; return 0; }");
+    REQUIRE(ir.find("store i64 18446744073709551615") != std::string::npos);
+}
+
+TEST_CASE("Numlit - array size accepts a hex literal", "[numlit][parser]") {
+    auto ast = parseString(R"(
+        fn main() {
+            i32[0x4] arr;
+        }
+    )");
+    const auto& fn = asStmt<FunctionDeclStmt>(ast.declarations[0]);
+    const auto& varDeclExpr = asExpr<VarDeclExpr>(asStmt<ExprStmt>(*fn.body.body[0]).expression);
+    REQUIRE(varDeclExpr.arraySize == 4);
+}
+
+TEST_CASE("Numlit - a hex literal in an f64 slot emits a valid decimal double (not 0xFF.0)", "[numlit][codegen]") {
+    // Regression: the float emission path appended ".0" to the raw lexeme, producing `store double
+    // 0xFF.0` — malformed IR that only clang caught. A prefixed integer literal must be converted to
+    // its decimal value first.
+    auto ir = codegenString("fn main() -> i32 { f64 d = 0xFF; return 0; }");
+    REQUIRE(ir.find("store double 255.0") != std::string::npos);
+    REQUIRE(ir.find("0xFF")               == std::string::npos);   // never emitted verbatim
+}
+
+TEST_CASE("Numlit - an octal literal in an f32 slot emits a valid hex-float", "[numlit][codegen]") {
+    // The f32 path fed the raw lexeme to strtof (platform-dependent for `0o10`); it must be
+    // normalized to decimal first. 0o10 = 8 → float 8.0.
+    auto ir = codegenString("fn main() -> i32 { f32 f = 0o10; return 0; }");
+    REQUIRE(ir.find("store float 0x4020000000000000") != std::string::npos);   // 8.0 as a double-encoded hex float
+}
+
+TEST_CASE("Numlit - a separator-only hex literal '0x_' is a clean lex error", "[numlit][lexer]") {
+    REQUIRE_THROWS(lexString("0x_"));
+}
+
+TEST_CASE("Numlit - a separator-only octal literal '0o_' is a clean lex error", "[numlit][lexer]") {
+    REQUIRE_THROWS(lexString("0o_"));
+}
+
+TEST_CASE("Numlit - a separator right after the prefix ('0x_FF') is fine", "[numlit][codegen]") {
+    auto ir = codegenString("fn main() -> i32 { i32 h = 0x_FF; return 0; }");
+    REQUIRE(ir.find("store i32 255") != std::string::npos);
+}
+
+TEST_CASE("Numlit - a negated hex literal reads the correct magnitude", "[numlit][codegen]") {
+    // `-0x10` is a UnaryExpr over the literal `0x10` (=16); negation is a `sub 0, 16` instruction,
+    // not a constant fold. The point is that the inner hex literal decodes to 16, not a mis-parse.
+    auto ir = codegenString("fn main() -> i32 { i32 n = -0x10; return 0; }");
+    REQUIRE(ir.find("sub i32 0, 16") != std::string::npos);
+}
+
+TEST_CASE("Numlit - an out-of-bounds hex array index is a compile error", "[numlit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString("fn main() -> i32 { i32[8] arr; arr[0x10] = 1; return 0; }");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("out of bounds"));
+}
+
+TEST_CASE("Numlit - a switch does not falsely flag 0x10 and 16 as duplicate labels", "[numlit][semantic]") {
+    // Distinguishes them from a real duplicate — both keys must resolve through the same
+    // magnitude-parsing path so 0x10 == 16 is correctly recognized as an actual duplicate.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn main() -> i32 {
+            i32 x = 5;
+            switch (x) {
+                case 0x10, 16 -> {}
+                default -> {}
+            }
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("duplicate"));
+}

@@ -451,6 +451,10 @@ private:
     [[nodiscard]] Stmt      parseIfStmt();
     [[nodiscard]] Stmt      parseWhileStmt();
     [[nodiscard]] Stmt      parseForStmt();
+    // `for (DECL : ITERABLE) BODY` — the Java-style range loop. Desugars (parser-only) to
+    // `{ mut var __forit = (ITERABLE).iter(); while (__forit.hasNext()) { DECL = __forit.next(); BODY } }`.
+    [[nodiscard]] Stmt      parseForInStmt();
+    int                     forInCounter_ = 0;   // unique `__forit_N` cursor names
     [[nodiscard]] Stmt      parseInlineForStmt();   // `inline for (v in @fields(T)) { … }`
     [[nodiscard]] Stmt      parseReturnStmt();
     [[nodiscard]] Stmt      parseBreakStmt();

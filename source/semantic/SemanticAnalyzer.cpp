@@ -167,13 +167,27 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         } else {
             fieldType = typeFromToken(fd.typeName.type);  // primitive / ptr
         }
-        // A `ref T` borrow may not be stored in a field — a borrow must not outlive its source, and
-        // a field could. Use an owning reference (`Class&`) or a value.
+        // Borrow fields. A borrow must not outlive its source, and a field could — which GG's escape
+        // analysis can't prove across a stored field — so borrow fields are rejected by default.
+        //  - A CLASS borrow (`Point*`) is ALLOWED under `--unsafe-ptr`: lifetimes become the
+        //    programmer's responsibility (same contract as raw `ptr<T>`). It lowers to a plain `ptr`
+        //    and is NEVER retained/released, so it can hold a live non-owning handle to another object
+        //    (e.g. an iterator viewing its collection): `class Iter { Coll* c; … }`.
+        //  - A PRIMITIVE borrow (`i32*`, an lvalue reference to a scalar) is NEVER a valid field — the
+        //    struct/clone codegen has no lowering for it (it would treat the field as the scalar VALUE
+        //    and try to retain it). Store the value, or a `ptr<T>` under `--unsafe-ptr`.
         if (fieldType.kind == TypeKind::Reference && fieldType.borrow) {
-            error(fd.name, "a field cannot be a borrow ('ref " + fieldType.className
-                  + "'); use an owning reference '" + fieldType.className + "& " + fd.name.lexeme
-                  + "' or a value");
-            fieldType = Type{TypeKind::Error};
+            const bool classBorrow = !fieldType.className.empty();
+            if (!classBorrow) {
+                error(fd.name, "a field cannot be a primitive borrow ('" + typeName(fieldType)
+                      + "'); store the value directly (or a raw 'ptr<T>' under --unsafe-ptr)");
+                fieldType = Type{TypeKind::Error};
+            } else if (!allowRawPtr_) {
+                error(fd.name, "a field cannot be a borrow ('" + fieldType.className
+                      + "*'); use an owning reference '" + fieldType.className + "& " + fd.name.lexeme
+                      + "' or a value (or compile with --unsafe-ptr to allow non-owning borrow fields)");
+                fieldType = Type{TypeKind::Error};
+            }
         }
         // Static fields are class-level storage (a global), not part of the struct
         // layout — they get no struct index and live in a separate registry.
@@ -362,7 +376,7 @@ void SemanticAnalyzer::checkValueFieldCycles(const Program& program) {
 
 bool SemanticAnalyzer::isBuiltinTrait(const std::string& name) {
     static const std::unordered_set<std::string> builtins = {
-        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index", "Clone"
+        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index", "Clone", "Iterator", "Iterable"
     };
     return builtins.count(name) > 0;
 }
@@ -468,7 +482,9 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
     static const std::unordered_map<std::string, std::string> builtinMethod = {
         {"Add", "add"}, {"Sub", "sub"}, {"Mul", "mul"}, {"Div", "div"}, {"Rem", "rem"},
         {"Eq", "eq"}, {"Ord", "cmp"}, {"Neg", "neg"}, {"Index", "get"},
-        {"Clone", "clone"}   // a user deep-copy hook: `fn clone(Self& src) mut` → replaces @Class_clone
+        {"Clone", "clone"},  // a user deep-copy hook: `fn clone(Self& src) mut` → replaces @Class_clone
+        {"Iterator", "next"},// external iterator: `fn hasNext() -> bool` + `fn next() -> T*` (both required)
+        {"Iterable", "iter"} // a collection: `fn iter() -> <Iterator>` produces a fresh cursor for `for-in`
     };
     for (const Stmt& stmt : program.declarations) {
         if (!std::holds_alternative<ImplDeclStmt>(*stmt.node)) continue;
@@ -538,6 +554,10 @@ void SemanticAnalyzer::collectImpls(const Program& program) {
             if (!info.methods.count(need))
                 error(impl.traitName, "impl of built-in trait '" + trait + "' for '" + type
                       + "' must define method '" + need + "'");
+            // `Iterator` requires TWO conventional methods (the map records `next`); also require `hasNext`.
+            if (trait == "Iterator" && !info.methods.count("hasNext"))
+                error(impl.traitName, "impl of built-in trait 'Iterator' for '" + type
+                      + "' must define method 'hasNext'");
         } else {
             for (const MethodDecl& req : traitDecl->methods) {
                 std::vector<Type> reqParams;
@@ -852,6 +872,16 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) {
         return makeEnumType(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && classRegistry.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
+    // Forward / self reference during class collection: a known-but-not-yet-registered class/enum.
+    // `buildClassInfo` resolves a method's return type *before* the owning class is added to
+    // classRegistry, so a method returning its own class by value (`fn empty() -> Vec e`) would
+    // otherwise resolve to Error — leaving its stored returnType Error, which silently breaks
+    // `var e = obj.method()` type inference (the explicit-typed path masks it by using the declared
+    // type). The name pre-pass in collectClasses fills these sets before any buildClassInfo runs.
+    if (typeToken.type == TokenType::IDENTIFIER && declaredEnumNames_.count(typeToken.lexeme))
+        return makeEnumType(typeToken.lexeme);
+    if (typeToken.type == TokenType::IDENTIFIER && declaredClassNames_.count(typeToken.lexeme))
+        return makeObjectType(typeToken.lexeme);
     return typeFromToken(typeToken.type);
 }
 
@@ -929,14 +959,11 @@ void SemanticAnalyzer::checkConstantIndexBounds(
     if (!std::holds_alternative<LiteralExpr>(*indexExpr.node)) return;
     const auto& lit = std::get<LiteralExpr>(*indexExpr.node);
     if (lit.token.type != TokenType::NUMBER) return;
-    if (lit.token.lexeme.find('.') != std::string::npos) return;
-    long long idx = 0;
-    try {
-        idx = std::stoll(lit.token.lexeme);
-    } catch (const std::exception&) {
-        return;  // non-integer or overflow — skip bounds check
-    }
-    if (idx < 0 || static_cast<size_t>(idx) >= arraySize)
+    if (!isPrefixedIntegerLiteral(lit.token.lexeme) && lit.token.lexeme.find('.') != std::string::npos)
+        return;
+    unsigned long long idx = 0;
+    if (!parseIntegerLiteral(lit.token.lexeme, idx)) return;  // non-integer or overflow — skip check
+    if (idx >= arraySize)
         error(lit.token, "array index " + lit.token.lexeme
               + " is out of bounds for array of size " + std::to_string(arraySize));
 }

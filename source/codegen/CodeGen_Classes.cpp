@@ -144,6 +144,19 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
     auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma.field.lexeme);
     if (fieldType.kind == TypeKind::Error) return "0";
 
+    // Borrow field (`Class*`): non-owning — just store the pointer (no retain of the new, no release of
+    // the old). A borrow does not own its target, so touching the refcount would leak (the dtor skips
+    // borrow fields) or corrupt. A `+1` producer stored here is NOT claimed — the borrow takes no
+    // ownership, so the temp is still released at the full-expression boundary (the borrow's lifetime
+    // is the programmer's responsibility under --unsafe-ptr).
+    if (fieldType.kind == TypeKind::Reference && fieldType.borrow) {
+        Type        valueType = exprType(*ma.value);
+        std::string newVal    = genExpr(*ma.value);
+        newVal = emitCast(newVal, valueType, fieldType);
+        emitStore("ptr", newVal, gepReg);
+        return newVal;
+    }
+
     // Reference field: co-ownership — retain the new target, release the old.
     if (fieldType.kind == TypeKind::Reference) {
         usesRefcount_ = true;

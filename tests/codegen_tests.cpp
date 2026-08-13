@@ -1039,6 +1039,60 @@ TEST_CASE("Generics - distinct class instantiations produce distinct structs", "
     REQUIRE(irContains(ir, "%Box$i64 = type { i64 }"));
 }
 
+TEST_CASE("Generics - a bare generic constructor call (no 'new') value-constructs", "[generics][codegen]") {
+    // Regression: `Wrap<i32>(x)` (value construction, no `new`) mis-parsed as the comparison
+    // `Wrap < i32 > (x)` → "type 'i32' used as a value", because parsePrimary had a branch for a
+    // generic FUNCTION call (`f<T>(...)`) and for `new Class<T>(...)`, but none for a bare generic
+    // CLASS constructor call. `new Wrap<i32>(...)` always worked. See parsePrimary's generic-ctor
+    // branch.
+    auto ir = codegenString(R"(
+        class Wrap<T> { mut T item; Wrap(T* it){ item = it; } }
+        fn main() -> i32 {
+            mut i32 x = 5;
+            mut Wrap<i32> w = Wrap<i32>(x);
+            return w.item;
+        }
+    )");
+    REQUIRE(irContains(ir, "%Wrap$i32 = type { i32 }"));
+    REQUIRE(irContains(ir, "@Wrap$i32_Wrap$i32("));   // the mangled ctor is called (not `new`)
+}
+
+TEST_CASE("Generics - a bare generic ctor call using the enclosing class's type param", "[generics][codegen]") {
+    // The originally-reported shape: `Wrap<T>(val)` inside `Box<T>` (T substituted to i32 at
+    // instantiation). Before the fix this corrupted parser state and the *later* `Box<i32>` use
+    // site failed with the same "type used as a value" error.
+    auto ir = codegenString(R"(
+        class Wrap<T> { mut T item; Wrap(T* it){ item = it; } }
+        class Box<T> {
+            mut T val;
+            Box(T* v){ val = v; }
+            fn wrapped() -> Wrap<T> w { w = Wrap<T>(val); return w; }
+        }
+        fn main() -> i32 {
+            mut Box<i32> b(5);
+            return 0;
+        }
+    )");
+    REQUIRE(irContains(ir, "%Box$i32 = type"));
+    REQUIRE(irContains(ir, "%Wrap$i32 = type { i32 }"));
+    REQUIRE(irContains(ir, "@Wrap$i32_Wrap$i32("));
+}
+
+TEST_CASE("Generics - a bare generic ctor call as a function argument borrows correctly", "[generics][codegen]") {
+    // A constructor-call rvalue materializes a temp value object and borrows into a `Wrap<i32>*`
+    // parameter — exercises the new branch feeding parsePostfix / argument lowering.
+    auto ir = codegenString(R"(
+        class Wrap<T> { mut T item; Wrap(T* it){ item = it; } }
+        fn take(Wrap<i32>* w) -> i32 { return w.item; }
+        fn main() -> i32 {
+            mut i32 x = 9;
+            return take(Wrap<i32>(x));
+        }
+    )");
+    REQUIRE(irContains(ir, "@Wrap$i32_Wrap$i32("));
+    REQUIRE(irContains(ir, "@take("));
+}
+
 TEST_CASE("Generics - generic class with multiple type parameters", "[generics][codegen]") {
     auto ir = codegenString(R"(
         class Pair<K, V> { K first; V second; Pair(K a, V b){ this.first=a; this.second=b; } }

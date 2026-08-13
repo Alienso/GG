@@ -1,0 +1,161 @@
+
+class vec3 {
+    mut f32 x;
+    mut f32 y;
+    mut f32 z;
+
+    vec3 (f64 i) {
+        this.x = i as f32;
+        this.y = i as f32;
+        this.z = i as f32;
+    }
+
+    vec3 (i32 i) {
+        this.x = i as f32;
+        this.y = i as f32;
+        this.z = i as f32;
+    }
+
+    vec3 (f64 x, f64 y, f64 z){
+        this.x = x as f32;
+        this.y = y as f32;
+        this.z = z as f32;
+    }
+
+    vec3 (i32 x, i32 y, i32 z){
+        this.x = x as f32;
+        this.y = y as f32;
+        this.z = z as f32;
+    }
+
+    vec3 (vec2 v, i32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z;
+    }
+
+    vec3 (vec2 v, f32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z;
+    }
+
+    /*
+    fn length() -> f32 {
+        return sqrt(x * x + y * y + z * z);
+    }
+
+    fn lengthSq() -> f32 {
+        return x * x + y * y + z * z;
+    }
+
+    fn distance(vec3 other) -> f32 {
+        var dx = x - other.x;
+        var dy = y - other.y;
+        var dz = z - other.z;
+        return sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    fn distanceSq(vec3 other) -> f32 {
+        var dx = x - other.x;
+        var dy = y - other.y;
+        var dz = z - other.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    fn normalized() -> vec3 v {
+        var len = length();
+        if (len == 0.0) {
+            return vec3.zero();
+        }
+        return vec3(x / len, y / len, z / len);
+    }
+
+    fn dot(vec3 other) -> f32 {
+        return x * other.x + y * other.y + z * other.z;
+    }
+
+    fn cross(vec3 other) -> vec3 {
+        var cx = y * other.z - z * other.y;
+        var cy = z * other.x - x * other.z;
+        var cz = x * other.y - y * other.x;
+        return vec3(cx, cy, cz);
+    }
+
+    fn min(vec3 other) -> vec3 {
+        return vec3(min(x, other.x), min(y, other.y), min(z, other.z));
+    }
+
+    fn max(vec3 other) -> vec3 {
+        return vec3(max(x, other.x), max(y, other.y), max(z, other.z));
+    }
+
+    fn clamp(vec3 minVal, vec3 maxVal) -> vec3 {
+        return vec3(
+            max(minVal.x, min(x, maxVal.x)),
+            max(minVal.y, min(y, maxVal.y)),
+            max(minVal.z, min(z, maxVal.z))
+        );
+    }
+    */
+}
+
+impl Add for vec3 {
+    fn add(vec3* other) -> vec3 v {
+        v = { x + other.x, y + other.y, z + other.z }; return v;
+    }
+    fn add(i32 val) -> vec3 v {
+        v = {x + val, y + val, z + val}; return v;
+    }
+    fn add(f32 val) -> vec3 v {
+        v = {x + val, y + val, z + val}; return v;
+    }
+}
+
+impl Sub for vec3 {
+    fn sub(vec3* other) -> vec3 v {
+        v = {x - other.x, y - other.y, z - other.z}; return v;
+    }
+    fn sub(i32 val) -> vec3 v {
+        v = {x - val, y - val, z - val}; return v;
+    }
+    fn sub(f32 val) -> vec3 v {
+        v = {x - val, y - val, z - val}; return v;
+    }
+}
+
+impl Mul for vec3 {
+    fn mul(i32 scale) -> vec3 v {
+        v = { x * scale, y * scale, z * scale }; return v;
+    }
+    fn mul(f32 scale) -> vec3 v {
+        v = { x * scale, y * scale, z * scale }; return v;
+    }
+}
+
+impl Div for vec3 {
+    fn div(i32 scale) -> vec3 v {
+        v = {x / scale, y / scale, z / scale }; return v;
+    }
+    fn div(f32 scale) -> vec3 v {
+        v = {x / scale, y / scale, z / scale }; return v;
+    }
+}
+
+impl Eq for vec3 {
+    fn eq(vec3* other) -> bool {
+        return x == other.x && y == other.y && z == other.z;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i && z == i;
+    }
+    fn eq(f32 i) -> bool {
+        return x == i && y == i && z == i;
+    }
+}
+
+impl Neg for vec3 {
+    fn neg() -> vec3 v {
+        v = {0 - x, 0 - y, 0 - z}; return v;
+    }
+}

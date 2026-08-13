@@ -1,0 +1,251 @@
+import "std/io.gg";
+
+//TODO Eq use some eps
+
+fn print(vec2& v){
+    print("(");
+    print(v.x);
+    print(",");
+    print(v.y);
+    print(")\n");
+}
+
+class vec2 {
+    mut f32 x;
+    mut f32 y;
+
+    vec2 (f64 i) {
+        this.x = i as f32;
+        this.y = i as f32;
+    }
+
+    vec2 (i32 i) {
+        this.x = i;
+        this.y = i;
+    }
+
+    vec2 (f64 x, f64 y){
+        this.x = x as f32;
+        this.y = y as f32;
+    }
+
+    vec2 (i32 x, i32 y){
+        this.x = x;
+        this.y = y;
+    }
+}
+
+impl Add for vec2 {
+    fn add(vec2* other) -> vec2 v {
+        v = { x + other.x, y + other.y }; return v;
+    }
+    fn add(i32 val) -> vec2 v {
+        v = {x + val, y + val}; return v;
+    }
+    fn add(f32 val) -> vec2 v {
+        v = {x + val, y + val}; return v;
+    }
+}
+
+impl Sub for vec2 {
+    fn sub(vec2* other) -> vec2 v {
+        v = {x - other.x, y - other.y}; return v;
+    }
+    fn sub(i32 val) -> vec2 v {
+        v = {x - val, y - val}; return v;
+    }
+    fn sub(f32 val) -> vec2 v {
+        v = {x - val, y - val}; return v;
+    }
+}
+
+impl Mul for vec2 {
+    fn mul(i32 scale) -> vec2 v {
+        v = { x * scale, y * scale }; return v;
+    }
+    fn mul(f32 scale) -> vec2 v {
+        v = { x * scale, y * scale }; return v;
+    }
+}
+
+impl Div for vec2 {
+    fn div(i32 scale) -> vec2 v {
+        v = {x / scale, y / scale }; return v;
+    }
+    fn div(f32 scale) -> vec2 v {
+        v = {x / scale, y / scale }; return v;
+    }
+}
+
+impl Eq for vec2 {
+    fn eq(vec2* other) -> bool {
+        return x == other.x && y == other.y;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i;
+    }
+    fn eq(f32 i) -> bool {
+        return x == i && y == i;
+    }
+}
+
+impl Neg for vec2 {
+    fn neg() -> vec2 v {
+        v = {0 - x, 0 - y}; return v;
+    }
+}
+
+
+
+
+
+
+class ivec2 {
+    mut i32 x;
+    mut i32 y;
+
+    ivec2 (i32 i) {
+        this.x = i;
+        this.y = i;
+    }
+
+    ivec2 (i32 x, i32 y){
+        this.x = x;
+        this.y = y;
+    }
+}
+
+impl Add for ivec2 {
+    fn add(ivec2* other) -> ivec2 v {
+        v = { x + other.x, y + other.y }; return v;
+    }
+    fn add(i32 val) -> ivec2 v {
+        v = {x + val, y + val}; return v;
+    }
+}
+
+impl Sub for ivec2 {
+    fn sub(ivec2* other) -> ivec2 v {
+        v = {x - other.x, y - other.y}; return v;
+    }
+    fn sub(i32 val) -> ivec2 v {
+        v = {x - val, y - val}; return v;
+    }
+}
+
+impl Mul for ivec2 {
+    fn mul(i32 scale) -> ivec2 v {
+        v = { x * scale, y * scale }; return v;
+    }
+}
+
+impl Div for ivec2 {
+    fn div(i32 scale) -> ivec2 v {
+        v = {x / scale, y / scale }; return v;
+    }
+}
+
+impl Eq for ivec2 {
+    fn eq(ivec2* other) -> bool {
+        return x == other.x && y == other.y;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i;
+    }
+}
+
+impl Neg for ivec2 {
+    fn neg() -> ivec2 v {
+        v = {0 - x, 0 - y}; return v;
+    }
+}
+
+
+
+
+class dvec2 {
+    mut f64 x;
+    mut f64 y;
+
+    dvec2 (i32 i) {
+        this.x = i as f64;
+        this.y = i as f64;
+    }
+
+    dvec2 (f64 i) {
+        this.x = i;
+        this.y = i;
+    }
+
+    dvec2 (i32 x, i32 y){
+        this.x = x as f64;
+        this.y = y as f64;
+    }
+
+    dvec2 (f64 x, f64 y){
+        this.x = x as f64;
+        this.y = y as f64;
+    }
+
+
+}
+
+impl Add for dvec2 {
+    fn add(dvec2* other) -> dvec2 v {
+        v = { x + other.x, y + other.y }; return v;
+    }
+    fn add(f64 val) -> dvec2 v {
+        v = {x + val, y + val}; return v;
+    }
+    fn add(i32 val) -> dvec2 v {
+        v = {x + val, y + val}; return v;
+    }
+}
+
+impl Sub for dvec2 {
+    fn sub(dvec2* other) -> dvec2 v {
+        v = {x - other.x, y - other.y}; return v;
+    }
+    fn sub(f64 val) -> dvec2 v {
+        v = {x - val, y - val}; return v;
+    }
+    fn sub(i32 val) -> dvec2 v {
+        v = {x - val, y - val}; return v;
+    }
+}
+
+impl Mul for dvec2 {
+    fn mul(f64 scale) -> dvec2 v {
+        v = { x * scale, y * scale }; return v;
+    }
+    fn mul(i32 scale) -> dvec2 v {
+        v = { x * scale, y * scale }; return v;
+    }
+}
+
+impl Div for dvec2 {
+    fn div(f64 scale) -> dvec2 v {
+        v = {x / scale, y / scale }; return v;
+    }
+    fn div(i32 scale) -> dvec2 v {
+        v = {x / scale, y / scale }; return v;
+    }
+}
+
+impl Eq for dvec2 {
+    fn eq(dvec2* other) -> bool {
+        return x == other.x && y == other.y;
+    }
+    fn eq(f64 i) -> bool {
+        return x == i && y == i;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i;
+    }
+}
+
+impl Neg for dvec2 {
+    fn neg() -> dvec2 v {
+        v = {0 - x, 0 - y}; return v;
+    }
+}

@@ -80,6 +80,16 @@ private:
 
     // Strips the surrounding double-quote characters from a STRING token lexeme.
     static std::string stripQuotes(const std::string& lexeme);
+
+    // Prints the standard "cannot find imported file" diagnostic (path + std:/searchRoots hints),
+    // once per unique missing path per resolve() call (dedup via reportedMissing_) — several passes
+    // independently walk the same import graph, and without dedup a single bad import would print
+    // the same message once per pass. Shared by every pass that resolves an import path against the
+    // filesystem — a pass whose own missing-file check stayed silent (as collectClassNames's did)
+    // leaves a type name unregistered with NO explanation, surfacing later as a baffling, unrelated
+    // parse error at the use site instead of pointing at the actual broken import.
+    void reportMissingImport(const std::string& filePath);
+    std::unordered_set<std::string> reportedMissing_;
 };
 
 #endif //GG_IMPORTRESOLVER_H

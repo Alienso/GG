@@ -78,11 +78,11 @@
       "patterns": [
         {
           "name": "keyword.control.gg",
-          "match": "\\b(if|else|for|while|switch|case|default|yield|return|break|continue|inline|in)\\b"
+          "match": "\\b(if|else|for|while|switch|match|case|default|yield|return|break|continue|inline|in)\\b"
         },
         {
           "name": "keyword.declaration.gg",
-          "match": "\\b(fn|class|enum|trait|impl|extern|import|new|static|private|var|super)\\b"
+          "match": "\\b(fn|class|enum|trait|impl|annotation|module|extern|import|new|static|private|var|super)\\b"
         }
       ]
     },
@@ -93,11 +93,11 @@
     },
     "modifiers": {
       "name": "storage.modifier.gg",
-      "match": "\\b(mut|as|sizeof)\\b"
+      "match": "\\b(mut|as|sizeof|destroy)\\b"
     },
     "types": {
       "name": "storage.type.gg",
-      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|void|ptr|Self)\\b"
+      "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|void|ptr|str|Self)\\b"
     },
     "constants": {
       "name": "constant.language.gg",
@@ -108,10 +108,12 @@
       "match": "\\b(this)\\b"
     },
     "numbers": {
+      "comment": "Hex (0x/0X) and octal (0o/0O) prefixes, and `_` digit separators anywhere in a run. The lexer validates placement; the grammar just accepts `_` loosely. Octal/hex are listed before decimal so they win at a leading 0.",
       "patterns": [
-        { "name": "constant.numeric.hex.gg", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
-        { "name": "constant.numeric.float.gg", "match": "\\b[0-9]+\\.[0-9]+\\b" },
-        { "name": "constant.numeric.integer.gg", "match": "\\b[0-9]+\\b" }
+        { "name": "constant.numeric.hex.gg", "match": "\\b0[xX][0-9a-fA-F_]+\\b" },
+        { "name": "constant.numeric.octal.gg", "match": "\\b0[oO][0-7_]+\\b" },
+        { "name": "constant.numeric.float.gg", "match": "\\b[0-9][0-9_]*\\.[0-9_]+\\b" },
+        { "name": "constant.numeric.integer.gg", "match": "\\b[0-9][0-9_]*\\b" }
       ]
     },
     "operators": {

@@ -4,7 +4,8 @@ import "std/crt/cstring.gg";
 
 import "std/array.gg";
 import "std/string.gg";
-import "std/math.gg";
+import "std/math/number.gg";
+import "std/math/vector.gg";
 
 import "std/io.gg";
 
@@ -31,14 +32,23 @@ class Instance{
 
 fn main() -> i32 {
 
-    Instance i = new Instance(1, 2);
-    Array<Instance> array();
-    array.emplaceBack(1,2);
+    vec2 v1{1, 5.0};
+    vec2 v2{2, 3};
+
+    vec2 v3 = v1 + v2;
+    print(v3);
+
+    vec2 v4 = v3 + 1.0;
+    print(v4);
 
     return 0;
 }
 
 /*fn main() -> i32 {
+
+    //Instance& i = new Instance(1, 2);
+    //mut Array<Instance> array();
+    //array.emplaceBack(1,2);
 
     puts("Hello world!");
     Array<i32> array();

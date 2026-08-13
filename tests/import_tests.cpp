@@ -226,6 +226,25 @@ TEST_CASE("ImportResolver - file-relative resolution takes precedence over searc
     REQUIRE_FALSE(sem.hadError);   // no duplicate-definition error → only the sibling was merged
 }
 
+TEST_CASE("ImportResolver - a broken NESTED import reports clearly (not silently)", "[import]") {
+    // Regression: a bad import buried inside an otherwise-fine import chain used to fail SILENTLY
+    // in collectClassNames (the pre-parse pass that seeds the parser with every reachable class
+    // name) — no diagnostic at all. The only visible symptom was a confusing, unrelated downstream
+    // parser error at the actual use site, since a class defined past the broken import never got
+    // registered and the parser then failed to recognize `ClassName ident{...}` as a declaration.
+    // `collectClassNames`'s own missing-file check must now report clearly via the shared
+    // `reportMissingImport` helper, same as `processFile` always did.
+    StderrCapture capture;
+    writeTempFileIn("gg_nested_bad_app", "middle.gg", "import \"missing/Sub.gg\";\n");
+    std::string mainPath = writeTempFileIn("gg_nested_bad_app", "main.gg",
+        "import \"middle.gg\";\nfn main() -> i32 { return 0; }");
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath);
+
+    REQUIRE(capture.contains("cannot find imported file"));
+}
+
 TEST_CASE("ImportResolver - a missing `std/` import reports against the stdlib dir", "[import]") {
     StderrCapture capture;
     std::string mainPath = writeTempFileIn("gg_std_missing_app", "main.gg",

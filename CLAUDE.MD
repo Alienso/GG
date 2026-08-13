@@ -800,6 +800,19 @@ existing wins):
   (resolution) only — symbols are still flattened into one flat-global `Program` (no per-module
   namespacing; that's the deferred axis B). No manifest / dependency versioning yet.
   Tests: `tests/import_tests.cpp` (`[import]`), `e2e/module_std_test.gg`.
+- **A missing/unresolvable import used to fail SILENTLY in three of the four passes that walk the
+  import graph** (`scanModules`, `prescanTemplates`, `collectClassNames` — only `processFile` printed
+  anything). `collectClassNames` runs *before* parsing, to seed the parser with every reachable class
+  name so `ClassName ident(args)`/`ClassName ident{args}` parses as a declaration; when an import
+  broke deep in that walk, the class silently never got registered — with **zero diagnostic** — and
+  the *real* symptom surfaced far later as a baffling, unrelated parser error at the actual use site
+  (`"expected ';' after expression"` on `Vec2 v1{1, 5.0};`, because `Vec2` wasn't recognized as a type
+  and `Vec2 v1` doesn't parse as an expression). Meanwhile `processFile`'s own correct "cannot find
+  imported file" diagnostic never even ran, because the root file's parse threw before `processFile`
+  got to recurse into the broken import. Fixed with a shared `reportMissingImport(path)` helper
+  (deduped via `reportedMissing_`, since multiple passes independently walk the same import graph)
+  wired into all four passes, so a broken import now reports immediately and clearly instead of
+  masquerading as an unrelated parse error three files away.
 
 ### Module namespacing — `module` + Java-style `import a.B` (axis B)
 Per-module namespaces so two files may each declare `class Foo` without colliding (the deferred

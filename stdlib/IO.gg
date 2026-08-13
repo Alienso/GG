@@ -1,4 +1,5 @@
 import "std/crt/cio.gg";
+import "std/crt/cmem.gg";
 import "std/String.gg";
 
 
@@ -89,8 +90,33 @@ fn print(u16 n) { print(n as u64); }
 fn print(u8  n) { print(n as u64); }
 
 
-fn print(f32 x) {  }
-fn print(f64 x) {  }
+// MSVCRT/UCRT-only, non-variadic float-to-string conversion — see the print(f64)/print(f32) comment.
+extern _gcvt(f64 value, i32 ndigit, ptr buf) -> ptr;
+
+// Float printing — a TEMPORARY solution via the old MSVCRT/UCRT `_gcvt` helper.
+//
+// `_gcvt` is a genuinely non-variadic C function (value, digit-count, buffer — all fixed), unlike
+// `printf`/`snprintf`. That distinction matters here: GG's `extern` can only declare fixed-arity
+// functions, so calling a REAL variadic CRT function (`snprintf(buf, n, "%g", x)`) by just declaring
+// it with the exact fixed signature you intend to call LOOKS like it should work, but silently
+// prints garbage on Windows x64 — a genuinely variadic callee expects a float argument duplicated
+// into a general-purpose register (for `va_arg`'s benefit), which a plain non-variadic call site
+// never does. `_gcvt` sidesteps the whole issue by not being variadic in the first place.
+//
+// Caveats (hence "temporary"): `_gcvt` is Windows/MSVCRT-only — it does not exist on Linux glibc, so
+// this breaks the "stdlib is platform-agnostic" property every other file in here maintains (see the
+// "Target platform" invariant / `emitStdioHelpers`). It also renders in `_gcvt`'s own style, not a
+// polished one — e.g. `100.0` prints as `100.` (a bare trailing '.', no fraction) rather than `100`
+// or `100.0`. A real fix needs either a portable formatter (Grisu/Ryu-style) or a proper variadic
+// call-site ABI in codegen; `ndigit=15` covers full `f64` precision, buffer sized `ndigit+7` + slack.
+fn print(f64 x) {
+    u64 bufSize = 32;
+    ptr buf = malloc(bufSize);
+    _gcvt(x, 15, buf);
+    fputs(buf, gg_stdout());
+    free(buf);
+}
+fn print(f32 x) { print(x as f64); }
 
 fn print(bool b) {
     if (b) { print("true"); } else { print("false"); }

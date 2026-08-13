@@ -36,6 +36,7 @@ Program ImportResolver::resolve(const std::string& rootFilePath, const ModuleSea
     processedPaths.clear();
     sharedGenerics_ = GenericRegistry{};
     config_ = config;
+    reportedMissing_.clear();
 
     // Pass 0: scan every file for its `module NAME;` + top-level decl names, populating the shared
     // (module → member names) table + the set of module names. This must precede all parsing so any
@@ -99,6 +100,15 @@ std::string ImportResolver::resolveImportPath(const fs::path& importerDir,
     return relative.string();
 }
 
+void ImportResolver::reportMissingImport(const std::string& filePath) {
+    if (!reportedMissing_.insert(filePath).second) return;   // already reported this path
+    std::cerr << "Error: cannot find imported file '" << filePath << "'\n";
+    if (!config_.stdlibDir.empty())
+        std::cerr << "  (std/ resolves to: " << config_.stdlibDir << ")\n";
+    for (const std::string& root : config_.searchRoots)
+        std::cerr << "  (search root: " << root << ")\n";
+}
+
 std::vector<Token> ImportResolver::qualifyFileTokens(const std::vector<Token>& tokens) const {
     std::string module;
     std::unordered_map<std::string, std::string> bindings;
@@ -115,7 +125,7 @@ void ImportResolver::scanModules(const std::string& filePath,
                                  std::unordered_set<std::string>& visitedPaths) {
     std::error_code ec;
     fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
-    if (ec || !fs::exists(canonical)) return;
+    if (ec || !fs::exists(canonical)) { reportMissingImport(filePath); return; }
 
     std::string canonicalStr = canonical.string();
     std::string key = dedupKey(canonical);
@@ -147,7 +157,7 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
                                       Parser& seedParser) {
     std::error_code ec;
     fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
-    if (ec || !fs::exists(canonical)) return;
+    if (ec || !fs::exists(canonical)) { reportMissingImport(filePath); return; }
 
     std::string canonicalStr = canonical.string();
     std::string key = dedupKey(canonical);
@@ -183,7 +193,7 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
 {
     std::error_code ec;
     fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
-    if (ec || !fs::exists(canonical)) return {};
+    if (ec || !fs::exists(canonical)) { reportMissingImport(filePath); return {}; }
 
     std::string canonicalStr = canonical.string();
     std::string key = dedupKey(canonical);
@@ -232,11 +242,7 @@ Program ImportResolver::processFile(const std::string& filePath) {
     std::error_code errorCode;
     fs::path canonical = fs::weakly_canonical(fs::path(filePath), errorCode);
     if (errorCode || !fs::exists(canonical)) {
-        std::cerr << "Error: cannot find imported file '" << filePath << "'\n";
-        if (!config_.stdlibDir.empty())
-            std::cerr << "  (std/ resolves to: " << config_.stdlibDir << ")\n";
-        for (const std::string& root : config_.searchRoots)
-            std::cerr << "  (search root: " << root << ")\n";
+        reportMissingImport(filePath);
         return Program{};
     }
 

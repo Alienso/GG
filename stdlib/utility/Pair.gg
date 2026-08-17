@@ -1,0 +1,19 @@
+import "std/IO.gg";
+
+class Pair <T, V>  {
+
+    mut T first;
+    mut V second;
+
+    // One by-value constructor serves every type argument. `T`/`V` may be a primitive (copied), a
+    // value-object (a bare object param is a non-owning borrow, so the field assignment clones — the
+    // sources stay valid), or an owning reference `Foo&` (the field co-owns it). No separate borrow
+    // or reference overloads are needed — a reference is itself a value here.
+    Pair(T t, V v){
+        first = t;
+        second = v;
+    }
+
+
+}
+

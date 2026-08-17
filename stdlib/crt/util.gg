@@ -1,0 +1,3 @@
+extern strtol(ptr string, ptr end, i32 base) -> i64;
+extern strtof(ptr string, ptr end) -> f32;
+extern strtod(ptr string, ptr end) -> f64;

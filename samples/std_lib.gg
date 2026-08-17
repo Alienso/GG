@@ -4,8 +4,10 @@ import "std/crt/cstring.gg";
 
 import "std/array.gg";
 import "std/string.gg";
-import "std/math/number.gg";
+import "std/number.gg";
 import "std/math/vector.gg";
+import "std/math/math.gg";
+import "std/utility/Pair.gg";
 
 import "std/io.gg";
 
@@ -22,24 +24,62 @@ class Instance{
 
         this.id = Instance::nextId;
         nextId++;
-        print("Instance #"); print(id); println(" created!");
+        //print("Instance #"); print(id); println(" created!");
     }
 
     ~Instance(){
-        print("Instance #"); print(id); println(" destroyed!");
+        //print("Instance #"); print(id); println(" destroyed!");
     }
 }
 
 fn main() -> i32 {
 
-    vec2 v1{1, 5.0};
+    /*vec2 v1{1, 5.0};
     vec2 v2{2, 3};
 
     vec2 v3 = v1 + v2;
     print(v3);
 
     vec2 v4 = v3 + 1.0;
-    print(v4);
+    print(v4);*/
+
+    /*print(Math.sqrt(2.0));
+    print('\n');
+    print(Math.sqrt(2.0) == Math.E);*/
+
+    Pair<i32, i32> pair1 = {1, 2};
+    print(pair1.first);
+    print(",");
+    println(pair1.second);
+
+    Pair<str, str> pair2 = {"Hello", " World"};
+    print(pair2.first);
+    print(",");
+    println(pair2.second);
+
+    String s1 = {"Hello"};
+    String s2 = {" World"};
+    Pair<String, String> pair3 = {s1, s2};
+    print(pair3.first);
+    print(",");
+    println(pair3.second);
+
+    Instance i1 = {1 , 2};
+    Instance i2 = {3, 4};
+    Pair<Instance, Instance> pair4 = {i1, i2};
+    print(pair4.first.x);
+    print(",");
+    println(pair4.second.x);
+
+    Pair<Instance&, Instance&> pair5 = {i1, i2};
+    print(pair5.first.x);
+    print(",");
+    println(pair5.second.x);
+
+    /*i32? t = parseInt2("56aa");
+    if (t != null){
+        println(t);
+    }*/
 
     return 0;
 }

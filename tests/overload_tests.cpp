@@ -267,3 +267,42 @@ TEST_CASE("Overload - reference-parameter overload mangles with .ref", "[overloa
     REQUIRE(ir.find("@d$Point.ref$ret$i32(") != std::string::npos);
     REQUIRE(ir.find("@d$i32$ret$i32(") != std::string::npos);
 }
+
+TEST_CASE("Overload - a borrow mangles distinctly from an owning reference (.brw vs .ref)", "[overload][codegen][byref]") {
+    // `Obj o` (a bare-object param = borrow) and `Obj&` (owning ref) are different lowered types and
+    // must get different symbols, or overloading one against the other collides in codegen. `.brw`
+    // (borrow) vs `.ref` (owning) keeps them apart. (Regression: they both used to mangle `.ref`.)
+    std::string ir = codegenString(R"(
+        class Obj { i32 x; Obj(i32 v){ this.x = v; } fn get() -> i32 { return this.x; } }
+        fn f(Obj o)  -> i32 { return o.get(); }
+        fn f(Obj& o) -> i32 { return o.get() + 100; }
+        fn main() -> i32 { Obj& r = new Obj(5); return f(r); }
+    )");
+    REQUIRE(ir.find("@f$Obj.brw$ret$i32(") != std::string::npos);   // bare-object param → borrow
+    REQUIRE(ir.find("@f$Obj.ref$ret$i32(") != std::string::npos);   // owning reference
+}
+
+TEST_CASE("Overload - distinct primitive borrows mangle distinctly", "[overload][codegen][byref]") {
+    // A primitive borrow has an empty className, so its element type must be encoded or `i32*` and
+    // `f64*` would collide on `.ref`/`.brw`. (Regression: both used to mangle to a bare `.ref`.)
+    std::string ir = codegenString(R"(
+        fn f(i32* a) -> i32 { return a; }
+        fn f(f64* b) -> i32 { return b as i32; }
+        fn main() -> i32 { mut i32 x = 5; mut f64 y = 2.0; return f(x) + f(y); }
+    )");
+    REQUIRE(ir.find("@f$i32.brw$ret$i32(") != std::string::npos);
+    REQUIRE(ir.find("@f$f64.brw$ret$i32(") != std::string::npos);
+}
+
+TEST_CASE("Overload - a bare-object param and an explicit borrow are the same overload (duplicate)", "[overload][semantic][byref]") {
+    // `Obj o` IS a borrow, so `f(Obj o)` and `f(Obj* o)` are the same signature — a clean duplicate
+    // error, NOT a raw codegen symbol collision.
+    StderrCapture cap;
+    auto r = analyzeString(R"(
+        class Obj { i32 x; Obj(i32 v){ this.x = v; } }
+        fn f(Obj o)  -> i32 { return 0; }
+        fn f(Obj* o) -> i32 { return 1; }
+    )");
+    REQUIRE(r.hadError);
+    REQUIRE(cap.contains("already defined with the same signature"));
+}

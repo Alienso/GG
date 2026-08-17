@@ -333,7 +333,12 @@ Type CodeGen::resolveParamType(const ParamDecl& param) const {
     if (param.typeName.type == TokenType::SELF)
         return makeObjectType(currentClassName_);
     if (param.typeName.type == TokenType::IDENTIFIER && cgClasses_.count(param.typeName.lexeme))
-        return makeObjectType(param.typeName.lexeme);
+        // A bare value-object parameter (`fn f(Obj o)`) is sugar for a non-owning class borrow:
+        // GG objects are address-backed (there is no by-value struct-param ABI), so `Obj o` lowers to
+        // a `ptr` borrow exactly like `Obj*`. The caller's object value / owning ref coerces to the
+        // borrow (Silent), member/method access works through it, and `field = o` into a value field
+        // clones. Matches the semantic side (resolveTypeToken callers), which also maps it to a borrow.
+        return makeBorrowType(param.typeName.lexeme);
     return typeFromToken(param.typeName.type);
 }
 

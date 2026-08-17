@@ -515,12 +515,25 @@ TEST_CASE("Destructor - parser: destructor with params produces no destructor in
 // primitives are still passed by value.
 // ============================================================
 
-TEST_CASE("ObjectParam - a raw value-object parameter is rejected", "[class][semantic][byref]") {
+TEST_CASE("ObjectParam - a bare value-object parameter is accepted as a borrow", "[class][semantic][byref]") {
+    // A bare object parameter (`fn use(Point p)`) is sugar for a non-owning class borrow: GG objects
+    // are address-backed (no by-value struct-param ABI), so it lowers to a `ptr` exactly like
+    // `Point*`. (Previously a hard error requiring `Point&`.)
     auto result = analyzeString(R"(
         class Point { f32 x; f32 y; }
         fn use(Point p) { }
     )");
-    REQUIRE(result.hadError);   // must be declared 'Point&'
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("ObjectParam - a bare value-object parameter lowers to a ptr (borrow, no copy)", "[class][codegen][byref]") {
+    std::string ir = codegenString(R"(
+        class Point { f32 x; Point(f32 v) { this.x = v; } }
+        fn use(Point p) -> f32 { return p.x; }
+        fn main() -> i32 { Point q(1.0); use(q); return 0; }
+    )");
+    REQUIRE(ir.find("define float @use(ptr %p)") != std::string::npos);   // borrow → ptr param
+    REQUIRE(ir.find("call float @use(ptr %q.addr)") != std::string::npos); // caller passes the address
 }
 
 TEST_CASE("ObjectParam - a reference parameter is accepted", "[class][semantic][byref]") {
@@ -531,12 +544,12 @@ TEST_CASE("ObjectParam - a reference parameter is accepted", "[class][semantic][
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("ObjectParam - a method with a raw object parameter is rejected", "[class][semantic][byref]") {
+TEST_CASE("ObjectParam - a method with a bare object parameter is accepted (borrow)", "[class][semantic][byref]") {
     auto result = analyzeString(R"(
         class Point { f32 x; }
-        class Line { f32 len; fn from(Point a) { this.len = a.x; } }
+        class Line { mut f32 len; fn from(Point a) mut { this.len = a.x; } }
     )");
-    REQUIRE(result.hadError);
+    REQUIRE_FALSE(result.hadError);
 }
 
 TEST_CASE("ObjectParam - a value object is borrowed as a reference argument", "[class][semantic][byref]") {
@@ -578,6 +591,27 @@ TEST_CASE("ObjectParam - basic-type parameter is still passed by value", "[class
     REQUIRE(ir.find("define void @use(i32 %n)") != std::string::npos);
     REQUIRE(ir.find("%n.addr = alloca i32")      != std::string::npos);
     REQUIRE(ir.find("store i32 %n, ptr %n.addr") != std::string::npos);
+}
+
+TEST_CASE("ObjectParam - one by-value generic ctor serves primitive, value-object, and reference args", "[class][codegen][byref][generics]") {
+    // The by-value object-param-as-borrow rule is what lets a single `Pair(T t, V v)` cover every
+    // type argument: T a primitive (copied), a value-object (borrow + clone), or an owning reference
+    // (co-owned). All three instantiations must compile and emit their distinct constructors.
+    std::string ir = codegenString(R"(
+        class Pair<T, V> { mut T first; mut V second; Pair(T t, V v){ first = t; second = v; } }
+        class Obj { mut i32 x; Obj(i32 v) { this.x = v; } }
+        fn main() -> i32 {
+            Pair<i32, i32> a = {1, 2};
+            Obj o1(3); Obj o2(4);
+            Pair<Obj, Obj> b = {o1, o2};
+            Obj& r1 = new Obj(5); Obj& r2 = new Obj(6);
+            Pair<Obj&, Obj&> c = {r1, r2};
+            return a.first;
+        }
+    )");
+    REQUIRE(ir.find("@Pair$i32$i32_Pair$i32$i32(")       != std::string::npos);  // primitive: by value
+    REQUIRE(ir.find("@Pair$Obj$Obj_Pair$Obj$Obj(")       != std::string::npos);  // value-object: borrow+clone
+    REQUIRE(ir.find("@Pair$Obj.ref$Obj.ref_")            != std::string::npos);  // owning reference: co-own
 }
 
 TEST_CASE("ObjectParam - reassigning a basic-type parameter is still allowed", "[class][semantic][byref]") {

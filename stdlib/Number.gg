@@ -1,3 +1,5 @@
+import "std/crt/util.gg";
+import "std/crt/cmem.gg";
 
 class Integer {
 
@@ -18,6 +20,12 @@ class Integer {
     static u64 MAX_U64 = 18446744073709551615;
 }
 
+
+/*fn parseInt2(str s) -> i32? { //TODO
+    ptr end = alloca(8);
+    i64 res = strtol(s.data, 0 as ptr, 0);
+    return res;
+}*/
 
 fn parseInt<T>(str s, T limit) -> T? {
 

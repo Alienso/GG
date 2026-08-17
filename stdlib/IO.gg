@@ -139,6 +139,28 @@ fn print(String& s) {
     }
 }
 
+// `char` is a 32-bit Unicode code point, not a byte, so printing it means UTF-8-encoding it (1-4
+// bytes depending on range) — the inverse of String::charAt's decode. Standard UTF-8 encoding:
+// the lead byte's high bits mark the sequence length, continuation bytes are all `10xxxxxx`.
+fn print(char c) {
+    i32 cp = c as i32;
+    if (cp < 0x80) {
+        putchar(cp);
+    } else if (cp < 0x800) {
+        putchar(0xC0 | (cp >> 6));
+        putchar(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        putchar(0xE0 | (cp >> 12));
+        putchar(0x80 | ((cp >> 6) & 0x3F));
+        putchar(0x80 | (cp & 0x3F));
+    } else {
+        putchar(0xF0 | (cp >> 18));
+        putchar(0x80 | ((cp >> 12) & 0x3F));
+        putchar(0x80 | ((cp >> 6) & 0x3F));
+        putchar(0x80 | (cp & 0x3F));
+    }
+}
+
 
 //Print Line
 //-----------------------------
@@ -157,5 +179,6 @@ fn println(f32 x) { print(x); putchar(10); }
 fn println(f64 x) { print(x); putchar(10); }
 
 fn println(bool b) { print(b); putchar(10); }
+fn println(char c) { print(c); putchar(10); }
 fn println(String& s) { print(s); putchar(10); }
 fn println(str s) { print(s); putchar(10); }

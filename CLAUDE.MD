@@ -608,10 +608,17 @@ signature **and/or return type**. Enums are excluded (single ctor, no member ove
   actually overloaded** (decl count > 1) so non-overloaded symbols keep their plain names
   (`@foo`, `@Point_dist`) and existing IR-name assertions stay valid. `main`/`extern` never
   mangled. **Every mangled component must be a valid unquoted LLVM identifier** (`[A-Za-z$._0-9]`) —
-  `$` separates components, `.` marks a variant (`.ref`, `.arr`, and **nullable → `.opt`**). A nullable
-  type mangles as `<underlying>.opt` (`i32?` → `i32.opt`), **not** `typeName`'s `i32?` — a literal `?`
-  is not a legal symbol char and made clang reject the emitted `.ll` (e.g. an overloaded
-  `parseI32 -> i32?`).
+  `$` separates components, `.` marks a variant: an **owning** heap reference `Class&` → `Class.ref`;
+  a **non-owning borrow** `Class*` (and a bare-object param, which is a borrow) → `Class.brw`; a
+  **primitive borrow** `i32*` → `i32.brw` (the element type is encoded because a primitive borrow's
+  className is empty); array → `.arr`; **nullable → `.opt`**. The borrow (`.brw`) vs owning (`.ref`)
+  distinction is load-bearing: both lower to `ptr` in IR, so if they shared a suffix, overloading one
+  against the other (`f(Obj o)` vs `f(Obj& o)`, or two distinct primitive borrows `f(i32*)`/`f(f64*)`)
+  would emit two definitions with the same symbol — a raw clang "invalid redefinition". Conversely
+  `f(Obj o)` and `f(Obj* o)` ARE the same lowered type (both `Obj.brw`) and are correctly reported as a
+  clean duplicate-signature error. A nullable type mangles as `<underlying>.opt` (`i32?` → `i32.opt`),
+  **not** `typeName`'s `i32?` — a literal `?` is not a legal symbol char and made clang reject the
+  emitted `.ll` (e.g. an overloaded `parseI32 -> i32?`).
 - **Semantic→codegen handoff**: `SemanticResult::resolvedCallee` (`const void*` call/new node
   address → chosen mangled name; empty ⇒ plain). Codegen: `overloadedBases_` + `freeFnBases_`
   computed in `generate()`; `genFunction`/`genMethod` emit `overloadEmittedName(...)`;
@@ -1102,8 +1109,19 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   class declared later (name pre-pass in `collectClasses` / codegen `generate()`).
 - **Heap references** (`Point& r = new Point(...)`): intrusive-refcounted heap pointer.
   `new` produces a `+1` reference. Assignment rebinds (retains new target, releases old).
-- **Object parameters must be references** — the semantic analyser rejects bare value-type
-  class parameters. Primitive parameters always pass by value.
+- **A bare value-object parameter is sugar for a non-owning class borrow** (`fn f(Obj o)` ≡
+  `fn f(Obj* o)`). GG objects are address-backed — there is no by-value struct-param ABI — so a
+  by-value object param can't be a *copy*; it lowers to a `ptr` borrow. Both layers map it: semantic
+  (`analyzeFunctionDecl`/method/ctor param loops in `SemanticAnalyzer_Stmts.cpp`) turns an
+  `Object` param type into `makeBorrowType(className)`, and codegen (`resolveParamType`) resolves a
+  bare-object param token to the same borrow. Reads/method-calls go through the borrow; `field = o`
+  into a value field **clones** (the source is not consumed); returning it is escape-checked like any
+  borrow. Owning-ref params (`Obj&`) and primitive params are unchanged. **This is what lets one
+  by-value generic constructor `Pair(T t, V v)` serve every type argument** — `T` a primitive
+  (copied), a value-object (borrow + clone), or an owning reference `Foo&` (the field co-owns it) —
+  since a reference is itself a `ptr` value and substitutes into `T t` with no sigil stacking. (Was
+  previously a hard "object parameter must be passed by reference" error.) Primitive parameters
+  always pass by value.
 - **Value-object → reference borrow (argument position only)** — passing a *value* object
   where a `Class&` is expected is allowed and lowers to a **borrow**: the callee receives the
   object's address (no copy, no refcount change). A value object's SSA value is already a
@@ -1728,8 +1746,15 @@ refcount. `String` (the heap class) is unchanged and distinct.
   `emitCast`; it is the mechanism that lets a literal flow to a `ptr`/`extern` parameter (`puts("hi")`)
   and threads through `buildArgString`'s per-arg cast. The **reverse `ptr → str` is forbidden** (a raw
   pointer has no known length).
-- **Lexer/parser**: `str` keyword → `TokenType::STR` (in `isTypeName`/`isTypeKeyword`); `str*` (a
-  borrow of `str`) is a parse error. **Type plumbing**: `typeFromToken`/`typeName`/`typeKindFromName`/
+- **Lexer/parser**: `str` keyword → `TokenType::STR` (in `isTypeName`/`isTypeKeyword`). `str*` (a
+  **primitive borrow** — an lvalue reference to a `str` value, exactly like `i32*`/`f64*`) is allowed:
+  `str` is an ordinary `{ptr,i64}` value with the same addressable-storage story as any other
+  primitive, so there was never a codegen or safety reason to reject it — the original "str is a view,
+  not a borrowable lvalue" rejection was a leftover scope restriction from before this generic-code
+  use case (`Pair<T,V>`'s `Pair(T* t, V* v)` ctor instantiated at `T=str`) was exercised. Reads
+  auto-deref, `mut str*` supports write-through, and a temporary/literal argument temp-materializes
+  into a hidden slot — all via the ordinary primitive-borrow machinery (see the `T*` invariant), no
+  `str`-specific codegen. **Type plumbing**: `typeFromToken`/`typeName`/`typeKindFromName`/
   `primitiveTokenType` handle `Str`; `mangleType` falls through to `"str"`; `synthTypeToken(Str)` →
   the `STR` keyword token (so `var s = "x"` round-trips). `analyzeLiteral(STRING)` returns `Str`
   (was `Ptr`), so **string literals are now safe** and `var s = "lit"` is ungated.
@@ -1892,6 +1917,61 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1309 test cases / 2451 assertions** (as of a **QA edge-case pass over the value-object-param-as-borrow
+feature** that found + fixed a **pre-existing overload-mangling collision** the feature widened
+exposure to: `mangleType` rendered *every* `Reference`-kind type as `className + ".ref"`, ignoring the
+`borrow` flag AND a primitive borrow's element kind — so `Obj&`≡`Obj*`≡`Obj o` all mangled `Obj.ref`
+and `i32*`≡`f64*` both mangled a bare `.ref`, and any two such overloads emitted colliding LLVM
+symbols (a raw clang "invalid redefinition", not a GG diagnostic). Fixed by mangling a **borrow** as
+`.brw` (with the element type encoded for primitive borrows: `i32.brw`) distinct from an **owning**
+`.ref`; and by making the two param-collection sites (`collectFunctions`, `buildClassInfo`) apply the
+same object→borrow mapping the body loops + codegen use, so the overload registry, body, and emitted
+symbol all agree (otherwise an *overloaded* object-param function registered `$Obj` but emitted
+`$Obj.brw` → latent link error, and `f(Obj o)`/`f(Obj*)` slipped past duplicate detection). Now
+`f(Obj o)`+`f(Obj&)` and `f(i32*)`+`f(f64*)` coexist, while `f(Obj o)`+`f(Obj*)` is a clean
+duplicate-signature error. The pass also verified (all correct) `mut Obj o` write-through, shared
+`Obj o` rejecting `mut`-method calls, returning a bare-object param as an owning ref being rejected
+(borrow can't widen to `&`), and a raw-ptr-owning value-object param (`String`) deep-cloning into a
+field with the source staying valid. `tests/overload_tests.cpp` (`[overload][byref]`, +3),
+`tests/class_tests.cpp` (`[byref]`). Prior baseline was
+**1306 test cases / 2445 assertions** (as of **a bare value-object parameter becoming sugar for a
+non-owning class borrow** — `fn f(Obj o)` ≡ `fn f(Obj* o)`, previously a hard "object parameter must
+be passed by reference" error). GG objects are address-backed (no by-value struct-param ABI), so a
+by-value object param can't be a copy anyway; lowering it to a `ptr` borrow (in both the semantic
+param loops and codegen's `resolveParamType`) is the natural fill-in — reads/method-calls go through
+the borrow, `field = o` into a value field clones (source not consumed), returns are escape-checked.
+The motivation: it lets **one by-value generic constructor `Pair(T t, V v)` serve every type
+argument** uniformly — `T` a primitive (copied), a value-object (borrow + clone), or an owning
+reference `Foo&` (co-owned) — because a reference is itself a `ptr` value that substitutes into `T t`
+with no sigil stacking (the C++ reference-collapsing / Rust references-are-values problem, sidestepped
+because GG references already lower to values). The stdlib `Pair<T,V>` (`stdlib/utility/Pair.gg`)
+switched to this single by-value ctor. Verified leak-free (borrow+clone for values, co-own for refs)
+via a live-object counter (`e2e/pair_test.gg`, exit 0). Two pre-existing "value-object param rejected"
+tests flipped to accept (class + lambda `Call`-signature), which is a strict capability gain.
+`tests/class_tests.cpp` (`[byref]`, +2), `tests/lambda_tests.cpp`, `e2e/pair_test.gg`. Prior baseline
+was
+**1304 test cases / 2441 assertions** (as of a batch of stdlib/diagnostics fixes: (1) **a silently
+swallowed broken import** — three of the four import-graph-walking passes (`scanModules`,
+`prescanTemplates`, `collectClassNames`) had NO diagnostic on a missing file (only `processFile` did),
+so a bad import buried in a working-looking chain (e.g. `stdlib/math/Vector.gg`'s own imports
+mistakenly duplicating its directory prefix) left a class silently unregistered and surfaced only as
+a baffling unrelated parser error three files away (`"expected ';' after expression"` on
+`Vec2 v1{1, 5.0}`) — never the actual "cannot find imported file" message. Fixed with a shared,
+deduped `reportMissingImport()` helper wired into all four passes. (2) **`fmin`/`fmax`** added to
+`stdlib/crt/cmath.gg` — genuinely non-variadic C99 functions, unlike the printf family, so no ABI
+concerns; the fix for `Vector3.gg`'s `min`/`max` usage is simply importing `crt/cmath.gg`. (3)
+**`print(char)`/`println(char)`** implemented in `stdlib/IO.gg` — `char` is a 32-bit Unicode code
+point, so printing it means UTF-8-encoding it (1-4 bytes by range); GG had a decoder (`String::
+charAt`) but no encoder anywhere. `print(char)` was a pre-existing **empty stub**; `println(char)`
+didn't exist at all. (4) **`str*` (a primitive borrow of `str`) is now allowed** — previously a parse
+error ("str is a view, not a borrowable lvalue"), but `str` is an ordinary `{ptr,i64}` value with the
+same addressable-storage story as `i32`/`f64`, so the restriction had no codegen or safety basis; it
+surfaced as a real blocker in `Pair<str, str>` (a generic class whose ctor takes `T*` borrow
+parameters, instantiated at `T=str`). Relaxing the parser gate required no other changes — the
+existing primitive-borrow codegen (auto-deref read, `mut`-write-through, temp-materialization for a
+literal/rvalue argument) is already generic over the borrowed type's IR representation.
+`tests/import_tests.cpp` (+1), `tests/str_tests.cpp` (`[str]`, the old str*-rejection test flipped to
+a str*-acceptance test, +1 codegen case). Prior baseline was
 **1302 test cases / 2438 assertions** (as of fixing **two pre-existing bugs** flagged earlier:
 (A) **`var` inference from a value-returning (sret) method call** — `var e = v.empty()` where
 `fn empty() -> Vec e` returns its own class by value silently failed to declare `e` ("use of

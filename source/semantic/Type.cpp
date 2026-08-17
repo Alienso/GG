@@ -301,7 +301,15 @@ std::string mangleType(const Type& t) {
     switch (t.kind) {
         case TypeKind::Object:    return t.className;
         case TypeKind::Enum:      return t.className;
-        case TypeKind::Reference: return t.className + ".ref";
+        case TypeKind::Reference:
+            // A non-owning borrow (`Class*` / `i32*` / a bare-object param) must mangle DISTINCTLY
+            // from an owning heap reference (`Class&`) — both are `ptr` in IR, so if they shared a
+            // mangled suffix, overloading one against the other would emit two definitions with the
+            // same symbol (a raw clang "invalid redefinition"). A PRIMITIVE borrow has an empty
+            // className, so it must encode its element type too, or `i32*` and `f64*` would collide.
+            if (t.borrow)
+                return (t.className.empty() ? typeName(Type{t.elementKind}) : t.className) + ".brw";
+            return t.className + ".ref";   // owning heap reference
         case TypeKind::Ptr:       return "ptr";
         case TypeKind::TypedPtr:  return "ptr." + mangleType(typedPtrElement(t));
         case TypeKind::Array:     return mangleType(Type{t.elementKind}) + ".arr" + std::to_string(t.arraySize);

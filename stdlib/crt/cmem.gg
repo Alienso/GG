@@ -3,6 +3,7 @@
 // Wraps the C heap allocation functions.
 // Import this module to allocate and release dynamic memory.
 
+//extern alloca(u64 size) -> ptr;                  // allocate `size` bytes; returns null on failure
 extern malloc(u64 size) -> ptr;                    // allocate `size` bytes; returns null on failure
 extern realloc(ptr pointer, u64 size) -> ptr;      // resize an existing allocation
 extern free(ptr pointer);                   // release a heap allocation

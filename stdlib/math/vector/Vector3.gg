@@ -1,10 +1,12 @@
+import "std/math/vector/Vector2.gg";
+import "std/math/Math.gg";
 
 class vec3 {
     mut f32 x;
     mut f32 y;
     mut f32 z;
 
-    vec3 (f64 i) {
+    vec3 (f32 i) {
         this.x = i as f32;
         this.y = i as f32;
         this.z = i as f32;
@@ -16,7 +18,7 @@ class vec3 {
         this.z = i as f32;
     }
 
-    vec3 (f64 x, f64 y, f64 z){
+    vec3 (f32 x, f32 y, f32 z){
         this.x = x as f32;
         this.y = y as f32;
         this.z = z as f32;
@@ -28,76 +30,44 @@ class vec3 {
         this.z = z as f32;
     }
 
-    vec3 (vec2 v, i32 z){
+    vec3 (vec2* v, i32 z){
         this.x = v.x;
         this.y = v.y;
         this.z = z;
     }
 
-    vec3 (vec2 v, f32 z){
+    vec3 (vec2* v, f32 z){
         this.x = v.x;
         this.y = v.y;
         this.z = z;
     }
 
-    /*
     fn length() -> f32 {
-        return sqrt(x * x + y * y + z * z);
+        return Math.sqrt(x * x + y * y + z * z) as f32;
     }
 
-    fn lengthSq() -> f32 {
-        return x * x + y * y + z * z;
-    }
-
-    fn distance(vec3 other) -> f32 {
-        var dx = x - other.x;
-        var dy = y - other.y;
-        var dz = z - other.z;
-        return sqrt(dx * dx + dy * dy + dz * dz);
-    }
-
-    fn distanceSq(vec3 other) -> f32 {
-        var dx = x - other.x;
-        var dy = y - other.y;
-        var dz = z - other.z;
-        return dx * dx + dy * dy + dz * dz;
-    }
-
-    fn normalized() -> vec3 v {
+    fn normalize() -> vec3 v {
         var len = length();
         if (len == 0.0) {
-            return vec3.zero();
+            v = {0, 0, 0};
+            return v;
         }
-        return vec3(x / len, y / len, z / len);
+        v = { x / len, y / len, z / len };
+        return v;
     }
 
-    fn dot(vec3 other) -> f32 {
+    fn dot(vec3* other) -> f32 {
         return x * other.x + y * other.y + z * other.z;
     }
 
-    fn cross(vec3 other) -> vec3 {
+    fn cross(vec3* other) -> vec3 v {
         var cx = y * other.z - z * other.y;
         var cy = z * other.x - x * other.z;
         var cz = x * other.y - y * other.x;
-        return vec3(cx, cy, cz);
+        v = { cx, cy, cz };
+        return;
     }
 
-    fn min(vec3 other) -> vec3 {
-        return vec3(min(x, other.x), min(y, other.y), min(z, other.z));
-    }
-
-    fn max(vec3 other) -> vec3 {
-        return vec3(max(x, other.x), max(y, other.y), max(z, other.z));
-    }
-
-    fn clamp(vec3 minVal, vec3 maxVal) -> vec3 {
-        return vec3(
-            max(minVal.x, min(x, maxVal.x)),
-            max(minVal.y, min(y, maxVal.y)),
-            max(minVal.z, min(z, maxVal.z))
-        );
-    }
-    */
 }
 
 impl Add for vec3 {
@@ -156,6 +126,237 @@ impl Eq for vec3 {
 
 impl Neg for vec3 {
     fn neg() -> vec3 v {
+        v = {0 - x, 0 - y, 0 - z}; return v;
+    }
+}
+
+
+class ivec3 {
+    mut i32 x;
+    mut i32 y;
+    mut i32 z;
+
+    ivec3 (i32 i) {
+        this.x = i;
+        this.y = i;
+        this.z = i;
+    }
+
+    ivec3 (f32 x, f32 y, f32 z){
+        this.x = x as i32;
+        this.y = y as i32;
+        this.z = z as i32;
+    }
+
+    ivec3 (i32 x, i32 y, i32 z){
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    ivec3 (ivec2* v, i32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z;
+    }
+
+    ivec3 (ivec2* v, f32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z as i32;
+    }
+
+    fn length() -> f32 {
+        return Math.sqrt(x * x + y * y + z * z) as f32;
+    }
+
+    fn dot(ivec3* other) -> f32 {
+        return x * other.x + y * other.y + z * other.z;
+    }
+
+    fn cross(ivec3* other) -> ivec3 v {
+        var cx = y * other.z - z * other.y;
+        var cy = z * other.x - x * other.z;
+        var cz = x * other.y - y * other.x;
+        v = { cx, cy, cz };
+        return v;
+    }
+}
+
+impl Add for ivec3 {
+    fn add(ivec3* other) -> ivec3 v {
+        v = { x + other.x, y + other.y, z + other.z }; return v;
+    }
+    fn add(i32 val) -> ivec3 v {
+        v = {x + val, y + val, z + val}; return v;
+    }
+}
+
+impl Sub for ivec3 {
+    fn sub(ivec3* other) -> ivec3 v {
+        v = {x - other.x, y - other.y, z - other.z}; return v;
+    }
+    fn sub(i32 val) -> ivec3 v {
+        v = {x - val, y - val, z - val}; return v;
+    }
+}
+
+impl Mul for ivec3 {
+    fn mul(i32 scale) -> ivec3 v {
+        v = { x * scale, y * scale, z * scale }; return v;
+    }
+}
+
+impl Div for ivec3 {
+    fn div(i32 scale) -> ivec3 v {
+        v = {x / scale, y / scale, z / scale }; return v;
+    }
+}
+
+impl Eq for ivec3 {
+    fn eq(ivec3* other) -> bool {
+        return x == other.x && y == other.y && z == other.z;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i && z == i;
+    }
+}
+
+impl Neg for ivec3 {
+    fn neg() -> ivec3 v {
+        v = {0 - x, 0 - y, 0 - z}; return v;
+    }
+}
+
+
+
+
+class dvec3 {
+    mut f64 x;
+    mut f64 y;
+    mut f64 z;
+
+    dvec3 (i64 i) {
+        this.x = i as f64;
+        this.y = i as f64;
+        this.z = i as f64;
+    }
+
+    dvec3 (f64 i) {
+        this.x = i;
+        this.y = i;
+        this.z = i;
+    }
+
+    dvec3 (f64 x, f64 y, f64 z){
+        this.x = x as f64;
+        this.y = y as f64;
+        this.z = z as f64;
+    }
+
+    dvec3 (i32 x, i32 y, i32 z){
+        this.x = x as f64;
+        this.y = y as f64;
+        this.z = z as f64;
+    }
+
+    dvec3 (dvec2* v, i32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z;
+    }
+
+    dvec3 (dvec2* v, f32 z){
+        this.x = v.x;
+        this.y = v.y;
+        this.z = z;
+    }
+
+
+    fn length() -> f64 {
+        return Math.sqrt(x * x + y * y + z * z);
+    }
+
+    fn normalize() -> dvec3 v {
+        var len = length();
+        if (len == 0.0) {
+            v = {0, 0, 0};
+            return v;
+        }
+        v = { x / len, y / len, z / len };
+        return v;
+    }
+
+    fn dot(dvec3* other) -> f64 {
+        return x * other.x + y * other.y + z * other.z;
+    }
+
+    fn cross(dvec3* other) -> dvec3 v {
+        var cx = y * other.z - z * other.y;
+        var cy = z * other.x - x * other.z;
+        var cz = x * other.y - y * other.x;
+        v = { cx, cy, cz };
+        return v;
+    }
+
+}
+
+impl Add for dvec3 {
+    fn add(dvec3* other) -> dvec3 v {
+        v = { x + other.x, y + other.y, z + other.z }; return v;
+    }
+    fn add(f64 val) -> dvec3 v {
+        v = {x + val, y + val, z + val}; return v;
+    }
+    fn add(i32 val) -> dvec3 v {
+        v = {x + val, y + val, z + val}; return v;
+    }
+}
+
+impl Sub for dvec3 {
+    fn sub(dvec3* other) -> dvec3 v {
+        v = {x - other.x, y - other.y, z - other.z}; return v;
+    }
+    fn sub(f64 val) -> dvec3 v {
+        v = {x - val, y - val, z - val}; return v;
+    }
+    fn sub(i32 val) -> dvec3 v {
+        v = {x - val, y - val, z - val}; return v;
+    }
+}
+
+impl Mul for dvec3 {
+    fn mul(f64 scale) -> dvec3 v {
+        v = { x * scale, y * scale, z * scale }; return v;
+    }
+    fn mul(i32 scale) -> dvec3 v {
+        v = { x * scale, y * scale, z * scale }; return v;
+    }
+}
+
+impl Div for dvec3 {
+    fn div(f64 scale) -> dvec3 v {
+        v = {x / scale, y / scale, z / scale }; return v;
+    }
+    fn div(i32 scale) -> dvec3 v {
+        v = {x / scale, y / scale, z / scale }; return v;
+    }
+}
+
+impl Eq for dvec3 {
+    fn eq(dvec3* other) -> bool {
+        return x == other.x && y == other.y && z == other.z;
+    }
+    fn eq(f64 i) -> bool {
+        return x == i && y == i && z == i;
+    }
+    fn eq(i32 i) -> bool {
+        return x == i && y == i && z == i;
+    }
+}
+
+impl Neg for dvec3 {
+    fn neg() -> dvec3 v {
         v = {0 - x, 0 - y, 0 - z}; return v;
     }
 }

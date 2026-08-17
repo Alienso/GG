@@ -429,9 +429,9 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
             paramType = Type{TypeKind::Error};  // suppress cascading errors in the body
         }
         if (paramType.kind == TypeKind::Object) {
-            error(param.typeName, "object parameter '" + param.name.lexeme
-                  + "' must be passed by reference; declare it as '" + paramType.className + "&'");
-            paramType = Type{TypeKind::Error};
+            // A bare value-object parameter is sugar for a non-owning class borrow (see the identical
+            // note at the other param-check sites): `Obj o` behaves like `Obj*`.
+            paramType = makeBorrowType(paramType.className);
         }
         bool paramMutable = paramIsMutable(param, paramType);
         Symbol sym{
@@ -551,9 +551,13 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
                 paramType = Type{TypeKind::Error};
             }
             if (paramType.kind == TypeKind::Object) {
-                error(param.typeName, "object parameter '" + param.name.lexeme
-                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
-                paramType = Type{TypeKind::Error};
+                // A bare value-object parameter is sugar for a non-owning class borrow — GG objects are
+                // address-backed (no by-value struct-param ABI), so `Obj o` behaves like `Obj*`: the arg
+                // (an object value or an owning ref) coerces to the borrow, member/method access works
+                // through it, and `field = o` clones into a value field. Codegen's resolveParamType maps
+                // it to the same borrow. This is what makes a by-value generic (`Pair<String,String>`,
+                // ctor `Pair(T t, V v)`) work uniformly alongside primitive and reference type args.
+                paramType = makeBorrowType(paramType.className);
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
                     Symbol::Kind::Variable, paramType, param.name, {},
@@ -641,9 +645,13 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
                 paramType = Type{TypeKind::Error};
             }
             if (paramType.kind == TypeKind::Object) {
-                error(param.typeName, "object parameter '" + param.name.lexeme
-                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
-                paramType = Type{TypeKind::Error};
+                // A bare value-object parameter is sugar for a non-owning class borrow — GG objects are
+                // address-backed (no by-value struct-param ABI), so `Obj o` behaves like `Obj*`: the arg
+                // (an object value or an owning ref) coerces to the borrow, member/method access works
+                // through it, and `field = o` clones into a value field. Codegen's resolveParamType maps
+                // it to the same borrow. This is what makes a by-value generic (`Pair<String,String>`,
+                // ctor `Pair(T t, V v)`) work uniformly alongside primitive and reference type args.
+                paramType = makeBorrowType(paramType.className);
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
                     Symbol::Kind::Variable, paramType, param.name, {},
@@ -801,9 +809,13 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
                 paramType = Type{TypeKind::Error};
             }
             if (paramType.kind == TypeKind::Object) {
-                error(param.typeName, "object parameter '" + param.name.lexeme
-                      + "' must be passed by reference; declare it as '" + paramType.className + "&'");
-                paramType = Type{TypeKind::Error};
+                // A bare value-object parameter is sugar for a non-owning class borrow — GG objects are
+                // address-backed (no by-value struct-param ABI), so `Obj o` behaves like `Obj*`: the arg
+                // (an object value or an owning ref) coerces to the borrow, member/method access works
+                // through it, and `field = o` clones into a value field. Codegen's resolveParamType maps
+                // it to the same borrow. This is what makes a by-value generic (`Pair<String,String>`,
+                // ctor `Pair(T t, V v)`) work uniformly alongside primitive and reference type args.
+                paramType = makeBorrowType(paramType.className);
             }
             if (!symbolTable.declare(param.name.lexeme, Symbol{
                     Symbol::Kind::Variable, paramType, param.name, {},

@@ -1,0 +1,45 @@
+// e2e: one by-value Pair<T,V> constructor serves primitives, value-objects (borrow + clone; source
+// stays valid), and owning references (co-own). A live-object counter proves no leak / double-free
+// across all forms. Expected exit code: 0.
+import "std/utility/Pair.gg";
+
+class Counted {
+    mut i32 v;
+    mut static i32 live;
+    Counted(i32 v) { this.v = v; Counted::live = Counted::live + 1; }
+    ~Counted() { Counted::live = Counted::live - 1; }
+}
+// A copy is a new live object; `impl Clone` both counts it and suppresses the generated memberwise
+// clone (so there's exactly one @Counted_clone). A retained reference is NOT a new object, so the
+// owning-reference Pair doesn't clone.
+impl Clone for Counted {
+    fn clone(Counted& src) mut { this.v = src.v; Counted::live = Counted::live + 1; }
+}
+
+fn run() -> i32 {
+    // primitives (value)
+    Pair<i32, i32> a = {3, 4};
+    if (a.first + a.second != 7) { return 1; }
+
+    // value-objects (borrow + clone) — sources c1/c2 must stay valid
+    Counted c1 = {10};
+    Counted c2 = {20};
+    Pair<Counted, Counted> b = {c1, c2};
+    if (b.first.v + b.second.v != 30) { return 2; }
+    if (c1.v != 10) { return 3; }            // source not consumed
+
+    // owning references (co-own)
+    Counted& r1 = new Counted(100);
+    Counted& r2 = new Counted(200);
+    Pair<Counted&, Counted&> d = {r1, r2};
+    if (d.first.v + d.second.v != 300) { return 4; }
+
+    return 0;
+}
+
+fn main() -> i32 {
+    i32 rc = run();
+    if (rc != 0) { return rc; }
+    if (Counted::live != 0) { return 99; }   // everything freed exactly once
+    return 0;
+}

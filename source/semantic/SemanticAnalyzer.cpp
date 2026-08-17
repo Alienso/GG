@@ -245,7 +245,14 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         std::vector<Type> paramTypes;
         std::vector<bool> paramMut;
         for (const ParamDecl& p : md.params) {
-            paramTypes.push_back(resolveTypeToken(p.typeName));
+            Type pt = resolveTypeToken(p.typeName);
+            // A bare value-object parameter is a non-owning borrow (see analyzeFunctionDecl). Apply
+            // the same mapping here so the overload registry, body checking, and codegen all agree on
+            // the param type (and thus its mangled symbol) — otherwise an *overloaded* object-param
+            // method would register as `$Obj` but emit `$Obj.brw`, and `f(Obj o)`/`f(Obj*)` (the same
+            // borrow) would slip past duplicate detection into a raw codegen symbol collision.
+            if (pt.kind == TypeKind::Object) pt = makeBorrowType(pt.className);
+            paramTypes.push_back(pt);
             paramMut.push_back(p.isMut);
         }
         // Overload set per name. Enums may not overload (single ctor / fixed method set).
@@ -720,7 +727,11 @@ void SemanticAnalyzer::collectFunctions(const Program& program) {
             std::vector<Type> paramTypes;
             std::vector<bool> paramMut;
             for (const ParamDecl& param : function.params) {
-                paramTypes.push_back(resolveTypeToken(param.typeName));
+                Type pt = resolveTypeToken(param.typeName);
+                // Bare value-object param → non-owning borrow, consistent with body + codegen so the
+                // registered signature (and its mangling) matches what's emitted.
+                if (pt.kind == TypeKind::Object) pt = makeBorrowType(pt.className);
+                paramTypes.push_back(pt);
                 paramMut.push_back(param.isMut);
             }
             Type returnType = resolveTypeToken(function.returnType);

@@ -96,15 +96,16 @@ TEST_CASE("Lambda - a multi-parameter signature analyzes clean", "[lambda][seman
     REQUIRE_FALSE(r.hadError);
 }
 
-TEST_CASE("Lambda - a value-object parameter in a Call signature is rejected", "[lambda][semantic]") {
-    StderrCapture cap;
+TEST_CASE("Lambda - a value-object parameter in a Call signature is accepted (borrow)", "[lambda][semantic]") {
+    // A bare object parameter is now sugar for a non-owning class borrow, so a lambda over a `Call`
+    // signature may spell its object parameter as `Point` (it behaves like `Point*`). Previously this
+    // was a hard "must be passed by reference" error.
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         fn apply<F: Call(Point) -> i32>(F& f, Point& p) -> i32 { return f(p); }
         fn main() -> i32 { Point p(3); return apply((Point q) -> i32 { return q.x; }, p); }
     )");
-    REQUIRE(r.hadError);
-    REQUIRE(cap.contains("must be passed by reference"));
+    REQUIRE_FALSE(r.hadError);
 }
 
 TEST_CASE("Lambda - untyped parameters infer from the Call bound", "[lambda][semantic]") {

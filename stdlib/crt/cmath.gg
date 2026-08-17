@@ -3,22 +3,28 @@
 // Wraps the standard math functions from <math.h>.
 // All functions operate on f64 (double precision).
 
-extern sin(f64 x) -> f64;              // sine of x (radians)
-extern cos(f64 x) -> f64;              // cosine of x (radians)
-extern tan(f64 x) -> f64;              // tangent of x (radians)
-extern asin(f64 x) -> f64;             // arc sine (result in radians)
-extern acos(f64 x) -> f64;             // arc cosine (result in radians)
-extern atan(f64 x) -> f64;             // arc tangent (result in radians)
-extern atan2(f64 y, f64 x) -> f64;     // arc tangent of y/x using quadrant signs
-extern sqrt(f64 x) -> f64;             // square root
-extern cbrt(f64 x) -> f64;             // cube root
-extern pow(f64 base, f64 exp) -> f64;  // base raised to the power exp
-extern exp(f64 x) -> f64;              // e raised to the power x
-extern log(f64 x) -> f64;              // natural logarithm (base e)
-extern log2(f64 x) -> f64;             // base-2 logarithm
-extern log10(f64 x) -> f64;            // base-10 logarithm
-extern fabs(f64 x) -> f64;             // absolute value
-extern floor(f64 x) -> f64;            // round toward negative infinity
-extern ceil(f64 x) -> f64;             // round toward positive infinity
-extern round(f64 x) -> f64;            // round to nearest integer (halfway rounds away from zero)
-extern fmod(f64 x, f64 y) -> f64;      // floating-point remainder of x / y
+extern sin(f64 x) -> f64;
+extern cos(f64 x) -> f64;
+extern tan(f64 x) -> f64;
+extern asin(f64 x) -> f64;
+extern acos(f64 x) -> f64;
+extern atan(f64 x) -> f64;
+extern atan2(f64 y, f64 x) -> f64;
+extern sqrt(f64 x) -> f64;
+extern cbrt(f64 x) -> f64;
+extern pow(f64 base, f64 exp) -> f64;
+extern exp(f64 x) -> f64;
+extern log(f64 x) -> f64;
+extern log2(f64 x) -> f64;
+extern log10(f64 x) -> f64;
+extern fabs(f64 x) -> f64;
+extern floor(f64 x) -> f64;
+extern ceil(f64 x) -> f64;
+extern round(f64 x) -> f64;
+extern fmod(f64 x, f64 y) -> f64;
+extern fmin(f64 x, f64 y) -> f64;
+extern fmax(f64 x, f64 y) -> f64;
+extern abs(i32 x) -> i32;
+extern labs(i64 x) -> i64;
+extern fbs(f64 x) -> f64;
+extern fabsf(f32 x) -> f32;

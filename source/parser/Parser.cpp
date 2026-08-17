@@ -257,17 +257,18 @@ Token Parser::consumeTypeCore() {
     }
 
     // Borrow: `T*` → synthesized "ref:T" (a non-owning reference). The inner type may be a
-    // class/`Self` (a class borrow) or a primitive value type (`i32*`, an lvalue reference to the
-    // primitive — like C++'s `int&`). `ptr`/`void` cannot be borrowed. A generic `T*` reaches here
-    // only after monomorphization has substituted T with a concrete type token (which may itself
-    // be a mangled generic instantiation, e.g. `Vec$i32*`).
+    // class/`Self` or a primitive value type (`i32*`, an lvalue reference to the primitive — like
+    // C++'s `int&`; `str*` included — `str` is an ordinary `{ptr,i64}` value type with the same
+    // addressable-storage story as any other primitive). `ptr`/`void` cannot be borrowed (opaque,
+    // no fixed IR representation to take an lvalue reference to). A generic `T*` reaches here only
+    // after monomorphization has substituted T with a concrete type token (which may itself be a
+    // mangled generic instantiation, e.g. `Vec$i32*`).
     if (check(TokenType::STAR)) {
         bool primitiveInner = isTypeKeyword(base.type)
-                              && base.type != TokenType::PTR && base.type != TokenType::VOID
-                              && base.type != TokenType::STR;   // `str` is a view, not a borrowable lvalue
+                              && base.type != TokenType::PTR && base.type != TokenType::VOID;
         if (!(classLike || primitiveInner))
             throw error(peek(), "'*' borrow is only allowed on class types, `Self`, or a primitive "
-                                "like `i32`; `ptr`, `void`, and `str` cannot be borrowed");
+                                "like `i32`; `ptr` and `void` cannot be borrowed");
         advance();  // consume '*'
         std::string inner = base.type == TokenType::SELF ? "Self" : lexeme;
         return Token{ TokenType::IDENTIFIER, "ref:" + inner, line };

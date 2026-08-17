@@ -88,10 +88,29 @@ TEST_CASE("str - a raw ptr does NOT implicitly convert to str", "[str][semantic]
     REQUIRE(result.hadError);
 }
 
-TEST_CASE("str - `str*` (borrowing a str) is a parse error", "[str][parser]") {
-    StderrCapture cap;
-    parseString("fn f(str* s) { }");
-    REQUIRE(cap.contains("cannot be borrowed"));
+TEST_CASE("str - `str*` (borrowing a str) parses and type-checks", "[str][parser]") {
+    // `str` is an ordinary `{ptr,i64}` value type with the same addressable-storage story as any
+    // other primitive, so a borrow of it is exactly as safe as `i32*`/`f64*` — no reason to reject
+    // it. (Only `ptr`/`void` remain rejected: opaque, no fixed IR representation to borrow.)
+    auto result = analyzeString("fn f(str* s) -> str { return s; }");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("str - `str*` borrows a local, materializes a temp for a literal, and supports write-through", "[str][codegen]") {
+    auto ir = codegenString(R"(
+        fn takeStr(str* s) -> str { return s; }
+        fn writeThrough(mut str* s) { s = "changed"; }
+        fn main() -> i32 {
+            str a = "hello";
+            str b = takeStr(a);
+            mut str c = "before";
+            writeThrough(c);
+            str d = takeStr("literal");
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("@takeStr(") != std::string::npos);
+    REQUIRE(ir.find("@writeThrough(") != std::string::npos);
 }
 
 // ------------------------------------------------------------

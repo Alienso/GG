@@ -255,7 +255,17 @@ Type SemanticAnalyzer::analyzeDestroy(const DestroyExpr& destroy) {
 //   - an owning-reference local `Point& r` -> ptr<Point&> (address of the SLOT HOLDING the
 //     reference — one level of indirection above the object itself, i.e. a pointer-to-pointer;
 //     this is what a C API that writes a new pointer back to you, e.g. an allocator out-param,
-//     needs). A borrow (`Point*`/`i32*`) or nullable/enum local is rejected in v1.
+//     needs).
+//   - a `ptr`/`ptr<T>`-typed local     -> ptr<ptr>   (address of the slot holding THAT pointer —
+//     the same "one level of indirection above the stored value" rule as the reference case
+//     above, needed for a C API whose out-param is itself a pointer, e.g. `strtol`'s
+//     `char **endptr`). The inner element collapses to a generic `ptr` regardless of the
+//     original `ptr<T>`'s T: `Type::elementKind` is a single flat field (not a nested `Type`),
+//     so `ptr<ptr<Point>>` can't be represented distinctly from `ptr<ptr<i32>>` — but this loses
+//     nothing at the IR level (every pointer is opaque `ptr` in LLVM) and matches the existing
+//     `ptr<T>`/`ptr` free-interconversion rule (see `canImplicitlyCast`); an explicit cast can
+//     re-specialize the inner type at the read site if needed (`(slot[0] as ptr<Foo>)`).
+// A borrow (`Point*`/`i32*`) or nullable/enum local is rejected in v1.
 Type SemanticAnalyzer::analyzeAddressOf(const AddressOfExpr& addressOf) {
     const auto* id = addressOf.place->node
         ? std::get_if<IdentifierExpr>(addressOf.place->node.get())
@@ -276,12 +286,14 @@ Type SemanticAnalyzer::analyzeAddressOf(const AddressOfExpr& addressOf) {
             return makeTypedPtr(TypeKind::Object, t.className);
         else if (t.kind == TypeKind::Reference && !t.borrow)
             return makeTypedPtr(TypeKind::Reference, t.className);
+        else if (t.kind == TypeKind::Ptr || t.kind == TypeKind::TypedPtr)
+            return makeTypedPtr(TypeKind::Ptr);
         else if (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char)
             return makeTypedPtr(t.kind);
         else
             error(addressOf.keyword, "'addressOf' is not supported for '" + typeName(t)
-                  + "' locals yet (v1 supports primitives, value objects, and owning 'Class&' "
-                  "references)");
+                  + "' locals yet (v1 supports primitives, value objects, owning 'Class&' "
+                  "references, and ptr/ptr<T>)");
     }
     return Type{TypeKind::Error};
 }

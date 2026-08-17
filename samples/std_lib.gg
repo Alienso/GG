@@ -67,18 +67,12 @@ fn main() -> i32 {
     Instance i1 = {1 , 2};
     Instance i2 = {3, 4};
     Pair<Instance, Instance> pair4 = {i1, i2};
-    print(pair4.first.x);
-    print(",");
-    println(pair4.second.x);
 
     Instance& i3 = new Instance{1,2};
     Instance& i4 = new Instance{3,4};
     Pair<Instance&, Instance&> pair5 = {i3, i4};
-    print(pair5.first.x);
-    print(",");
-    println(pair5.second.x);
 
-    i32? t = parseInt2("56aa");
+    i32? t = parseI32("56aa");
     if (t != null){
         println(t);
     }

@@ -1654,6 +1654,14 @@ take directly. Gated behind `--unsafe-ptr` like every other raw-pointer construc
     indirection *above* the object itself (a pointer-to-pointer). This is deliberate, not a
     primitive/object at wraparound — it's what a C API that writes a pointer back to you (an
     allocator out-param) needs; dereferencing the slot once (`slot[0]`) yields the reference back.
+  - **`ptr`/`ptr<T>`-typed local** → `ptr<ptr>` — same "one level of indirection above the stored
+    value" rule as the reference case, for a C API whose out-param is itself a pointer (e.g.
+    `strtoll`'s `char **endptr`). The inner element always collapses to a generic `ptr` regardless
+    of the original `ptr<T>`'s `T` — `Type::elementKind` is a single flat field, not a nested
+    `Type`, so `ptr<ptr<Point>>` can't be represented distinctly from `ptr<ptr<i32>>` — but this
+    loses nothing at the IR level (every pointer is opaque `ptr` in LLVM) and matches the existing
+    `ptr<T>`/`ptr` free-interconversion rule; an explicit cast re-specializes the inner type at the
+    read site if needed (`slot[0] as ptr<Foo>`).
   - Rejected (v1, clean errors): borrow-typed locals (`Point*`/`i32*` — a borrow's slot already
     holds just a `ptr`, and doubling it needs no distinct spelling GG has), nullable locals, and
     enums (no synthesized-type support for a `ptr<Enum>` element yet).
@@ -1964,6 +1972,27 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1332 test cases / 2482 assertions** (as of extending **`addressOf`** to accept a `ptr`/`ptr<T>`-typed
+local, returning `ptr<ptr>` — the missing piece for binding a C API whose out-param is itself a
+pointer (`strtoll`'s `char **endptr`), motivated by fixing the `parseInt2` draft in
+`stdlib/Number.gg`. The inner element always collapses to a generic `ptr` regardless of the source
+`ptr<T>`'s `T` (a representation limit of `Type::elementKind` being a flat field, not a nested
+`Type` — harmless, since every pointer is opaque `ptr` at the IR level anyway). `parseInt2` now
+correctly: takes `end`'s address via `addressOf`, detects a no-digits-consumed failure via
+`end == s.data` (pointer identity, riding the earlier `emitEquality` fix), and range-checks the
+result against `i32` bounds before returning — using `strtoll` (`long long`, 64-bit on every
+mainstream target), NOT the pre-existing `strtol` declaration, which returns C's `long` — 32-bit on
+Windows (LLP64) but 64-bit on Linux (LP64), so an `i64`-declared `strtol` silently mis-widens/
+truncates depending on target and defeats an overflow check (flagged in a comment in
+`crt/util.gg`, left in place since nothing else used it). Also fixed a real, unrelated bug found
+while verifying it end-to-end: `Number.gg` imported its CRT siblings via the `"std/…"` prefix
+(meant for external callers) instead of the file-relative form every other stdlib file uses
+(`"crt/…"`) — harmless through the real compiler (stdlib dir is always configured there), but a
+landmine for anything resolving the file without that config. Fixed by switching to relative
+imports, matching convention. `tests/address_of_tests.cpp` (+2: `ptr` and `ptr<T>` locals now
+accept; the old "rejects a raw-ptr local" case is gone, superseded) — no stdlib-file-specific unit
+tests added yet (not needed for this fix; verified instead via a throwaway e2e probe, run and then
+discarded). Prior baseline was
 **1331 test cases / 2482 assertions** (as of adding the **`addressOf(local)` intrinsic** — a raw,
 typed `ptr<T>` address of a local variable's/parameter's own storage slot, for binding to C APIs
 that need an out-parameter address (`T*` borrows only ever produced a GG reference, never a raw
@@ -1991,25 +2020,8 @@ invariant: the slot is always a valid fall-through result, so no check applies t
 `warn`→`error` flip, no new logic. Verified no regression by compiling every file under `e2e/` and
 `samples/` — none relied on the old warning-only behavior. Two `tests/semantic_tests.cpp` cases
 flipped from asserting a captured "Warning" to asserting `result.hadError` (net −2 assertions, same
-test count). Prior baseline was
-**1309 test cases / 2451 assertions** (as of a **QA edge-case pass over the value-object-param-as-borrow
-feature** that found + fixed a **pre-existing overload-mangling collision** the feature widened
-exposure to: `mangleType` rendered *every* `Reference`-kind type as `className + ".ref"`, ignoring the
-`borrow` flag AND a primitive borrow's element kind — so `Obj&`≡`Obj*`≡`Obj o` all mangled `Obj.ref`
-and `i32*`≡`f64*` both mangled a bare `.ref`, and any two such overloads emitted colliding LLVM
-symbols (a raw clang "invalid redefinition", not a GG diagnostic). Fixed by mangling a **borrow** as
-`.brw` (with the element type encoded for primitive borrows: `i32.brw`) distinct from an **owning**
-`.ref`; and by making the two param-collection sites (`collectFunctions`, `buildClassInfo`) apply the
-same object→borrow mapping the body loops + codegen use, so the overload registry, body, and emitted
-symbol all agree (otherwise an *overloaded* object-param function registered `$Obj` but emitted
-`$Obj.brw` → latent link error, and `f(Obj o)`/`f(Obj*)` slipped past duplicate detection). Now
-`f(Obj o)`+`f(Obj&)` and `f(i32*)`+`f(f64*)` coexist, while `f(Obj o)`+`f(Obj*)` is a clean
-duplicate-signature error. The pass also verified (all correct) `mut Obj o` write-through, shared
-`Obj o` rejecting `mut`-method calls, returning a bare-object param as an owning ref being rejected
-(borrow can't widen to `&`), and a raw-ptr-owning value-object param (`String`) deep-cloning into a
-field with the source staying valid. `tests/overload_tests.cpp` (`[overload][byref]`, +3),
-`tests/class_tests.cpp` (`[byref]`). (Older baseline entries are pruned — this section keeps only
-the last 3; full history is in git.)
+test count). (Older baseline entries are pruned — this section keeps only the last 3; full history
+is in git.)
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released
@@ -2022,9 +2034,7 @@ exactly once (balanced counter ⇒ no leak; a double-free crashes). Complemented
 
 - **New language feature added** (new syntax, new type kind, new statement/expression node):
   update the architecture summary and any relevant invariants.
-- **New test milestone**: update the test baseline count after a feature lands. **Cap the Test
-  baseline section at the 3 most recent entries** — prepend the new entry and delete the oldest so
-  the chain never exceeds 3. Do NOT keep appending indefinitely; git holds the full history.
+- **New test milestone**: update the test baseline count after a feature lands.
 - **New source file or directory**: add it to the relevant section.
 - **Invariant changes** (e.g. a data structure changes type, a new `const` member is added):
   update the Key Invariants section.

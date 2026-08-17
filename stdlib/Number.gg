@@ -1,5 +1,5 @@
-import "std/crt/util.gg";
-import "std/crt/cmem.gg";
+import "crt/util.gg";
+import "crt/cmem.gg";
 
 class Integer {
 
@@ -21,120 +21,62 @@ class Integer {
 }
 
 
-fn parseInt2(str s) -> i32? {
-    ptr<i32> end = 0 as ptr;
-    i64 res = strtol(s.data, end, 0);
-    if (end == '\0' as i32){
+// NOTE: for T = i64, an input that genuinely overflows i64 is silently clamped by strtoll to
+// i64::MIN/MAX (no errno check here), so it is NOT detected as out-of-range — only i8/i16/i32 get
+// a real independent overflow check, since their bounds are strictly narrower than i64's.
+fn parseInt<T>(str s, T min, T max) -> T? {
+    ptr end = 0 as ptr;
+    i64 res = strtoll(s.data, addressOf(end), 0);
+    if (end == s.data) {
         return null;
     }
-    return res;
-}
-
-fn parseInt<T>(str s, T limit) -> T? {
-
-    i32 len = s.len as i32;
-    if (len <= 0) {
+    ptr<u8> endBytes = end;
+    if (endBytes[0] != 0) {
         return null;
     }
-
-    bool negative;
-    if (s[0] == '-'){
-        negative = true;
-    } else {
-        negative = false;
-    }
-
-    mut i32 i = 0;
-    mut i8 digit;
-    mut T result = 0;
-    mut T multmin;
-
-    if (len > 0) {
-        char firstChar = s[0];
-        if (firstChar < '0') { // Possible leading "+" or "-"
-            if (firstChar != '-' && firstChar != '+')
-                return null;   // some other non-digit character below '0'
-
-            if (len == 1) // Cannot have lone "+" or "-"
-                return null;
-            i++;               // skip the sign; `negative` was already set from s[0]
-        }
-        multmin = limit / 10;
-        while (i < len) {
-            // Accumulating negatively avoids surprises near MAX_VALUE
-            digit = (s[i++] as i8) - 48;
-            if (digit < 0 || digit > 9) {   // reject any non-digit (below '0' OR above '9')
-                return null;
-            }
-            if (result < multmin) {
-                return null;
-            }
-            result *= 10;
-            if (result < limit + digit) {
-                return null;
-            }
-            result -= digit;
-        }
-    }
-
-    if (negative){
-        return result;
-    }
-
-    return -result;
-}
-
-fn parseUInt<T>(str s, T limit) -> T? {
-    i32 len = s.len as i32;
-    if (len <= 0) {
+    if (res < min || res > max) {
         return null;
     }
-
-    mut i32 i = 0;
-
-    if (s[0] == '+') {
-        i++;
-    } else if (s[0] == '-') {
-        return null; // Unsigned cannot be negative
-    }
-
-    if (i >= len) {
-        return null; // Only sign or empty after sign
-    }
-
-    mut T result = 0;
-    mut u8 digit;
-
-    while (i < len) {
-
-        digit = (s[i++] as u8) - 48;
-        if (digit < 0 || digit > 9) {   // reject any non-digit (below '0' OR above '9')
-            return null;
-        }
-
-        result *= 10;
-        result += digit;
-    }
-
-    return result;
+    return res as T;
 }
 
 
-
-fn parseI32(str s) -> i32?{
-    return parseInt<i32>(s, s[0] == '-' ? Integer.MIN_I32 : -Integer.MIN_I32) as i32?;
+fn parseUInt<T>(str s, T max) -> T? {
+    if (s.len == 0) {
+        return null;
+    }
+    if (s[0] == '-') {
+        return null;   // unsigned cannot be negative; strtoull would otherwise wrap around
+    }
+    ptr end = 0 as ptr;
+    u64 res = strtoull(s.data, addressOf(end), 0);
+    if (end == s.data) {
+        return null;
+    }
+    ptr<u8> endBytes = end;
+    if (endBytes[0] != 0) {
+        return null;
+    }
+    if (res > max) {
+        return null;
+    }
+    return res as T;
 }
 
-fn parseI64(str s) -> i64?{
-    return parseInt<i64>(s, s[0] == '-' ? Integer.MIN_I64 : -Integer.MIN_I64);
+fn parseI32(str s) -> i32? {
+    return parseInt<i32>(s, Integer.MIN_I32, Integer.MAX_I32);
+}
+
+fn parseI64(str s) -> i64? {
+    return parseInt<i64>(s, Integer.MIN_I64, Integer.MAX_I64);
 }
 
 fn parseI8(str s) -> i8? {
-    return parseInt<i8>(s, s[0] == '-' ? Integer.MIN_I8 : -Integer.MIN_I8) as i8?;
+    return parseInt<i8>(s, Integer.MIN_I8, Integer.MAX_I8);
 }
 
 fn parseI16(str s) -> i16? {
-    return parseInt<i16>(s, s[0] == '-' ? Integer.MIN_I16 : -Integer.MIN_I16) as i16?;
+    return parseInt<i16>(s, Integer.MIN_I16, Integer.MAX_I16);
 }
 
 fn parseU8(str s) -> u8? {
@@ -151,4 +93,30 @@ fn parseU32(str s) -> u32? {
 
 fn parseU64(str s) -> u64? {
     return parseUInt<u64>(s, Integer.MAX_U64);
+}
+
+fn parseF32(str s) -> f32? {
+    ptr end = 0 as ptr;
+    f32 res = strtof(s.data, addressOf(end));
+    if (end == s.data) {
+        return null;
+    }
+    ptr<u8> endBytes = end;
+    if (endBytes[0] != 0) {
+        return null;
+    }
+    return res;
+}
+
+fn parseF64(str s) -> f64? {
+    ptr end = 0 as ptr;
+    f64 res = strtod(s.data, addressOf(end));
+    if (end == s.data) {
+        return null;
+    }
+    ptr<u8> endBytes = end;
+    if (endBytes[0] != 0) {
+        return null;
+    }
+    return res;
 }

@@ -9,6 +9,8 @@
 //   - value-object local -> ptr<Class> (address of the struct's own storage)
 //   - owning-reference local -> ptr<Class&> (address of the SLOT HOLDING the reference — one level
 //     of indirection above the object, for APIs that write a pointer back to you)
+//   - ptr/ptr<T> local -> ptr<ptr> (address of the SLOT holding that pointer — same "one level of
+//     indirection" rule, for a C API whose out-param is itself a pointer, e.g. strtoll's `char**`)
 // ============================================================
 
 TEST_CASE("AddressOf - primitive local yields ptr<i32> and decays to plain ptr", "[addressof][semantic]") {
@@ -41,6 +43,31 @@ TEST_CASE("AddressOf - owning reference local yields ptr<Class&> (slot, not the 
         fn main() -> i32 {
             Point& r = new Point(5);
             ptr<Point&> slot = addressOf(r);
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("AddressOf - a bare ptr local yields ptr<ptr> (the strtoll endptr case)", "[addressof][semantic]") {
+    auto result = analyzeString(R"(
+        extern strtoll(ptr s, ptr end, i32 base) -> i64;
+        fn main() -> i32 {
+            ptr end = 0 as ptr;
+            i64 res = strtoll("42", addressOf(end), 0);
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("AddressOf - a ptr<T> local also yields ptr<ptr> (collapses the inner element)",
+          "[addressof][semantic]") {
+    auto result = analyzeString(R"(
+        extern malloc(u64 n) -> ptr;
+        fn main() -> i32 {
+            ptr<i32> buf = malloc(16);
+            ptr<ptr> slot = addressOf(buf);
             return 0;
         }
     )");
@@ -250,19 +277,6 @@ TEST_CASE("AddressOf - rejects a str local", "[addressof][semantic]") {
     REQUIRE(cap.contains("not supported for 'str'"));
 }
 
-TEST_CASE("AddressOf - rejects a raw-ptr local (v1: no ptr-to-ptr)", "[addressof][semantic]") {
-    StderrCapture cap;
-    auto result = analyzeString(R"(
-        extern malloc(u64 n) -> ptr;
-        fn main() -> i32 {
-            ptr<i32> buf = malloc(16);
-            var p = addressOf(buf);
-            return 0;
-        }
-    )");
-    REQUIRE(result.hadError);
-    REQUIRE(cap.contains("not supported for 'ptr<i32>'"));
-}
 
 TEST_CASE("AddressOf - rejects an array local", "[addressof][semantic]") {
     StderrCapture cap;

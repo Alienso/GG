@@ -182,3 +182,9 @@ fn println(bool b) { print(b); putchar(10); }
 fn println(char c) { print(c); putchar(10); }
 fn println(String& s) { print(s); putchar(10); }
 fn println(str s) { print(s); putchar(10); }
+
+fn printObj<T>(T obj) {
+    inline for (f in @fields(T)) {
+        print(f.name); print(": "); print(@field(obj, f.name)); print("\n");
+    }
+}

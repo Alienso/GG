@@ -37,43 +37,43 @@ class vec2 {
 
 impl Add for vec2 {
     fn add(vec2* other) -> vec2 v {
-        v = { x + other.x, y + other.y }; return v;
+        v = { x + other.x, y + other.y };
     }
     fn add(i32 val) -> vec2 v {
-        v = {x + val, y + val}; return v;
+        v = {x + val, y + val};
     }
     fn add(f32 val) -> vec2 v {
-        v = {x + val, y + val}; return v;
+        v = {x + val, y + val};
     }
 }
 
 impl Sub for vec2 {
     fn sub(vec2* other) -> vec2 v {
-        v = {x - other.x, y - other.y}; return v;
+        v = {x - other.x, y - other.y};
     }
     fn sub(i32 val) -> vec2 v {
-        v = {x - val, y - val}; return v;
+        v = {x - val, y - val};
     }
     fn sub(f32 val) -> vec2 v {
-        v = {x - val, y - val}; return v;
+        v = {x - val, y - val};
     }
 }
 
 impl Mul for vec2 {
     fn mul(i32 scale) -> vec2 v {
-        v = { x * scale, y * scale }; return v;
+        v = { x * scale, y * scale };
     }
     fn mul(f32 scale) -> vec2 v {
-        v = { x * scale, y * scale }; return v;
+        v = { x * scale, y * scale };
     }
 }
 
 impl Div for vec2 {
     fn div(i32 scale) -> vec2 v {
-        v = {x / scale, y / scale }; return v;
+        v = {x / scale, y / scale };
     }
     fn div(f32 scale) -> vec2 v {
-        v = {x / scale, y / scale }; return v;
+        v = {x / scale, y / scale };
     }
 }
 
@@ -91,7 +91,7 @@ impl Eq for vec2 {
 
 impl Neg for vec2 {
     fn neg() -> vec2 v {
-        v = {0 - x, 0 - y}; return v;
+        v = {0 - x, 0 - y};
     }
 }
 
@@ -117,31 +117,31 @@ class ivec2 {
 
 impl Add for ivec2 {
     fn add(ivec2* other) -> ivec2 v {
-        v = { x + other.x, y + other.y }; return v;
+        v = { x + other.x, y + other.y };
     }
     fn add(i32 val) -> ivec2 v {
-        v = {x + val, y + val}; return v;
+        v = {x + val, y + val};
     }
 }
 
 impl Sub for ivec2 {
     fn sub(ivec2* other) -> ivec2 v {
-        v = {x - other.x, y - other.y}; return v;
+        v = {x - other.x, y - other.y};
     }
     fn sub(i32 val) -> ivec2 v {
-        v = {x - val, y - val}; return v;
+        v = {x - val, y - val};
     }
 }
 
 impl Mul for ivec2 {
     fn mul(i32 scale) -> ivec2 v {
-        v = { x * scale, y * scale }; return v;
+        v = { x * scale, y * scale };
     }
 }
 
 impl Div for ivec2 {
     fn div(i32 scale) -> ivec2 v {
-        v = {x / scale, y / scale }; return v;
+        v = {x / scale, y / scale };
     }
 }
 
@@ -156,7 +156,7 @@ impl Eq for ivec2 {
 
 impl Neg for ivec2 {
     fn neg() -> ivec2 v {
-        v = {0 - x, 0 - y}; return v;
+        v = {0 - x, 0 - y};
     }
 }
 
@@ -192,43 +192,43 @@ class dvec2 {
 
 impl Add for dvec2 {
     fn add(dvec2* other) -> dvec2 v {
-        v = { x + other.x, y + other.y }; return v;
+        v = { x + other.x, y + other.y };
     }
     fn add(f64 val) -> dvec2 v {
-        v = {x + val, y + val}; return v;
+        v = {x + val, y + val};
     }
     fn add(i32 val) -> dvec2 v {
-        v = {x + val, y + val}; return v;
+        v = {x + val, y + val};
     }
 }
 
 impl Sub for dvec2 {
     fn sub(dvec2* other) -> dvec2 v {
-        v = {x - other.x, y - other.y}; return v;
+        v = {x - other.x, y - other.y};
     }
     fn sub(f64 val) -> dvec2 v {
-        v = {x - val, y - val}; return v;
+        v = {x - val, y - val};
     }
     fn sub(i32 val) -> dvec2 v {
-        v = {x - val, y - val}; return v;
+        v = {x - val, y - val};
     }
 }
 
 impl Mul for dvec2 {
     fn mul(f64 scale) -> dvec2 v {
-        v = { x * scale, y * scale }; return v;
+        v = { x * scale, y * scale };
     }
     fn mul(i32 scale) -> dvec2 v {
-        v = { x * scale, y * scale }; return v;
+        v = { x * scale, y * scale };
     }
 }
 
 impl Div for dvec2 {
     fn div(f64 scale) -> dvec2 v {
-        v = {x / scale, y / scale }; return v;
+        v = {x / scale, y / scale };
     }
     fn div(i32 scale) -> dvec2 v {
-        v = {x / scale, y / scale }; return v;
+        v = {x / scale, y / scale };
     }
 }
 
@@ -246,6 +246,6 @@ impl Eq for dvec2 {
 
 impl Neg for dvec2 {
     fn neg() -> dvec2 v {
-        v = {0 - x, 0 - y}; return v;
+        v = {0 - x, 0 - y};
     }
 }

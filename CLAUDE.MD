@@ -1632,6 +1632,53 @@ registry and folded away, riding the same reflection-expansion pipeline.
   is true. `extern` declarations are always exempt.
 - `compile.ps1` always passes `--unsafe-ptr`; test helpers default to `allowRawPtr = true`.
 
+### `addressOf(local)` — raw address of a local's storage slot (FFI/C-binding primitive)
+A `sizeof`/`destroy`-style intrinsic (`AddressOfExpr{keyword, place}`, same shape as `DestroyExpr`)
+that returns the raw address of a **local variable's or parameter's own storage slot** as a typed
+`ptr<T>`. Motivation: binding to a C API without pointers means no way to get an out-parameter
+address — `T*` (primitive borrow) only produces a GG *reference*, not a raw `ptr` an `extern` can
+take directly. Gated behind `--unsafe-ptr` like every other raw-pointer construct.
+- **v1 scope — locals only**: the operand must be a **bare identifier** naming an in-scope local or
+  parameter (`Symbol::Kind::Variable`) — no fields, array/`ptr<T>` elements, or `this` (unlike
+  `isLvalueExpr`'s broader "addressable" set used elsewhere for `T*` borrows). Codegen doesn't yet
+  extend the address-of-a-place logic to those shapes; a later pass could.
+- **The element type mirrors what the storage slot actually holds** (`analyzeAddressOf`,
+  `SemanticAnalyzer_Exprs.cpp`, right after `analyzeDestroy`) — every GG local is alloca-backed, and
+  `addressOf` never dereferences (unlike `genBorrowSource`, which follows an existing borrow through
+  to its referent):
+  - primitive local (`i32 x`) → `ptr<i32>` — address of the scalar's own storage.
+  - value-object local (`Point p`) → `ptr<Point>` — address of the struct's own storage (an object's
+    alloca already holds its bytes directly, same as any other local).
+  - **owning-reference local** (`Point& r`) → `ptr<Point&>` (the pre-existing `"ptr<Class.ref>"`
+    synthesized form) — the address of the **slot holding the pointer value**, i.e. one level of
+    indirection *above* the object itself (a pointer-to-pointer). This is deliberate, not a
+    primitive/object at wraparound — it's what a C API that writes a pointer back to you (an
+    allocator out-param) needs; dereferencing the slot once (`slot[0]`) yields the reference back.
+  - Rejected (v1, clean errors): borrow-typed locals (`Point*`/`i32*` — a borrow's slot already
+    holds just a `ptr`, and doubling it needs no distinct spelling GG has), nullable locals, and
+    enums (no synthesized-type support for a `ptr<Enum>` element yet).
+- **Codegen** (`genAddressOf`, right after `genDestroy`) is a two-line reuse of the existing
+  `resolveAssignTarget(name, ptr, type)` helper — it already returns a variable's alloca (or an
+  implicit-`this` field GEP, unreached here since semantics restricts to locals) for ANY declared
+  type, primitive or not, which is exactly the raw address wanted; no new codegen machinery.
+- **Incidental fixes made alongside** (both real, pre-existing gaps `addressOf` exposed, not new
+  restrictions):
+  1. `emitEquality` (`CodeGen_Exprs.cpp`) had no case for comparing two `ptr`/`ptr<T>` values —
+     `==`/`!=` fell through to the generic numeric-widening path (`commonArithmeticType`), which
+     doesn't recognize `Ptr`/`TypedPtr` and emitted a malformed `icmp ne i32` on pointer operands
+     (caught only by clang's IR verifier, since GG doesn't self-verify). Fixed by extending the
+     existing reference/enum address-identity branch to also cover `Ptr`/`TypedPtr` on either side —
+     `a == b` on two raw pointers is now a plain `icmp eq/ne ptr`, which is exactly what "did I get
+     the same address back" (the most natural thing to do with `addressOf`'s result) needs.
+  2. Explicit `as` casting (`analyzeCast`) has its own hand-rolled rule set — separate from
+     `canImplicitlyCast` — and never gained a `ptr ↔ ptr<T>` case even though the *implicit* path
+     (`canImplicitlyCast`, var-decl/assignment/call-arg binding) has freely allowed it since `ptr<T>`
+     shipped. So `someTypedPtr as ptr` is a clean "cannot cast" error today, while
+     `ptr p = someTypedPtr;` works. Left as-is (not fixed) — it's an existing, narrow, easily-worked-
+     around gap (use a binding instead of `as`), and out of scope for this feature; noted here as a
+     candidate follow-up.
+- Tests: `tests/address_of_tests.cpp` (`[addressof]`), `e2e/address_of_test.gg`.
+
 ### The `Clone` trait — a user deep-copy hook (Array<T> Phase 2)
 A built-in trait `Clone { fn clone(Self& src) mut; }` (a copy constructor): `this` = destination,
 `src` = source; the method deep-copies `src` into `this`. It unblocks storing **buffer-owning value
@@ -1917,6 +1964,34 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1331 test cases / 2482 assertions** (as of adding the **`addressOf(local)` intrinsic** — a raw,
+typed `ptr<T>` address of a local variable's/parameter's own storage slot, for binding to C APIs
+that need an out-parameter address (`T*` borrows only ever produced a GG reference, never a raw
+`ptr`). v1 scope: locals/parameters only; element type mirrors the slot (`ptr<i32>` for a primitive,
+`ptr<Point>` for a value object, `ptr<Point&>` — one level of indirection above the object — for an
+owning reference, per explicit design decision). Alongside it, fixed two small pre-existing gaps the
+feature exposed: (1) `emitEquality` had no `ptr`/`ptr<T>` case, so comparing two raw-pointer values
+mis-widened through the numeric path and emitted a malformed `icmp ne i32` (now a plain `icmp eq/ne
+ptr`, extending the existing reference/enum identity branch); (2) explicit `as` casting between
+`ptr`/`ptr<T>` was never wired up even though implicit binding already allowed it (documented, not
+fixed — a narrow, easily-worked-around gap, out of scope here). `tests/address_of_tests.cpp`
+(`[addressof]`, 22 cases — accept: primitive/value-object/owning-ref/parameter/bool/char/`var`-infer
++ the extern-`ptr` C-call flow; reject: no-`--unsafe-ptr`, non-identifier, field, borrow `T*`,
+nullable, enum, `str`, raw-`ptr` local, array, `this`, undeclared; codegen: alloca address,
+write-through, raw-ptr identity compare), `e2e/address_of_test.gg` (runtime: all three element kinds,
+the C out-param write-back via `memcpy`, and a live-object counter proving the reference-slot alias
+is refcount-balanced — no leak, no double-free). Prior baseline was
+**1309 test cases / 2449 assertions** (as of promoting the **missing-return check to a hard error**
+for a non-void function/method with **no** named return slot that can fall off the end without
+returning — previously only a `warn()`, so such code compiled and returned garbage at runtime. Gated
+identically to the pre-existing check (`currentReturnSlotName_.empty() && kind != Void &&
+!alwaysReturns(body)`, all four sites: free function, class method, impl method, enum method) — a
+function/method **with** an arrow-form return slot (`-> T v`) is unaffected (see the "Return aliases"
+invariant: the slot is always a valid fall-through result, so no check applies there at all). Purely a
+`warn`→`error` flip, no new logic. Verified no regression by compiling every file under `e2e/` and
+`samples/` — none relied on the old warning-only behavior. Two `tests/semantic_tests.cpp` cases
+flipped from asserting a captured "Warning" to asserting `result.hadError` (net −2 assertions, same
+test count). Prior baseline was
 **1309 test cases / 2451 assertions** (as of a **QA edge-case pass over the value-object-param-as-borrow
 feature** that found + fixed a **pre-existing overload-mangling collision** the feature widened
 exposure to: `mangleType` rendered *every* `Reference`-kind type as `className + ".ref"`, ignoring the
@@ -1933,758 +2008,8 @@ duplicate-signature error. The pass also verified (all correct) `mut Obj o` writ
 `Obj o` rejecting `mut`-method calls, returning a bare-object param as an owning ref being rejected
 (borrow can't widen to `&`), and a raw-ptr-owning value-object param (`String`) deep-cloning into a
 field with the source staying valid. `tests/overload_tests.cpp` (`[overload][byref]`, +3),
-`tests/class_tests.cpp` (`[byref]`). Prior baseline was
-**1306 test cases / 2445 assertions** (as of **a bare value-object parameter becoming sugar for a
-non-owning class borrow** — `fn f(Obj o)` ≡ `fn f(Obj* o)`, previously a hard "object parameter must
-be passed by reference" error). GG objects are address-backed (no by-value struct-param ABI), so a
-by-value object param can't be a copy anyway; lowering it to a `ptr` borrow (in both the semantic
-param loops and codegen's `resolveParamType`) is the natural fill-in — reads/method-calls go through
-the borrow, `field = o` into a value field clones (source not consumed), returns are escape-checked.
-The motivation: it lets **one by-value generic constructor `Pair(T t, V v)` serve every type
-argument** uniformly — `T` a primitive (copied), a value-object (borrow + clone), or an owning
-reference `Foo&` (co-owned) — because a reference is itself a `ptr` value that substitutes into `T t`
-with no sigil stacking (the C++ reference-collapsing / Rust references-are-values problem, sidestepped
-because GG references already lower to values). The stdlib `Pair<T,V>` (`stdlib/utility/Pair.gg`)
-switched to this single by-value ctor. Verified leak-free (borrow+clone for values, co-own for refs)
-via a live-object counter (`e2e/pair_test.gg`, exit 0). Two pre-existing "value-object param rejected"
-tests flipped to accept (class + lambda `Call`-signature), which is a strict capability gain.
-`tests/class_tests.cpp` (`[byref]`, +2), `tests/lambda_tests.cpp`, `e2e/pair_test.gg`. Prior baseline
-was
-**1304 test cases / 2441 assertions** (as of a batch of stdlib/diagnostics fixes: (1) **a silently
-swallowed broken import** — three of the four import-graph-walking passes (`scanModules`,
-`prescanTemplates`, `collectClassNames`) had NO diagnostic on a missing file (only `processFile` did),
-so a bad import buried in a working-looking chain (e.g. `stdlib/math/Vector.gg`'s own imports
-mistakenly duplicating its directory prefix) left a class silently unregistered and surfaced only as
-a baffling unrelated parser error three files away (`"expected ';' after expression"` on
-`Vec2 v1{1, 5.0}`) — never the actual "cannot find imported file" message. Fixed with a shared,
-deduped `reportMissingImport()` helper wired into all four passes. (2) **`fmin`/`fmax`** added to
-`stdlib/crt/cmath.gg` — genuinely non-variadic C99 functions, unlike the printf family, so no ABI
-concerns; the fix for `Vector3.gg`'s `min`/`max` usage is simply importing `crt/cmath.gg`. (3)
-**`print(char)`/`println(char)`** implemented in `stdlib/IO.gg` — `char` is a 32-bit Unicode code
-point, so printing it means UTF-8-encoding it (1-4 bytes by range); GG had a decoder (`String::
-charAt`) but no encoder anywhere. `print(char)` was a pre-existing **empty stub**; `println(char)`
-didn't exist at all. (4) **`str*` (a primitive borrow of `str`) is now allowed** — previously a parse
-error ("str is a view, not a borrowable lvalue"), but `str` is an ordinary `{ptr,i64}` value with the
-same addressable-storage story as `i32`/`f64`, so the restriction had no codegen or safety basis; it
-surfaced as a real blocker in `Pair<str, str>` (a generic class whose ctor takes `T*` borrow
-parameters, instantiated at `T=str`). Relaxing the parser gate required no other changes — the
-existing primitive-borrow codegen (auto-deref read, `mut`-write-through, temp-materialization for a
-literal/rvalue argument) is already generic over the borrowed type's IR representation.
-`tests/import_tests.cpp` (+1), `tests/str_tests.cpp` (`[str]`, the old str*-rejection test flipped to
-a str*-acceptance test, +1 codegen case). Prior baseline was
-**1302 test cases / 2438 assertions** (as of fixing **two pre-existing bugs** flagged earlier:
-(A) **`var` inference from a value-returning (sret) method call** — `var e = v.empty()` where
-`fn empty() -> Vec e` returns its own class by value silently failed to declare `e` ("use of
-undeclared identifier"). Root cause: `resolveTypeToken` resolved a bare class-name return type only
-against `classRegistry`, but a method's return type is resolved inside `buildClassInfo` *before* the
-owning class is registered — so `Vec` → `Error`, leaving the method's stored `returnType` `Error`;
-the explicit-typed path (`Vec e = v.empty()`) masked it by using the *declared* type, and only `var`
-inference reads the method's return type directly. Fixed by having `resolveTypeToken` fall back to the
-`declaredClassNames_`/`declaredEnumNames_` name pre-pass sets (populated before any `buildClassInfo`
-runs). This also fixes the for-in "value-returning sret call iterable" limitation (its `__forsrc` is a
-`mut var`). (B) **A bare generic constructor call `ClassName<T>(args)`** (value construction, no `new`)
-mis-parsed as the comparison `ClassName < T > (args)` → "type used as a value", because `parsePrimary`
-had branches for a generic *function* call and for `new Class<T>(...)` but none for a bare generic
-*class* constructor call (`new Wrap<i32>(...)` always worked). Fixed by adding the missing branch,
-mirroring the `new` path (mangle + `recordInstantiation`, then the mangled name flows through an
-ordinary constructor `CallExpr`). Both were found via focused probes narrowing the reported symptoms:
-bug A turned out method-specific (free-fn sret already worked), bug B turned out unrelated to the
-enclosing type param (a concrete `Wrap<i32>(x)` in a non-generic fn failed too). `tests/var_infer_tests.cpp`
-(`[var]`, +3), `tests/codegen_tests.cpp` (`[generics]`, +3), `e2e/var_infer_sret_test.gg`,
-`e2e/generic_ctor_call_test.gg`. Prior baseline was
-**1296 test cases / 2427 assertions** (as of a **QA edge-case pass over hex/octal literals** that
-found + fixed **two real bugs**: (1) a hex/octal integer literal used in a **float slot** (`f64 d =
-0xFF;`) emitted `store double 0xFF.0` — malformed IR caught only by clang (GG doesn't self-verify its
-IR); the f32 path fed the raw `0xFF` to `strtof` (platform-dependent). Both float paths now convert a
-prefixed literal to its decimal value first. (2) A separator-only prefixed literal `0x_`/`0o_` slipped
-through the lexer as a `NUMBER` token (the digit-presence check counted the `_` as progress) and later
-parsed to 0 with a misleading "does not fit" warning; the lexer now requires at least one REAL digit
-after the prefix → a clean "no digits after '0x'" lex error. The pass also verified (all correct)
-negated hex literals (`-0x10`), hex/octal in a float slot, hex array indices (incl. out-of-bounds →
-compile error), runtime switch-label matching on a hex label, and separator-placement oddities
-(`0x_FF`, `1__000`, `2000_`). `tests/cast_tests.cpp` (`[numlit]`, +7 cases), expanded
-`e2e/hex_octal_literal_test.gg`. Prior baseline was
-**1289 test cases / 2418 assertions** (as of **hex/octal integer literals + digit separators** —
-`0x1F`/`0X1F` (hex) and `0o17`/`0O17` (octal), plus `_` as a digit separator in any numeric literal
-(`1_000_000`, `1_234.5`). Deliberately **not** legacy C-style leading-zero octal (`017`) — an explicit
-`0o` prefix avoids that ambiguity footgun and the collision with a plain `0` literal. All in the
-lexer's digit-scan branch (hex/octal prefix detection via `isxdigit`/`0`-`7`, `_` accepted anywhere in
-the run) plus a new shared `Type.h`/`Type.cpp` helper trio (`stripDigitSeparators` /
-`isPrefixedIntegerLiteral` / `parseIntegerLiteral`) that **replaced 5 independent ad-hoc
-`std::stoull`/`std::stoll` call sites** (literal-magnitude check, IR emission, the switch-label dedup
-key, the array-size parser, and the constant-index-bounds check) — consolidating them is what makes
-hex/octal support consistent everywhere instead of correct in some places and silently wrong in
-others. Also fixed a latent misdetection: the existing "is this a decimal literal?" sniff looked for
-`.`/`e`/`E` in the lexeme, which would have misfired on a hex literal containing `e`/`E` as a hex
-digit (`0xFE`, `0xE0`) — now guarded by `isPrefixedIntegerLiteral`. No new AST/type-kind — only which
-*base* a literal's digits are read in changes; the existing numeric-literal-**adoption** logic is
-untouched. See the "Hex / octal literals + digit separators" invariant; `tests/cast_tests.cpp`
-(`[numlit]`, +16 cases), `e2e/hex_octal_literal_test.gg`. Prior baseline was
-**1273 test cases / 2388 assertions** (as of a **QA edge-case pass over borrow fields** that found +
-fixed a real **memory leak**: `genMemberAssign` retained on **every** reference-field store, so a
-borrow-field store (`it.arr = this`) wrongly retained its target with no matching release (a borrow
-field has no dtor) — silently leaking the entire collection on every `for`-loop. Caught only by a
-live-object counter (a leak doesn't change the exit code). Fixed with a dedicated borrow branch in
-`genMemberAssign` (plain pointer store, no retain/release, no `claimTemp`). The pass also found the
-relaxation wrongly allowed **primitive** borrow fields (`i32*`) — which codegen mishandles (it emitted
-`gg_retain` on the `i32` value → invalid IR); now restricted to **class** borrows only, with a clean
-"primitive borrow" reject. Added coverage: primitive-borrow reject, borrow-store no-retain (codegen),
-mixed borrow+owning-ref leak balance, and `e2e/foreach_borrow_leak_test.gg` (a `~Vec` counter returns
-to 0 after iterating). `tests/ref_tests.cpp` (`[ref]`, +2 cases). Prior baseline was
-**1271 test cases / 2384 assertions** (as of **borrow fields under `--unsafe-ptr` → a realloc-safe
-stdlib iterator**. A `Class*` borrow field — previously always rejected — is now **allowed when
-`--unsafe-ptr` is on** (lifetimes become the programmer's responsibility, like raw `ptr<T>`); it lowers
-to a plain `ptr`, is never retained/released (clone shallow-copies it, dtor skips it), and doesn't set
-`needsDtor`. This lets the stdlib `ArrayIter<T>` hold a **non-owning borrow of the collection**
-(`Array<T>*`) + an index and read `arr.size()`/`arr.get(pos)` **live** instead of snapshotting the
-buffer pointer — so a `grow()`/realloc **during** iteration is harmless (verified: `e2e/
-foreach_realloc_test.gg` grows the Array mid-loop with no crash). `it.arr = this` needs no cast
-(Object→`Class*` is already a Silent coercion). See the borrow-fields note under the `T*` invariant and
-the updated for-in stdlib bullet; `tests/ref_tests.cpp` (`[ref]`, gated accept/reject +1),
-`tests/foreach_tests.cpp` (`[foreach]`, +1 live-cursor case), `e2e/foreach_realloc_test.gg`. Prior
-baseline was
-**1269 test cases / 2380 assertions** (as of adding the **`Iterable` built-in trait** — the symmetric
-collection-side partner of `Iterator`. `Iterable` is convention-recognized (`isBuiltinTrait` +
-`builtinMethod` `{"Iterable","iter"}`), so a collection formally marks itself iterable with
-`impl<T> Iterable for Array<T> { fn iter() -> <cursor> … }` (conformance = has an `iter()` method — no
-associated types, same trick as `Iterator`/`Index`); an `impl Iterable` lacking `iter()` is a clean
-"must define method 'iter'" error, and `@implements(T, Iterable)` reflects membership. The stdlib
-`Array<T>::iter()` moved from the class body into `impl Iterable`. **The for-in desugar is unchanged** —
-it still lowers to `coll.iter()` by convention and does not yet gate on `Iterable` conformance (a future
-polish); `Iterable` is currently the formal marker + reflection query. `tests/foreach_tests.cpp`
-(`[foreach][iterable]`, +3 cases). Prior baseline was
-**1266 test cases / 2375 assertions** (as of a **QA edge-case pass over the for-in range loop** that
-found + fixed a real **use-after-free**: a reference-returning-**call** iterable (`for (x : make())`
-where `make() -> Array&`) released the call's `+1` temp — running the collection's dtor, freeing the
-buffer — at the `.iter()` statement boundary, *before* the loop body ran. Fixed by binding a
-temp-producing iterable (a call/`new`) to a `mut var __forsrc` local that lives for the whole loop
-(a plain place — identifier/member/`this`/index — is still iterated directly, no copy). The pass also
-verified break/continue, empty collections, unbraced bodies, primitive-borrow loop vars, member-access
-and `new` iterables all work, and surfaced a **pre-existing** `var x = <value-returning sret call>`
-non-declaration bug (flagged as a task; it narrowly blocks a value-returning-call iterable — bind to a
-local first). `tests/foreach_tests.cpp` (`[foreach]`, +6 cases), `e2e/foreach_test.gg` (+ref-call UAF
-case). Prior baseline was
-**1260 test cases / 2367 assertions** (as of the **`for (DECL : ITERABLE)` range loop + built-in
-`Iterator` trait** — a Java-style range `for`, implemented as a parser-only desugar to
-`{ mut var __forit = COLL.iter(); while (__forit.hasNext()) { DECL = __forit.next(); BODY } }` (no new
-AST/semantic/codegen). Primitives iterate by value (`i32 x`), objects/enums by borrow (`Point*`,
-`mut Point*` for write-through) — enforced syntactically in the parser. `Iterator` is a **built-in**
-trait (convention-recognized, `hasNext`/`next`, like `Index`), so `impl<T> Iterator for ArrayIter<T>`
-supplies `next() -> T*` with `T` bound by the impl — no parameterized traits needed. The stdlib gains
-`ArrayIter<T>` + `Array<T>::iter()`. Two supporting fixes: the raw-ptr copy guard now keys on a **user
-destructor** (a no-dtor buffer *view* like an iterator is safe to shallow-copy), and a **pre-existing**
-monomorphizer bug was found + flagged (a value construction of a generic type using the enclosing
-class's own type param corrupts parser state — worked around in `Array::iter()` via `new`). See the
-"`for (DECL : ITERABLE)`" invariant; `tests/foreach_tests.cpp` (`[foreach]`, +8 cases),
-`e2e/foreach_test.gg`. Prior baseline was
-**1252 test cases / 2348 assertions** (as of a **QA edge-case pass over variadic methods** that found
-and fixed a real bug: a **`static`/`private` variadic method** (`fn static total<...>` / `fn private
-m<...>`) was never registered as variadic, so `Sum::total(...)` fell through to a plain static call →
-"no static method 'total'". Root cause: the prescan required `fn IDENTIFIER <` (no modifier skip) and
-`captureMethodTemplate` only backstopped the *generic*-method sets, not the variadic ones. Fixed by (a)
-skipping leading `static`/`private` in the prescan — which **also** closes a latent cross-file gap for
-`static`/`private` *generic* methods — and (b) backstopping the variadic sets in `captureMethodTemplate`.
-Added coverage for static (regression), private, empty/single-element pack, object-return (sret),
-pack-spread-forwarding into a variadic method, param/field receivers, and same-name-across-two-classes.
-`tests/variadic_tests.cpp` (`[variadic][genericmethod]`, +7 cases). Prior baseline was
-**1245 test cases / 2336 assertions** (as of **variadic methods** — `fn m<...Ts>(Ts... args)` on a
-class, composing the generic-method transplant machinery with the variadic-pack machinery. The pack is
-**inferred** at the call site (no explicit `<…>`), collected into a tuple, and consumed by compile-time
-cons-`match` / spread exactly like a free variadic function; the concrete `@Owner_m$Tuple$…` is injected
-into the class. Capture now **allows** a pack on a method (pack must be last type param); the prescan
-registers parallel `variadicMethodNames`/`variadicMethodKeys` + `variadicMethodFixedCount` (the fixed
-count is recorded in the **prescan**, since a generic-class variadic method's concrete template doesn't
-exist at the initial-parse call site); a new `parsePostfix` branch collects the pack via the shared
-`deducePackTargs` core (extracted from the free-fn `deduceVariadicInstantiation`) + `deduceVariadic
-MethodInstantiation`; `instantiateMethod` substitutes the pack to a `Tuple$…* args` borrow and runs
-`expandPackMatch`. Works on **generic classes** via the same `pendingMethodInsts_` deferral fixpoint.
-The **flagship use is `Array<T>::emplaceBack`** — a zero-copy emplace: `data[count] = T(args...)`
-direct-constructs the element straight into the buffer slot (verified in IR: GEP the slot,
-`store %Point zeroinitializer` + `call @Point_Point` on it, **no element temp, no `@Point_clone`**);
-the stdlib `Array.gg` now carries it. Lifts the "variadic methods deferred" note from the generic-method
-invariant. See the "Variadic methods" invariant; `tests/variadic_tests.cpp` (`[variadic][genericmethod]`,
-+5 cases), `e2e/variadic_method_test.gg`. Prior baseline was
-**1240 test cases / 2324 assertions** (as of a **copy guard for raw-pointer-owning value objects** —
-a value object whose generated memberwise clone would shallow-copy a raw `ptr` (aliasing its buffer →
-leak + double-free, previously a silent heap-corruption crash) now cannot be **copied by value** without
-an `impl Clone`: a clean compile error at assignment (`p = Foo(...)`) and copy-init (`Foo p = q`),
-suggesting `impl Clone` or a reference binding. Direct construction (`Foo p = Foo(...)` — builds in
-place) and reference bindings are unaffected. The predicate is Clone-aware + recursive
-(`memberwiseCopyAliasesRawPtr`): it stops at any class implementing `Clone`, so a class embedding a
-`Clone` field is correctly allowed (its memberwise clone recurses through the field's deep copy) — the
-existing `Wrap { Bytes b; }` test would otherwise be a false positive. Reference/nested-object fields
-were already handled correctly by the clone (retain-new/release-old per field), verified empirically;
-this closes the remaining raw-`ptr` hole. See the `Clone` invariant (C6); `tests/clone_tests.cpp`
-(`[clone]`, +6 cases). Prior baseline was
-**1234 test cases / 2316 assertions** (as of **generic methods** — `fn m<T>(...)` on a class, with
-its own type parameters distinct from any class type params. A parser/monomorphizer feature (like
-free-function generics): the generic method is captured as a per-class template
-(`gen_->methodTemplates`, keyed `Owner::method`), a call `obj.m<i32>(...)` resolves the receiver's
-class **at parse time** (the new hard part — only parser-visible receivers: a bare local/param/field,
-`this`, or the static `Class::m<T>()` form), and the concrete method is re-parsed via a shell class +
-**transplanted** into the owner's `ClassDeclStmt::methods` so semantics/codegen emit `@Class_m$i32`
-with zero new downstream code. Works on **generic classes** too (`Holder<i32>::passThrough<U>`) via a
-deferral fixpoint in `runMonomorphization` (a method instantiates only after its mangled class is
-re-parsed). Bounds (`<T: Trait>`) reuse the existing `GenericBoundCheck` path; static/`mut`/object-
-return/`this`-receiver methods all fall out of the transplanted `MethodDecl`. Two prerequisite fixes:
-a brace-aware `prescanTemplateNames` (a `fn m<T>(` inside a class body is a method, not a free
-function) and a new parser `currentClassName_` (for `this` receivers). v1 defers argument inference
-(explicit `<T>` required — **except** variadic methods, whose pack is inferred) and impl/trait-block
-generic methods. **Variadic methods (`fn m<...Ts>`) are now supported** — see the "Variadic methods"
-invariant; the flagship use is `Array<T>::emplaceBack`. A QA pass added coverage for
-recursion (`this.m<T>()` self-call — the shell class is named the real owner precisely so this
-resolves), multiple type params (`<K,V>`), gm-calling-gm, default params, `?.` safe calls, a
-generic-free-fn + generic-method same-name coexistence, nested type args, param receivers, and the
-`var`-receiver limitation; it also confirmed the `<`-disambiguation is sound (a `field < X > (…)`
-collision only ever affects an already-invalid chained comparison, never valid code). See the
-"Generic methods" invariant; `tests/generic_method_tests.cpp` (`[genericmethod]`, 22 cases),
-`e2e/generic_method_test.gg`. Prior baseline was
-**1212 test cases / 2278 assertions** (as of **spreading a variadic pack into a non-variadic
-call** — `f(fixed…, xs...)` now works even when `f` is NOT itself pack-bearing: the pack tuple is
-**unwrapped** into N ordinary positional arguments (`xs._0, …, xs._{N-1}`) at parse time
-(`Parser::unwrapSpreadArgs`, `Parser_Generics.cpp`), so existing overload resolution does all
-arity/type checking unchanged — no semantic or codegen changes needed. Works uniformly across a bare
-constructor call, the var-decl constructor sugar, `new`, a method call, an ordinary (non-pack)
-generic function, and a plain free function; also spreads a cons-match tail-pack (not just the
-top-level pack param) and, as a free side effect, an ordinary hand-declared tuple local unrelated to
-any pack. The discriminator ("is the target itself pack-bearing, so the existing pack-forward
-behavior should apply instead") is only needed at the one shared bare `IDENTIFIER ( args )` call
-site (constructors can never be pack-bearing — packs are v1-scoped to free functions only). v1
-requires exactly one spread per call and restricts the spread target to a bare in-scope identifier
-(the only shape a real pack variable ever has; there's no `Expr`-clone utility to safely duplicate
-anything more complex). This closes the second of the two `emplace_back` gaps — combined with the
-prior direct-construct feature, `data[i] = Point(args...)` now forwards an arbitrary compile-time
-pack straight into a buffer element's own constructor with zero temporary object and zero clone
-(confirmed via IR inspection: the tuple fields are GEP'd and loaded, the slot is zero-inited, then
-the constructor is called directly — no `objtmp`, no `@Class_clone`). See the "Variadic parameters"
-invariant; `tests/variadic_tests.cpp` (`[variadic]`, +19 cases — incl. non-trailing spread position,
-object/value-class pack elements borrowed per field, wrong-arity-after-unwrap, and the
-inferred-generic-target limitation), `e2e/variadic_spread_unwrap_test.gg`. Prior baseline was
-**1193 test cases / 2247 assertions** (as of **direct-construct array/buffer elements** —
-`data[i] = Class(args)` on a `ptr<Class>` buffer element now constructs directly into the slot's
-address (no temp, no clone) when the RHS is a bare constructor call for the element's exact class —
-the same "result location" treatment a local `Point p(2,3);` already gets. Purely a `genIndexAssign`
-codegen change (`CodeGen_Exprs.cpp`); no parser/AST/semantic changes, since `analyzeIndexAssign`
-already accepted a constructor-call RHS and already records the overload-resolved ctor symbol via
-`resolvedCallee`. The constructor's arguments are evaluated **before** the slot is zero-initialized
-(not after), so an in-place update like `data[i] = Point(data[i].x, data[i].y + 1)` reads the old
-field values rather than zeroed garbage; a ctor-less class still gets a zero-init-only no-op. This
-was the first of two identified gaps toward a future `Array<T>::emplace_back` — forwarding a variadic
-argument pack into a fixed-arity constructor call was the separate second gap, closed by the spread
-pack-unwrap feature documented above. See the
-"Owned value-object elements in a ptr<T> buffer" invariant; `tests/array_object_tests.cpp`
-(`[array-object]`, +9 cases — incl. default-param / named-arg constructors, a free-function-sret RHS
-falling through to clone, and a bug-isolating argument-before-zero-init ordering assertion),
-`e2e/array_object_direct_construct_test.gg`. Prior baseline was
-**1184 test cases / 2218 assertions** (as of **cross-platform target support** — GG can now target
-Linux as well as Windows. The `target triple` is configurable (`CompilerOptions::targetTriple`,
-defaulting to the host via `#ifdef _WIN32`; `--target=<triple>` overrides) and emitted by `IRPrinter`.
-The one libc divergence — stdout/stderr access — is centralized behind compiler-emitted `@gg_stdout`/
-`@gg_stderr` helpers (`emitStdioHelpers`): Windows/UCRT call `__acrt_iob_func`, glibc/musl load the
-external `@stdout`/`@stderr` globals. The stdlib (`IO.gg`/`cio.gg`) is now platform-agnostic (calls the
-helpers via `extern`; codegen replaces the declare with the target-specific define). The panic path
-uses `@gg_stderr` too. Windows path runtime-verified; Linux IR verified structurally. See the "Target
-platform" invariant; `tests/cast_tests.cpp` (`[target]`, +2). Prior baseline was
-**1182 test cases / 2209 assertions** (as of a **built-in `obj.clone()` method** — a zero-arg call on
-any class receiver (value or reference) that returns a fresh value-object copy. Semantic intercepts
-`clone()`/no-args (unless the class declares its own zero-arg `clone`; a `Clone`-trait `clone(Self&)`
-takes one arg so never collides) → `Object{class}`, recorded in `builtinCloneCalls`; codegen emits
-`@Class_clone(dest, src)` — the same helper as every other clone site, so it uses the user's
-`impl Clone` when present, else the generated memberwise clone (exactly "user def if any, else
-default"). Var-init writes in place (one clone, no temp); other contexts materialize a value temp.
-See the `Clone` invariant; `tests/class_tests.cpp` (`[clone]`, +4). Prior baseline was
-**1178 test cases / 2205 assertions** (as of a **`new`→value-object implicit-clone warning** —
-`Point p = new Point(...)` binds a heap reference to a *value* variable, which silently deep-copies
-the fresh heap object into the stack value then frees the heap allocation immediately; a warning now
-nudges toward `Point& p = …` or `var p = …`. Gated on a value-`Object` declared type + a `NewExpr`
-initializer, so `Point&`/`var`/value-to-value copies stay silent. Copy semantics are unchanged (the
-generated memberwise `@Class_clone` runs, not the constructor — the `Clone` trait is the hook). See
-the memory-model note; `tests/class_tests.cpp` (`[clone]`, +2). Prior baseline was
-**1176 test cases / 2201 assertions** (as of a **compound-assignment literal-adoption fix** — the RHS
-of a compound assignment is now analysed with the target's type as the expected type
-(`analyzeWithExpected`, mirroring var-init/assignment), so a bare literal adopts it: `u64 x; x *= 10;`
-types `10` as u64 instead of the i32 default, dropping a spurious "i32→u64 may lose data" warning. A
-non-literal RHS still warns on a genuine lossy conversion. See the numeric-literal adoption invariant;
-`tests/cast_tests.cpp` (`[numlit]`, +2 cases). Prior baseline was
-**1174 test cases / 2198 assertions** (as of **runtime-panic diagnostics** — the overflow,
-bounds/`str`-index, and `!!` null-unwrap traps now print `GG runtime error: <what> at <file:line>` to
-stderr (`fputs` + `__acrt_iob_func(2)`) before `abort()`, instead of dying silently. A shared
-`emitPanicMessage(what)` emits a compile-time-constant message; the line comes from `currentStmtLine_`
-(tracked unconditionally in `genStmt`, no `--debug` needed), the filename only when `--debug` is on.
-Overflow-trap messages are still flag-gated (default IR unchanged); bounds/`!!` always carry one. See
-the overflow-checks invariant; `tests/cast_tests.cpp` (`[overflow]`, +2) + `tests/str_tests.cpp`
-(bounds message). Prior baseline was
-**1172 test cases / 2192 assertions** (as of a **nullable-return overload-mangling fix** — an
-overloaded function returning a nullable primitive (e.g. `parseI32 -> i32?` vs `-> i64?`) emitted the
-LLVM symbol `@parseI32$str$ret$i32?` — but `?` is not a valid unquoted LLVM identifier char, so clang
-rejected the `.ll` ("expected '(' in function argument list"). `mangleType` didn't handle
-`Type::isNullable` and fell through to `typeName` (which renders `i32?`); it now mangles a nullable
-type as `<underlying>.opt` (`i32?` → `i32.opt`). See the overloading-mangling invariant;
-`tests/nullable_tests.cpp` (`[nullable]`, +1 case asserting no `?` in the IR). Prior baseline was
-**1171 test cases / 2189 assertions** (as of the **ternary conditional `cond ? a : b`** — a C-style
-ternary added as a **parser-only desugar** to a switch expression (`switch (cond) { case true -> a;
-default -> b; }`), so it needs **no** new AST node and **no** semantic/codegen. `parseTernary` sits
-between assignment and Elvis, right-associative. Reuses the switch-expression machinery wholesale
-(bool scrutinee, branch-type unification, exhaustiveness via `default`, result-slot codegen) — so a
-non-bool condition and value-object branches error exactly as in a switch expression. `?` lexes as a
-lone `QUESTION`, distinct from `?:`/`?.`/`T?`, so no grammar conflict. See the "Ternary conditional"
-invariant; `tests/ternary_tests.cpp` (`[ternary]`, 12 cases — incl. a QA pass confirming short-circuit
-evaluation via the null-guard idiom + separate-block lowering, nested ternary in the middle without
-parens, compound-assign RHS, and if-condition use; no ternary bugs found). Prior baseline was
-**1159 test cases / 2174 assertions** (as of a **QA-hardening pass over the two recent fixes** — no
-new bugs found; added regression coverage for the previously-untested code paths: nullable **widening**
-casts (`i32? → i64?` sext, `f64? → f32?` fptrunc — distinct from the narrowing case originally tested)
-and static fields of **non-i64** types (`u8`/`f32` literal adoption with no spurious narrowing warning,
-plus a genuinely-out-of-range `static u8 = 300` still warning accurately). Verified widening/float/
-unsigned/null across nullable width casts and f32/u8/negated-MIN/static-local for the initializer fix,
-all correct. `tests/nullable_tests.cpp` (+2), `tests/static_tests.cpp` (+3). Prior baseline was
-**1154 test cases / 2160 assertions** (as of a **static-field-initializer expected-type fix** — a
-static field's initializer is now analysed with the field's declared type as the expected type
-(`analyzeWithExpected`, mirroring the local-var path), so a bare numeric literal adopts it:
-`static i64 X = 9223372036854775807;` types the literal **i64** and stores the full value. Previously
-the literal defaulted to `i32`, warned "overflows i32", and **truncated the constant** — a real
-miscompile of wide stdlib constants (`Math.gg`'s `MAX_64_BIT_VALUE` etc.), masked as a mere warning.
-Genuinely-out-of-range literals still warn accurately ("does not fit in 'i32'"). See the static-members
-invariant; `tests/static_tests.cpp` (`[static]`, +2 cases). Prior baseline was
-**1152 test cases / 2156 assertions** (as of a **nullable-to-nullable width-cast codegen fix** — a
-cast between nullable primitives of different payload widths (`i64? → i32?`, e.g. `parseInt(...) as
-i32?` in `stdlib/Math.gg`) emitted `trunc { i1, i64 } to { i1, i32 }` — an invalid cast on the whole
-`{ i1, iN }` struct that only clang's verifier caught (a raw, non-human-readable error, since GG
-doesn't run the LLVM verifier on its own IR). `emitCast` gained a nullable→nullable-width case that
-unpacks the tag + payload, converts the payload through the scalar rules, and re-wraps under the same
-present-tag. Verified: value preserved, `null` preserved, explicit-cast truncation. See the nullable
-invariant; `tests/nullable_tests.cpp` (`[nullable]`, +2 cases). Prior baseline was
-**1150 test cases / 2151 assertions** (as of a **case-insensitive import dedup fix** — on Windows's
-case-insensitive filesystem, importing one file under two spellings — `import "std/String.gg"` in one
-file and `import "std/string.gg"` in another — parsed it **twice** and redefined its classes ("class
-'String' is already defined"), because the resolver's dedup key was `weakly_canonical(...).string()`,
-which normalizes `.`/`..` but preserves case. Fixed with a `dedupKey(canonical)` helper (lowercased on
-`_WIN32`) keyed by every pass's visited/processed set; the real-case path is still used to read the
-file. `#ifdef _WIN32`-guarded so a case-sensitive filesystem keeps the two as distinct files. Motivated
-by `samples/std_lib.gg` (which imports `string.gg` directly and `IO.gg` → `String.gg`). See the
-ImportResolver invariant; `tests/import_tests.cpp` (`[import]`, +1 Windows-guarded case). Prior baseline
-was
-**1149 test cases / 2150 assertions** (as of a **nullable-operand soundness fix** — a nullable
-primitive was silently accepted by arithmetic/comparison/unary operators: the operand's `Type::kind`
-is the underlying kind (`i32?` → `kind == I32`), so `isNumeric(kind)` waved it through and codegen
-`extractvalue`d the payload with **no null check** — `x + 1` on a possibly-null `i32?` "worked". Fixed
-in `analyzeBinary` (after the equality case, so `== null` still works) and `analyzeUnary` (up front):
-any `isNullable` operand on a non-equality operator is a clean error directing the user to a null
-check or `!!`. After narrowing (`if (x != null)`, a guard-clause `if (x == null) { return; }`, or
-`x!!`) the operand is `stripNullable`d and the operators apply normally. Confirmed guard-clause
-narrowing works (it reuses `alwaysReturns`). See the nullable invariant; `tests/nullable_tests.cpp`
-(`[nullable]`, +7 cases). Prior baseline was
-**1142 test cases / 2139 assertions** (as of **multi-file debug-info attribution** — a user
-function/method is now attributed to its **declaring source file** via a per-file `!DIFile`
-(`dbgFileIds_` cache + `dbgFileFor`), so a debugger stepping into an imported function lands in the
-right file instead of the main source (the old single-`DIFile` limitation). The declaring path is the
-`sourceFile` field on the decl (parser-stamped, shared with the semantic error-attribution work),
-threaded into `dbgBeginFunction`/`genMethod`; the `!DISubprogram` scope/file and `!DILocalVariable`s
-use the function's file (`currentDbgFileId_`), while the `!DICompileUnit` stays the main file.
-Function-granular (a function can't span files); debug still off by default (IR byte-identical when
-off). See the debug-info invariant; `tests/debug_tests.cpp` (`[debug]`, +1 multi-file case). Prior
-baseline was
-**1141 test cases / 2136 assertions** (as of a **QA pass over `str`/`[]` indexing** — verified the
-edge cases: index integer-type variety (`u8`/`i64`/`u32`), a **call-result** `str` (`label()[0]`), a
-`str` **field** (`obj.name[i]`), a reflection `@typeName(T)` view, negative/empty/OOB indices all
-trapping at runtime, and the array `[]` runtime bounds check still trapping after the
-`emitBoundsCheck`→`emitBoundsCheckValue` refactor. The pass improved one thing: `s[i] = …`
-write-through now errors with a **dedicated** message ("a 'str' is an immutable view … reads 's[i]'
-are allowed") instead of the generic "cannot be indexed" (which contradicted working reads).
-`tests/str_tests.cpp` (`[str]`, +5 cases). Prior baseline was
-**1137 test cases / 2131 assertions** (as of **`str` indexing — `s[i]` yields the i-th byte as a
-`char`, bounds-checked** — a built-in index on the primitive `str` type: `analyzeIndex` gains a
-`TypeKind::Str` case returning `Char`, and `genIndex` lowers it to extract-data-ptr + extract-len
-(fields 0/1 of `{ptr,i64}`) → **bounds check against `.len`** (traps `abort()` on OOB, like a
-fixed-size array — via the shared `emitBoundsCheckValue(idx, lenOperand)` helper, which `icmp ult
-i64`-compares and also catches negatives; `emitBoundsCheck` for arrays now delegates to it with a
-constant size) → `getelementptr i8` → `load i8` → `zext to i32`. No write-through (`str` is an
-immutable view). Built in the compiler because `str` is a primitive and can't carry a user `Index`
-impl. Enables the digit-parsing idiom `(s[i] as i32) - 48` and byte iteration
-`while (i < (s.len as i32)) { … s[i] … }` (exercised by `stdlib/number.gg`'s `parseInt`). See the
-"`str`" invariant; `tests/str_tests.cpp` (`[str]`, +5 cases), `e2e/str_test.gg`. Prior baseline was
-**1132 test cases / 2121 assertions** (as of **variadic parameters — compile-time type packs** —
-`fn f<...Ts>(fixed…, Ts... args)`: a heterogeneous variadic collects its trailing args into a **tuple
-pack** at the call site (deduced at parse time — literals default-typed, identifiers/ctor/`new`), the
-pack param monomorphizes to a `Tuple$…* args` borrow, and the callee consumes it by **compile-time
-cons-recursion** — `match args { () -> …; (x:xs) -> … }` expanded per-instantiation by pack arity
-(`expandPackMatch`, token-level): head `x` → `args._0`, tail `xs` materialized as a tail-tuple local,
-`xs...` spread + recursive re-instantiation unrolling to the `()` base case. Entirely in the
-parser/monomorphizer (semantics/codegen see ordinary functions over ordinary tuples) — no runtime
-list/RTTI. Key fix found in QA: for a variadic the self-reference rename applies only to the decl
-name, not recursive calls, so each level re-deduces the shorter pack. v1 limits: heterogeneous packs
-only, parser-deducible pack args, explicit `<…>` rejected, one pack in last position. See the
-"Variadic parameters" invariant; `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`.
-Prior baseline was
-**1117 test cases / 2093 assertions** (as of **tuple types + `match` destructuring patterns** — two
-features built as a thin front-end layer. **Tuples**: anonymous `(T1, T2, …)` types (arity ≥ 2) are
-synthesized value-object classes `Tuple$…` (fields `_0 … _n` + a positional ctor), injected by the
-parser during monomorphization (like a generic/lambda class), so semantics/codegen treat them as
-ordinary value objects — struct layout, clone, dtor, structeq, `._0` access, `(String,i32)` deep-copy
-all fall out for free. Tuple literals `(e1, e2)` reuse `BraceInitExpr` (class from the expected type).
-**`match`**: a new construct (distinct from `switch`) with destructuring patterns — wildcard `_`,
-binding, literal (via `==`), tuple `(a, b)`, struct `Point{ x: 0, y }`, nested — that reuses the
-switch arm-lowering skeleton, swapping equality-labels for pattern test-trees + bindings; the
-scrutinee is materialized once into a *place* (ptr to storage) that bindings alias / GEPs recurse /
-literals load. Exhaustiveness (expression form) + reachability (arm-after-irrefutable) enforced.
-v1 limits: tuple elements value/primitive-only, tuple params must be a borrow (`(i32,i32)*`), no
-unit/1-tuples; deferred patterns = enum-payload (needs tagged unions), `(x:xs)` collection, or-/guard/
-range, and `var (a,b)=…` destructuring-let. See the "Tuple types" + "`match`" invariants;
-`tests/tuple_tests.cpp` (`[tuple]`), `tests/match_tests.cpp` (`[match]`), `e2e/tuple_test.gg`,
-`e2e/match_test.gg`. Prior baseline was
-**1101 test cases / 2062 assertions** (as of **the `Clone` trait — a user deep-copy hook (Array<T>
-Phase 2)** — a built-in `Clone { fn clone(Self& src) mut; }` (copy constructor) lets buffer-owning
-value objects (`String`, a nested `Array`) be stored **by value** in an `Array<T>`, deep-copied and
-destroyed exactly once. **Key mechanism**: a `clone` impl mangles to `@Class_clone` — the exact symbol
-the generated memberwise clone uses and every clone site already calls — so the impl **transparently
-replaces** the generated clone with zero call-site changes, and recursion composes
-(`@Array$Array$Point_clone`→`@Array$Point_clone`→`@Point_clone`). C1 recognizes `Clone` as built-in;
-C2 suppresses the generated clone for `Clone`-impl classes (drain-loop skip); C3 (contract) frees
-`this`'s old state first — a no-op on a zeroed dest, so one body serves construct + assign (bonus:
-`String a = b;` now deep-copies); C4 relaxes the Phase-1 owning-`ptr` guard to allow `Clone`
-implementors; C5 adds `impl Clone for String` (fields → `private mut`) and generic
-`impl<T> Clone for Array<T>`. Verified by IR (single deep-copy clone per class, recursion for the
-nested case) and a runtime e2e (`Array<String>` + `Array<Array<Point>>` + a direct `String b = a`
-independent-buffer check + an **embedded** `Clone` field `Named{ String name; }`, exit 0). A QA pass
-added the embedded-field path (a class that does *not* impl Clone gets the generated memberwise clone,
-which routes the embedded `Clone` field through the impl's `@Field_clone` on a zero-inited dest — safe)
-and the live-dest copy-assign path. See the "`Clone` trait" invariant; `tests/clone_tests.cpp`
-(`[clone]`, +7 cases), `e2e/array_clone_test.gg`. Prior baseline was
-**1094 test cases / 2046 assertions** (as of **owned value-object elements in `Array<T>` (Phase 1)** —
-a `ptr<T>` buffer can now hold value objects by value: the object-element write zero-inits the slot
-then deep-clones (`@C_clone`, a safe construct on raw memory), the object-element read yields the slot
-address, a new `--unsafe-ptr` `destroy(place)` intrinsic runs a value object's dtor in place (no-op for
-primitive/no-dtor elements), a primitive rvalue temp-materializes into a `T*` argument, and a value
-object that owns a raw `ptr` (String / nested `Array`) is rejected cleanly. stdlib `Array.gg` rewritten
-(`T&`→`T*`, `destroy` teardown loops) so `Array<Point>` works end-to-end; `Array<String>`/
-`Array<Array<T>>` are the deferred Phase-2 (`Clone` trait) case. Codegen branches on the concrete
-element type post-monomorphization — no `comptime if`; primitive `Array<i32>` IR is unchanged. A QA
-pass added recursive-embedded-element (`Array<Line>` → `Line_clone`→`Point_clone`) and operator
-`arr[i] = obj` coverage, and fixed a **`destroy(local)` double-free footgun** (destroying a
-scope-managed local object ran its dtor twice — now rejected). See the "Owned value-object elements"
-invariant; `tests/array_object_tests.cpp` (`[array-object]`, +10 cases), `e2e/array_object_test.gg`.
-Prior baseline was
-**1084 test cases / 2026 assertions** (as of **`str` precise DWARF composite** — with `--debug`, a
-`str` local was described as an opaque `DW_TAG_pointer_type` (address only, wrong 8-byte size); it is
-now a precise `DW_TAG_structure_type` `{ ptr data; u64 len }` (128 bits, `len` at offset 64), so a
-debugger shows the fields. ~15 lines in `dbgTypeOf` (`CodeGen_Debug.cpp`), reusing the cached
-`ptr`/`u64` nodes; clang's DWARF verifier accepts it at link. Debug stays off by default (IR
-byte-identical when off). The other deferred debug item — multi-file line attribution (single
-`DIFile`) — remains open. `tests/debug_tests.cpp` (`[debug]`, +1 case). Prior baseline was
-**1081 test cases / 2015 assertions** (as of **const-by-default static fields** — a static field is now
-**immutable unless `mut static`**, closing the one gap in GG's const-by-default model (static fields
-were previously always mutable). Enforced purely in semantics: `ClassInfo::StaticField` gained
-`isMut` (from `FieldDecl::isMut`; the parser already accepted `mut`/`static` in either order on
-fields), and every static write form is gated against it — `Class::field =`, `obj.field =`, and
-implicit-`this` `=`/`+=`/`++`/`--` (new `currentStaticField` helper). `static i32 MAX = 100;` is a
-named constant; `mut static i32 count = 0;` a reassignable counter. **Codegen unchanged** — const is
-compile-time only, the emitted global is byte-identical. Migrated the always-mutable statics in the
-suite + six e2e files (counters/totals → `mut static`). This is item 4's "const statics"; access
-enforcement + file-scope linkage remain deferred. A QA pass confirmed the tricky edges: a const
-static is **not** writable in a constructor (the instance-const-field `inConstructor` allowance does
-not leak to statics), const gating survives monomorphization (a generic class's static, via instance
-access), and `static mut`/`mut static` both work. See the static-members invariant;
-`tests/static_tests.cpp` (`[static]`, +12 cases), `e2e/static_field_test.gg`. Prior baseline was
-**1069 test cases / 1996 assertions** (as of a **sret nested-argument confirmation + escape-analysis
-return-slot-clone fix**, with a **QA follow-up that caught a method-path bug in the first fix** — the
-CLAUDE.md note "using a value-return call as a nested sub-expression argument is deferred" was
-**stale**: `takeRef(make(1,2))`, `combine(make(),make())`, doubly-nested calls, a discarded temp, and
-a method call on an sret result all already work via the `genCall`/`genMethodCall` `materializeSlotTemp`
-+ `emitSretCall` value path (only variable-init uses the zero-copy in-place `emitSlotCall`). The
-confirmation surfaced a **real, separate** escape-analysis false positive: `fn dup(T& v) -> T out
-{ out = v; return out; }` (a borrowed param cloned into an object return slot) wrongly reported the
-value-object argument as escaping — the syntactic scan treated `out = v` as an alias edge, and
-`return out` then made `v` "escape." Fixed by recording **no** alias edge for an assignment into a
-return slot. **The QA pass then found the first fix gated on `returnType.kind == Object`, which
-silently missed every *method* self-return** — the escape summary is computed in `buildClassInfo`,
-where the method's own class isn't in `classRegistry` yet, so its slot type resolves to a non-`Object`
-placeholder (free functions, collected later, worked by accident). Re-gated on `returnType.kind !=
-Reference` (via the `nonRefSlotName` helper): object/primitive/enum slots clone (skip the edge),
-while reference/borrow slots (`-> T&`/`-> T*`, which decode to `Reference` from token syntax) keep the
-edge and still reject a stack-value argument; the ref-field-store escape path is untouched. See the
-sret + escape-analysis invariants; `tests/return_slot_tests.cpp` (`[return-slot]`, +7 cases: nested-arg
-codegen, free-fn/method/impl-method clone accepted, reference-slot/borrow-slot/ref-field-store still
-rejected), `e2e/return_slot_test.gg`. Prior baseline was
-**1062 test cases / 1985 assertions** (as of a **QA pass over module namespacing** — the initial
-whole-token rewrite was context-free, so a **member declaration** whose name collided with a
-module-level symbol was qualified while its `.`-access was not, wrongly rejecting valid code: a class
-**field** or **method** named like a module free function (`size`, `area`, `count`) failed with
-"no field/method". Fixed by making qualification **context-aware**: the module table is split into
-**types** (qualified in any position) and **funcs** (qualified only in call/generic position `(`/`<`),
-and a **method / enum-member decl name** (right after `fn` inside a body) is never qualified — so a
-field/local named like a free function is left bare and matches its access. Generic free functions
-stay namespaced (the `<` case); the residual edges (field/variant named like a TYPE; a local named
-like a top-level fn used in a `<` comparison) are niche and error cleanly, never miscompile. See the
-"Module namespacing" invariant; `tests/module_tests.cpp` (`[module]`, +3 cases → 12). Prior baseline
-was **1059 test cases / 1979 assertions** (as of **module namespacing — `module` + Java-style
-`import a.B`** (axis B). A file declares `module geo;` and its top-level names are qualified with that
-prefix (`geo.Foo`), so two files may each declare `class Foo` without colliding. `import geo.Point;`
-drops the qualifier (bare `Point`); two imported modules both exporting `Point` → the bare name is
-ambiguous, disambiguated by the fully-qualified `geo.Point`. Implemented as a **whole-token rewrite
-in the parser** (`Parser::qualifyTokens`, mirroring generic monomorphization): fold `mod.Name` into
-one token, then prefix bare decl/ctor/dtor/reference names — so semantic + codegen are unchanged (the
-qualified name flows through as an ordinary className, emitting `%geo.Point`/`@geo.Point_method`). A
-new ImportResolver **pass 0** (`scanModules`) builds the shared `moduleMembers`/`moduleNames` tables
-before parsing. `main`/`extern` are never qualified; module-less programs are byte-identical (IR
-regression-safe). Adds a duplicate-type-in-module diagnostic (closes the old silent first-wins gap).
-v1 limits: single-segment module names, no wildcard/alias import, no module-private visibility; a
-symbol `import` doesn't load a file. See the "Module namespacing" invariant; `tests/module_tests.cpp`
-(`[module]`, +9 cases), `e2e/module_test.gg`. Prior baseline was
-**1050 test cases / 1961 assertions** (as of **module resolution — import search roots + the `std/`
-anchor** (axis A). `import "..."` now resolves through one shared `ImportResolver::resolveImportPath`
-against a `ModuleSearchConfig`: a reserved **`std/` prefix** maps to the compiler's standard library
-(auto-detected by walking up from the GG executable for a `stdlib/` dir, or `$GG_STDLIB`), so
-`import "std/String.gg"` works from anywhere instead of a location-dependent `../stdlib` walk;
-**file-relative** resolution stays the backward-compatible default (all pre-existing relative imports
-unchanged, and it takes precedence over search roots); extra **`$GG_PATH`** roots are tried last.
-Config is computed in `main.cpp` and threaded via the `GG(paths, options, ModuleSearchConfig)` ctor;
-the default `resolve(file)` is file-relative-only, so resolver unit tests are unaffected. `e2e/` +
-`samples/` migrated to `std/...`; stdlib-internal imports stay sibling-relative. Symbols are still
-flat-global (per-module namespacing = the deferred axis B; no manifest/versioning yet). See the
-"Module / import resolution" invariant; `tests/import_tests.cpp` (`[import]`, +4 cases),
-`e2e/module_std_test.gg`. Prior baseline was
-**1046 test cases / 1955 assertions** (as of **impl specialization — concrete overrides blanket**
-— a concrete `impl Trait for Class<i32>` and the blanket `impl<T> Trait for Class<T>` may now coexist
-("most specific wins"): the concrete impl is used for `Class<i32>`, the blanket for every other
-instantiation. Previously the two collided as a duplicate `Class$i32::method`. Implemented by a skip
-in `runMonomorphization` — before expanding the worklist it collects every explicit concrete impl's
-`Trait@MangledClass` key, then skips instantiating the blanket for a class a concrete impl already
-covers. Order-independent and per-trait; GG expresses only two tiers (no partial specialization), so
-there's no ambiguity. A double-check QA pass added coverage — multi-param generics, operator traits
-(`Add`), the two-identical-concrete duplicate guard — and fixed a **`Call`-trait corner**: a concrete
-`impl Call` canonicalizes to `Call$…` while the blanket stores raw `Call`, so a raw-`Call@class` alias
-key is now also registered so the concrete still suppresses the blanket (previously they collided).
-See the generic-impls invariant; `tests/trait_tests.cpp` (`[specialization]`, 8 cases),
-`e2e/impl_specialization_test.gg`. Prior baseline was
-**1038 test cases / 1937 assertions** (as of **generic type-argument deduction** — a generic free
-function called without explicit `<…>` infers its type parameters from the argument types
-(`valid(u)` ⇒ `valid<User>(u)`). Runs entirely in the parser, reusing the `scopes_` name→type-token
-stack it already maintains for every in-scope local/param/field; v1 matches a **top-level** type-param
-parameter (`T`/`T&`/`T*`/`T?`) against a positional argument whose type is syntactically known (an
-in-scope identifier, a `Class(...)` constructor call, or `new Class(...)`), all-or-nothing, else a
-clear "cannot infer … specify explicitly" error. Purely additive (a no-`<…>` template call was already
-an error). A double-check QA pass added edge coverage — repeated type param (`f<T>(T&,T&)`),
-bare-instance-field argument, named callable-object → `Call`-bound inference, mismatched-repeated-arg
-and named-arg errors — and fixed two bugs in the process: a **`var`-typed local argument** produced a
-bogus `f$var` instantiation (now a clean error, via a `var`-sentinel guard in `baseFrom`) and the
-scope walk **skipped past a shadowing `var` binding** to an outer same-named local (now stops at the
-innermost binding). See the "Generic type-argument deduction" invariant; `tests/generic_infer_tests.cpp`
-(`[geninfer]`, 14 cases), `e2e/generic_infer_test.gg`. Prior baseline was
-**1024 test cases / 1921 assertions** (as of a **QA edge-case pass over annotations** — added
-field-type coverage (`f.get` splicing `char`/`bool` const values), target coverage (`@hasAnnotation`
-seeing a **method-carried** and a **class-level** annotation), and more error cases
-(non-comptime annotation field type, annotation/class name collision, `@hasAnnotation` with an
-undeclared annotation). The pass surfaced and fixed a **pre-existing `char` bug**: `integerLiteralFits`
-had no `Char` case, so **any** integer literal adopted into `char` (`char c = 65;`, and the annotation
-`f.get` char-field default placeholder) spuriously warned "does not fit in 'char'" — `char` is a
-32-bit code point (u32 range), now handled; the char-field placeholder is also a `char` literal, not a
-numeric `0`. `tests/annotation_tests.cpp` (`[annotation]`, 22 cases), `tests/cast_tests.cpp`
-(`[numlit]` char adoption). Prior baseline was
-**1015 test cases / 1906 assertions** (as of **user-defined annotations — compile-time metadata,
-Phases 1 & 2** — `annotation Name { <const fields> }` declares a metadata type (no methods; fields
-limited to the comptime-constant set: `str`/primitive/`bool`/`char`/enum); `@Name(args)` prefixes a
-class / field / method / enum-variant with compile-time-constant args. Read only via reflection:
-`f.has(Ann)`→bool and `f.get(Ann).field`→the const value inside `inline for`, and type-level
-`@hasAnnotation(T, Ann)`→bool. **Zero runtime cost, no IR** — annotation arg tokens are captured raw
-at parse time and spliced by the same post-monomorphization `expandReflection` pass. A leading `@` in
-declaration position is disambiguated from a reflection builtin by **case** (Capitalized = annotation).
-Semantic validation (`collectAnnotations`): unknown-annotation / duplicate-on-target / arg-count /
-non-constant-arg errors. v1 limits: `comptime if` isn't pruned so an unguarded `f.get` on an absent
-annotation folds to a type-default placeholder (`f.has`-guard it); no `@Target`, no enum-variant-arg
-splicing. See the "Annotations" invariant; `tests/annotation_tests.cpp` (`[annotation]`, 14 cases),
-`e2e/annotation_test.gg`. Prior baseline was
-**1001 test cases / 1883 assertions** (as of **the `str` compile-time string-literal type, Phases 1 & 2** —
-a string literal is typed `str` (an immutable `{ ptr, i64 }` view over static bytes) instead of a
-raw `ptr`: `.data` decays to a NUL-terminated `ptr` for FFI, `.len` is the O(1) byte length, `str`
-is safe/ungated and implicitly decays to `ptr` (the reverse is forbidden), and `String`'s constructor
-now takes `str` (using `.len`, no `strlen`). Modeled on the nullable-primitive inline value type; CRT
-bindings stay `ptr` and are untouched. **Phase 2** retrofitted reflection: `@typeName(T)` now returns
-a `str` (was a bare `ptr`), so `@typeName(T).len`/`.data` work (`f.name`/`v.name` were already `str`).
-Still deferred (all rejected with a clean semantic error, never miscompiled): `str` `==`/relational/
-concat and `str?`. See the "`str`" invariant; `tests/str_tests.cpp` (`[str]`, 16 cases) +
-`[reflect]` (`@typeName` view), `e2e/str_test.gg` + `e2e/reflect_test.gg`. Prior baseline was
-**985 test cases / 1858 assertions** (as of **compile-time reflection, Phase 2** — enum + type-level
-queries on top of Phase 1: `inline for (v in @variants(E)) { … }` unrolls once per variant (bare `v`
-→ the singleton `E::VARIANT`, usable as a value — `v.method()`/`v.field` work; `v.name` → the
-variant-name string); scalar folds `@variantCount(E)`,
-`@alignOf(T)`, `@offsetOf(T,"f")`; predicates `@isInteger/@isFloat/@isClass/@isEnum/@isPrimitive(T)`
-and `@implements(T, Trait)` (user + built-in operator traits). Same post-monomorphization
-`Parser::expandReflection` pipeline as Phase 1 — each query folds to a constant in `genReflect`
-(layout via `dbgSizeAlign`, traits via `implementedTraits` surfaced onto `SemanticResult`), no
-`comptime if` yet (a predicate is an `i1` constant). `ImportResolver::collectClassNames` now also
-collects `enum` names so `@variants(T)` works after a generic type param is substituted with a
-concrete enum. Deferred to Phase 3: `f.type`/indexed field type queries, `comptime if`, method
-reflection. See the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 37
-cases), `e2e/reflect_test.gg`. Prior baseline was
-**966 test cases / 1828 assertions** (as of **compile-time reflection, Phase 1** — `@`-sigil builtins
-+ `inline for`: `inline for (f in @fields(T)) { … }` unrolls at compile time (one body copy per
-field, `f.name` → the field-name string, `@field(v, f.name)` → ordinary member access), and scalar
-queries `@typeName(T)` / `@fieldCount(T)` / `@hasField(T,"x")` fold to constants like `sizeof`;
-`@compileError(msg)` aborts compilation. Implemented as a **post-monomorphization parser expansion
-pass** (`Parser::expandReflection`) that lowers everything to ordinary AST — semantic/codegen get only
-scalar-query arms + trivial guards, no reflection logic. Zero runtime cost; no runtime type info. See
-the "Compile-time reflection" invariant; `tests/reflect_tests.cpp` (`[reflect]`, 18 cases),
-`e2e/reflect_test.gg`. Prior baseline was
-**948 test cases / 1801 assertions** (as of **mixed signed/unsigned arithmetic resolves to the SIGNED
-type**, plus a **shift-signedness fix** surfaced by it. GG departs from C's "unsigned wins":
-`commonArithmeticType` returns a *signed* int of the wider width for a mixed pair, so `-6 / 3u == -2`
-and `-1 < 1u` is true (signed `slt`); the unsigned operand is reinterpreted as signed. Affects every
-`commonArithmeticType` consumer (`+ - * / %`, bitwise `& | ^`, comparisons). **Shifts are now
-excluded** — `<<`/`>>` follow the **left operand's** type (fixing `ashr`/`lshr` selection: `u32 >>
-signedCount` is now `lshr`, `i32 >> unsignedCount` is `ashr` — the latter was already wrong before
-this change). `tests/cast_tests.cpp` `[arith]` (8 cases). Prior baseline was
-**940 test cases / 1787 assertions** (as of extending `--overflow-checks` to **`++`/`--` (prefix &
-postfix) and signed unary `-`** — previously only `+`/`-`/`*` and `+=`/`-=`/`*=` were checked, so
-`x++` at a type's max silently wrapped while `x += 1` trapped; now consistent. Also verified (already
-correct) that narrowing conversions are checked in **return / call-argument / assignment** positions,
-not just var-init. `tests/cast_tests.cpp` `[overflow]` (17 cases). Prior baseline was
-**933 test cases / 1777 assertions** (as of a **numeric-literal adoption refinement**: a bare
-literal operand of a binary op now adopts the type of a *non-literal* numeric sibling, so
-`bigI64 == 6000000000` / `bigI64 + 6000000000` no longer wrap/warn; the both-literals `1 / 2` and
-`1.0 / count` cases are preserved. `tests/cast_tests.cpp` `[numlit]`. Prior baseline was
-**929 test cases / 1769 assertions** (as of **opt-in integer overflow checks (`--overflow-checks`)
-+ clang `-O` passthrough**: Rust-style, off by default. When on, integer `+`/`-`/`*` (and
-`+=`/`-=`/`*=`) trap via `llvm.{s,u}{add,sub,mul}.with.overflow.iN`, and an out-of-range *implicit*
-narrowing / sign-changing conversion traps after a range check (`trunc`→extend-back→`icmp ne`); an
-explicit `as` cast is never checked (intentional truncation, Rust/C semantics), nor is division /
-float arithmetic. Trap = `abort()` (reuses the `!!` path). **Off, the emitted IR is byte-identical
-to before.** `compile.ps1` gained `-Opt <0|1|2|3|s|z>` (→ clang `-O<level>`, default 0) and
-`-OverflowChecks`. See the "Integer overflow checks" invariant; `tests/cast_tests.cpp`
-(`[overflow]`, 10 cases), `e2e/overflow_checks_test.gg`. Prior baseline was
-**919 test cases / 1750 assertions** (as of **numeric-literal type adoption (untyped constants)**:
-a bare numeric literal is untyped — it adopts the contextual expected type when that is numeric,
-else defaults to `i32`/`f64`. So `i64 y = 5;`, `f32 f = 1.0;`, `u32 n = 5;`, `u8 c = 5;` no longer
-warn/error; `i64 big = 9000000000;` types the literal i64 directly (fixing the old silent i32
-overflow); an out-of-range literal (`i8 = 300`) or an i32-default overflow (`var z = 9000000000`)
-warns. Adoption is confined to **direct** literal bindings — `analyzeBinary` clears `expectedType_`
-for its operands, so `f64 d = 1 / 2;` keeps integer division. f32 literals emit as LLVM hex-floats.
-`genLiteral` masks the integer constant to the target width so an out-of-range literal always emits
-**valid** `iN` IR (`i8 = 300` → `store i8 44`) instead of the previously malformed `store i8 300`.
-Adoption works across every binding context — var-init, assignment RHS, `return`, and the inner type
-of a nullable target (`i64? = 5`). See the "Numeric-literal type adoption" invariant;
-`tests/cast_tests.cpp` (`[numlit]`, 18 cases). Prior baseline was
-**901 test cases / 1708 assertions** (as of **local type inference — the `var` keyword**:
-`var x = 5;` deduces a local's type from its initializer, const by default (`mut var`/`var mut` for
-mutable); the deduced type flows back through `synthTypeToken` as an ordinary type token so
-semantics/codegen gain no new type-kind and emit IR byte-identical to the explicit form; rejects
-inference from `void`/`null`/lambda/unspellable, and `static var` keeps the static-local rules. The
-`[var]` group (27 cases) covers inference across primitives/value-objects/heap-refs/borrows/enums/
-nullable-primitives, `mut`/const-by-default, `for`-init + nested-scope shadowing + self-reference,
-`static var` (persist + non-primitive rejection), the raw-ptr gate, and `var` inside a **generic
-body** (surviving monomorphization). See the "Local type inference" invariant;
-`tests/var_infer_tests.cpp` (`[var]`), `e2e/var_infer_test.gg`.) Prior baseline was
-**874 test cases / 1656 assertions** (as of the **comprehensive nullable-type test pass** — the
-`[nullable]` group grew to 65 cases (incl. nullable composing with generics and `switch`) covering the full surface (references/primitives/enums, `null`/
-`==null`/`!!`/`?:`/`?.`, smart-casts incl. `mut` invalidation, nullable fields/params/returns,
-overload interaction, codegen IR). The pass surfaced and fixed **three real bugs**: (1) Elvis with a
-nullable RHS (`a ?: b`, both nullable) wrongly checked the RHS against the *non-null* result;
-(2) a nullable **enum local** (`Color?`) mis-alloced as `%Color?` instead of `ptr`; (3) nullable
-**primitive/enum fields** (`i32? tag`) were unresolved in both the semantic field pass and the codegen
-struct layout. `tests/nullable_tests.cpp`.) Prior baseline was
-**833 test cases / 1598 assertions** (as of **`?.` safe-call — Phase 2 complete**: `x?.field` /
-`x?.m(args)` on a nullable receiver — null-checked once, result flows through a slot (empty on the
-null path), wrapped nullable on the present path; a value-object result is rejected. With this the
-Kotlin-style null-safety story — nullable references + primitives, `null`/`==null`/`!!`/`?:`,
-smart-casts, and `?.` — is fully implemented. `tests/nullable_tests.cpp` `[safecall]`,
-`e2e/nullable_test.gg`.) Prior baseline was
-**830 test cases / 1596 assertions** (as of **nullable primitives `i32?` — Phase 2**: a nullable
-primitive lowers to an inline tag+payload `{ i1, iN }` value (stack, no heap); `null`/`== null`/
-`!!`/`?:` and smart-casts all work on it (payload extracted with no runtime check once narrowed);
-`ptr?`/`void?` and nullable value objects stay rejected. `?.` safe-call remains parsed-but-deferred.
-`tests/nullable_tests.cpp` `[primitive]`, `e2e/nullable_test.gg`.) Prior baseline was
-**828 test cases / 1593 assertions** (as of **nullable references `T?` — Kotlin-style, Phase 1**:
-`Class&?`/`Class*?`/`Color?` (reference-like only; value objects + primitives rejected, primitives
-deferred to Phase 2), `null` literal, `== null`, implicit `T→T?` wrap, `!!` (aborts on null), `?:`
-Elvis, and **smart-casts** — `if (x != null)` / guard-clause narrowing with `mut` reassignment
-invalidation, all sound via the definite-assignment snapshot machinery. `?.` parsed but deferred.
-Nullable references reuse the `ptr` representation (no codegen change). See the "Nullable
-references" invariant; `tests/nullable_tests.cpp` `[nullable]`, `e2e/nullable_test.gg`.) Prior
-baseline was **809 test cases / 1565 assertions** (as of **named & mixed arguments** — `f(x: 1, y: 2)` / a
-positional prefix then named; names participate in overload selection; **defaults may now sit on
-any parameter** (contiguous-trailing rule removed) and a named call can skip a defaulted middle
-param; args evaluate in source order then reorder into parameter order; a semantic→codegen
-permutation handoff (`SemanticResult::callArgOrder`) keeps codegen positional calls unchanged. See
-the "Default parameter values + named arguments" invariant. `tests/named_args_tests.cpp` `[named]`,
-`e2e/named_args_test.gg`.) Prior baseline was **779 test cases / 1516 assertions** (the **borrow
-syntax migrated from the `ref` keyword to a postfix `*`** — `ref T`/`mut ref T` are now `T*`/`mut T*`,
-mirroring the owning `T&`; the `ref` keyword is removed. Semantics are identical (same
-`TypeKind::Reference` + `borrow`, same internal `"ref:T"` token); only the parser front-end and
-user-facing spelling changed. See the "`T*` — non-owning borrow" invariant. All `.gg`/test sources
-migrated; `[ref]` group still green.) The count previously reached this figure with `private` on
-free functions — `fn private name(...)` is file-local, warning-level: a cross-file call warns, a
-same-file call is silent, and method/impl bodies never warn; `tests/semantic_tests.cpp` `[private]`.
-Prior baseline was **774 test cases / 1501 assertions** (as of pinning the
-const/deferred-init definite-assignment edge cases — a const assigned by BOTH branches of an if/else is thereafter initialized so a later
-write is a reassignment error; a one-branch assignment leaves it re-definable; a loop-body
-assignment never establishes post-loop initialization; nested if/else assigning on every path
-initializes; definite-assignment applies to `mut` too. Behavioural docs unchanged; see
-`tests/const_tests.cpp` `[const]` + the existing `[uninit]` cases in `tests/semantic_tests.cpp`.)
-Prior baseline was **769 test cases / 1493 assertions** (as of the stdlib `String` revision + growable `Array<T>` —
-`String` now has a Java-like interface (`length`/`byteLength`/`isEmpty`/`isBlank`/`charAt`/`byteAt`/
-`equals`/`compareTo`/`startsWith`/`endsWith`/`contains`/`indexOf` + `Eq`/`Ord` impls), with the
-`ptr` buffer + `size` fields and the `cStr()`/`byteIndexOf()` helpers marked `private` so no `ptr`
-appears in the public API (the literal constructor `String(ptr)` is the one necessary exception);
-`stdlib/array.gg` is a `std::vector`-like `Array<T>` (heap buffer, geometric growth, `push`/`pop`/
-`size`/`capacity`/`reserve`/`clear`, `[]` via the `Index` trait, `get(i) -> ref T`), primitive
-elements only in v1 (object elements need per-element clone/dtor or retain/release — deferred, and
-`Array<SomeClass>` fails cleanly at the `push(T)` object-value-param check); `e2e/string_test.gg`,
-`e2e/array_test.gg`, `tests/stdlib_tests.cpp` `[stdlib]`). Prior baseline was
-**767 test cases / 1486 assertions** (as of C++-style brace construction — `Type{args}` is an
-alternate delimiter for a positional constructor call; typed `Point{...}`/`new Point{...}` reuse the
-constructor CallExpr/NewExpr path, untyped `{...}` is a new `BraceInitExpr` whose class is deduced
-from the expected type (constructor arg / var init / return), resolved via `resolveOverload`'s
-per-arg expected-type injection (unambiguous enclosing call only); enums non-constructable; a
-no-ctor `C c{}`/`C c()` zero-inits instead of calling a missing ctor; `tests/brace_init_tests.cpp`
-`[brace]`, `e2e/brace_init_test.gg`). Prior baseline was
-**752 test cases / 1455 assertions** (as of primitive-borrow edge-case hardening — passing a
-primitive lvalue to a `ref <primitive>` **parameter** now takes its address in `buildArgString`
-(`genBorrowSource`); passing a **temporary** to such a parameter is rejected (lvalue check in
-`resolveOverload`); `+=`/`++`/`--` **through** a primitive borrow are rejected with a clear message
-(write `r = r + 1`) instead of miscompiling; `genBinary` decays primitive-borrow operands so a
-`ref i32`-returning call used in arithmetic isn't misrouted. Prior baseline was
-**745 test cases / 1445 assertions** (as of store-through-a-returned-reference — `v.at(i) = x`, a
-new `RefStoreExpr` node: the parser builds it when the `=` LHS is not a name/index/member,
-`analyzeRefStore`/`genRefStore` store a value into a primitive-borrow referent; class-reference and
-non-reference targets are rejected. Prior baseline was
-**743 test cases / 1442 assertions** (as of `ref T` borrows of **primitives** — `ref i32` is an
-lvalue reference like C++'s `int&`: `makePrimitiveBorrow` (Reference+borrow+elementKind), reads
-auto-deref / writes store-through / borrow-creation & ref-return take the address via
-`genBorrowSource`; a borrow-returning call is no longer a refcount temp; `Array<i32>::get -> ref T`
-now works. Prior baseline was
-**739 test cases / 1437 assertions** (as of `ref T` non-owning borrows — prefix `ref`/`mut ref`,
-`TypeKind::Reference` + `borrow` flag, synthesized `"ref:Class"`, coercions into a borrow only,
-no refcount traffic, rejected as a field, escape-checked; a shared `ref` is read-only while
-`mut ref` may mutate; method dispatch and `ref`→`ref` passing work; `ref Self` resolves in an
-`impl`; `tests/ref_tests.cpp` `[ref]`, `e2e/ref_test.gg`). Prior baseline was
-**724 test cases / 1417 assertions** (as of escape analysis v1 — rejects passing a stack value
-object to a `Class&` parameter that returns/ref-field-stores it; gated on Object→Reference borrows
-so no false positives; `SemanticAnalyzer_Escape.cpp`, `tests/escape_tests.cpp` covers ctor stores via
-`new`/stack, local-alias escape, control-flow nesting, per-parameter granularity, and the
-local-shadows-field guard). Prior baseline was
-**704 / 1392** — generic impls — `impl<T> Trait for Class<T>` captured
-as an impl template and monomorphized alongside each `Class<args>` instantiation; `tests/trait_tests.cpp`
-`[generic][impl]`, `e2e/generic_impl_test.gg`). Prior baseline was **700 / 1386** — the stdlib `String` class + CRT-layout test update —
-`stdlib/string.gg` is now a heap-owned UTF-8 `String` (bytes + byte-length; `byteLength`/`length`
-codepoint count/`byteAt`/`charAt` UTF-8 decode to `char`/`cStr`, `Eq` impl for `==`); the old flat
-CRT binding files moved to `stdlib/crt/c*.gg` and `tests/stdlib_tests.cpp` follows the new paths;
-`e2e/string_test.gg` covers runtime behavior). Prior baseline was **696 / 1375** as of DWARF debug info — `--debug`/`-g`: Tier 1 line-level
-`!DICompileUnit`/`!DIFile`/`!DISubprogram`/`!DILocation`, Tier 2 `!DIBasicType`/`!DICompositeType`
-with member offsets/`!DILocalVariable` + `#dbg_declare` records; off by default, IR byte-identical
-when off; `tests/debug_tests.cpp`). Prior baseline was **687 / 1350** as of lambdas & callable
-objects — the `Call` trait with
-signature-carrying `Call(P…)->R` bounds canonicalized to user traits, `obj(args)` desugar,
-parser-desugared value-object lambdas with by-value capture of locals/params/fields, single-param
-inference; Java-style `switch` — statement + expression, arrow
-form, `Eq`-trait/default label comparison via factored `classifyEquality`/`emitEquality`, enum
-exhaustiveness, duplicate-label detection, `yield`; C++-style default parameter values —
-contiguous-trailing rule, call-site fill, arity-range overload resolution; generic-body checking
-against trait bounds
-(definition-time, bounded-only, new `TypeKind::TypeParam`); default class `==`/`!=` — reference
-address identity +
-value-object memberwise structural equality; value-object fields / embedding — recursive
-deep-copy clone + recursive dtor + transitive `needsDtor` + cycle rejection; the refcount
-ownership fixes; value-object → reference borrow; object-value operator returns; unified
-signature order `fn name(params) -> RetType [alias]`).
+`tests/class_tests.cpp` (`[byref]`). (Older baseline entries are pruned — this section keeps only
+the last 3; full history is in git.)
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released
@@ -2697,7 +2022,9 @@ exactly once (balanced counter ⇒ no leak; a double-free crashes). Complemented
 
 - **New language feature added** (new syntax, new type kind, new statement/expression node):
   update the architecture summary and any relevant invariants.
-- **New test milestone**: update the test baseline count after a feature lands.
+- **New test milestone**: update the test baseline count after a feature lands. **Cap the Test
+  baseline section at the 3 most recent entries** — prepend the new entry and delete the oldest so
+  the chain never exceeds 3. Do NOT keep appending indefinitely; git holds the full history.
 - **New source file or directory**: add it to the relevant section.
 - **Invariant changes** (e.g. a data structure changes type, a new `const` member is added):
   update the Key Invariants section.

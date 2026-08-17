@@ -28,6 +28,7 @@ const Token& exprFirstToken(const Expr& expr) {
         const Token& operator()(const NewExpr& newExpr)                const { return newExpr.keyword; }
         const Token& operator()(const SizeofExpr& sizeofExpr)          const { return sizeofExpr.keyword; }
         const Token& operator()(const DestroyExpr& destroyExpr)        const { return destroyExpr.keyword; }
+        const Token& operator()(const AddressOfExpr& addressOfExpr)    const { return addressOfExpr.keyword; }
         const Token& operator()(const ReflectExpr& reflect)            const { return reflect.at; }
         const Token& operator()(const SwitchExpr& switchExpr)          const { return switchExpr.keyword; }
         const Token& operator()(const MatchExpr& matchExpr)            const { return matchExpr.keyword; }
@@ -456,7 +457,7 @@ void SemanticAnalyzer::analyzeFunctionDecl(const FunctionDeclStmt& functionDecl)
     // Arrow-form (slot) functions are exempt — the slot is always a valid result.
     if (currentReturnSlotName_.empty()
         && currentReturnType->kind != TypeKind::Void && !alwaysReturns(functionDecl.body))
-        warn(functionDecl.name, "function '" + functionDecl.name.lexeme
+        error(functionDecl.name, "function '" + functionDecl.name.lexeme
              + "' does not always return a value");
     checkReturnAliasAssignedAtExit(functionDecl.body, functionDecl.name);
 
@@ -577,7 +578,7 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         if (!md.isConstructor && !md.isDestructor && currentReturnSlotName_.empty()
             && currentReturnType->kind != TypeKind::Void
             && !alwaysReturns(md.body)) {
-            warn(md.name, "method '" + md.name.lexeme
+            error(md.name, "method '" + md.name.lexeme
                  + "' does not always return a value");
         }
         if (!md.isConstructor && !md.isDestructor)
@@ -666,7 +667,7 @@ void SemanticAnalyzer::analyzeImplDecl(const ImplDeclStmt& impl) {
 
         if (currentReturnSlotName_.empty()
             && currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
-            warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+            error(md.name, "method '" + md.name.lexeme + "' does not always return a value");
         checkReturnAliasAssignedAtExit(md.body, md.name);
 
         exitScope();
@@ -831,7 +832,7 @@ void SemanticAnalyzer::analyzeEnumDecl(const EnumDeclStmt& enumDecl) {
 
         if (!md.isConstructor && currentReturnSlotName_.empty()
             && currentReturnType->kind != TypeKind::Void && !alwaysReturns(md.body))
-            warn(md.name, "method '" + md.name.lexeme + "' does not always return a value");
+            error(md.name, "method '" + md.name.lexeme + "' does not always return a value");
         if (!md.isConstructor)
             checkReturnAliasAssignedAtExit(md.body, md.name);
 

@@ -34,14 +34,14 @@ class Instance{
 
 fn main() -> i32 {
 
-    /*vec2 v1{1, 5.0};
+    vec2 v1{1, 5.0};
     vec2 v2{2, 3};
 
     vec2 v3 = v1 + v2;
     print(v3);
 
     vec2 v4 = v3 + 1.0;
-    print(v4);*/
+    print(v4);
 
     /*print(Math.sqrt(2.0));
     print('\n');
@@ -71,15 +71,17 @@ fn main() -> i32 {
     print(",");
     println(pair4.second.x);
 
-    Pair<Instance&, Instance&> pair5 = {i1, i2};
+    Instance& i3 = new Instance{1,2};
+    Instance& i4 = new Instance{3,4};
+    Pair<Instance&, Instance&> pair5 = {i3, i4};
     print(pair5.first.x);
     print(",");
     println(pair5.second.x);
 
-    /*i32? t = parseInt2("56aa");
+    i32? t = parseInt2("56aa");
     if (t != null){
         println(t);
-    }*/
+    }
 
     return 0;
 }

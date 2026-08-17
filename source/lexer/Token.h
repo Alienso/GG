@@ -35,7 +35,7 @@ enum class TokenType {
     // Keywords.
     CLASS, ENUM, ELSE, EXTERN, FALSE, FOR, IF, IMPORT,
     RETURN, BREAK, CONTINUE, SUPER, THIS, TRUE, VAR, WHILE,
-    PRIVATE, AS, NEW, SIZEOF, DESTROY, STATIC, MUT, TRAIT, IMPL, SELF, FN,
+    PRIVATE, AS, NEW, SIZEOF, DESTROY, ADDRESSOF, STATIC, MUT, TRAIT, IMPL, SELF, FN,
     SWITCH, CASE, DEFAULT, YIELD, NULL_LITERAL, ANNOTATION,
     MATCH,        // `match (e) { pattern -> … }` — destructuring pattern match (distinct from `switch`)
     QUESTION_DOT, QUESTION_COLON,   // note: `!!` (unwrap) is parsed as two BANG tokens, not one token

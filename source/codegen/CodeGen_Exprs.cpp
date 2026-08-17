@@ -208,6 +208,7 @@ std::string CodeGen::genExpr(const Expr& expr) {
         [&](const NewExpr& newExpr)                  -> std::string { return genNew(newExpr, resolvedType); },
         [&](const SizeofExpr& sizeofExpr)            -> std::string { return genSizeof(sizeofExpr); },
         [&](const DestroyExpr& destroyExpr)          -> std::string { return genDestroy(destroyExpr); },
+        [&](const AddressOfExpr& addressOfExpr)      -> std::string { return genAddressOf(addressOfExpr); },
         [&](const ReflectExpr& reflect)              -> std::string { return genReflect(reflect); },
         [&](const SwitchExpr& switchExpr)            -> std::string { return genSwitchExpr(switchExpr, resolvedType); },
         [&](const MatchExpr& matchExpr)              -> std::string { return genMatchExpr(matchExpr, resolvedType); },
@@ -583,9 +584,13 @@ std::string CodeGen::emitEquality(const void* nodeKey, const std::string& lval, 
             }
         }
     }
-    // Reference address identity (recorded by semantics) or enum singleton identity.
+    // Reference address identity (recorded by semantics), enum singleton identity, or a raw
+    // pointer (`ptr`/`ptr<T>`, any combination — they're all just `ptr` at the IR level): all
+    // compare by address, never through the numeric-widening fallback below.
     bool addrId = addressIdentityCmp_ && addressIdentityCmp_->count(nodeKey);
-    if (addrId || lt.kind == TypeKind::Enum || rt.kind == TypeKind::Enum) {
+    if (addrId || lt.kind == TypeKind::Enum || rt.kind == TypeKind::Enum
+        || lt.kind == TypeKind::Ptr || lt.kind == TypeKind::TypedPtr
+        || rt.kind == TypeKind::Ptr || rt.kind == TypeKind::TypedPtr) {
         std::string t = freshTemp();
         emit("%" + t + " = icmp " + (ne ? "ne" : "eq") + " ptr " + lval + ", " + rval);
         return "%" + t;
@@ -1710,6 +1715,22 @@ std::string CodeGen::genDestroy(const DestroyExpr& destroy) {
     if (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
         emit("call void @" + placeType.className + "_dtor(ptr " + addr + ")");
     return "";
+}
+
+// ---- addressOf(local) — raw address of a local's/parameter's own storage slot ----
+// Every GG local (primitive, value object, or owning reference) is backed by an alloca whose
+// address IS what we want here — unlike genBorrowSource (which follows an existing borrow through
+// to its referent), addressOf never dereferences: a primitive's alloca holds the scalar directly,
+// a value object's alloca already holds its bytes, and a reference's alloca holds the pointer value
+// itself (so its address is one level of indirection above the object — exactly the ptr<Class&>
+// semantics semantic analysis assigned). Semantic analysis has already restricted the operand to a
+// bare local/parameter identifier, so this is just its storage address.
+std::string CodeGen::genAddressOf(const AddressOfExpr& addressOf) {
+    const auto* id = std::get_if<IdentifierExpr>(addressOf.place->node.get());
+    if (!id) return "null";
+    std::string ptr; Type t;
+    if (resolveAssignTarget(id->name.lexeme, ptr, t)) return ptr;
+    return "null";
 }
 
 // ---- compile-time reflection (scalar queries; inline for / @field are expanded in the parser) ----

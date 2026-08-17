@@ -669,6 +669,17 @@ Expr Parser::parsePrimary() {
         return makeExpr(DestroyExpr{ keyword, std::move(place) });
     }
 
+    // addressOf(local) — the raw address of a local variable's/parameter's own storage slot, as a
+    // typed ptr<T> (unsafe container/FFI primitive; requires --unsafe-ptr). v1: a bare identifier
+    // only, validated further in semantics.
+    if (match({ TokenType::ADDRESSOF })) {
+        Token keyword = previous();
+        consume(TokenType::LEFT_PAREN, "expected '(' after 'addressOf'");
+        std::unique_ptr<Expr> place = box(parseExpression());
+        consume(TokenType::RIGHT_PAREN, "expected ')' after 'addressOf' operand");
+        return makeExpr(AddressOfExpr{ keyword, std::move(place) });
+    }
+
     // Compile-time reflection builtin: @name(args).
     if (match({ TokenType::AT })) return parseReflectExpr();
 

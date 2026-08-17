@@ -207,13 +207,12 @@ TEST_CASE("Semantic - void function itself is valid", "[semantic]") {
 // Missing return
 // ============================================================
 
-TEST_CASE("Semantic - non-void function with no return produces a warning", "[semantic]") {
+TEST_CASE("Semantic - non-void function with no return is an error", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         fn foo() -> i32 { }
     )");
-    REQUIRE_FALSE(result.hadError);   // warning, not error
-    REQUIRE(cap.contains("Warning"));
+    REQUIRE(result.hadError);
     REQUIRE(cap.contains("does not always return"));
 }
 
@@ -237,15 +236,14 @@ TEST_CASE("Semantic - if/else with both branches returning is clean", "[semantic
     REQUIRE_FALSE(cap.contains("Warning"));
 }
 
-TEST_CASE("Semantic - if without else branch warns about missing return", "[semantic]") {
+TEST_CASE("Semantic - if without else branch errors on missing return", "[semantic]") {
     StderrCapture cap;
     auto result = analyzeString(R"(
         fn foo(i32 x) -> i32 {
             if (x > 0) { return 1; }
         }
     )");
-    REQUIRE_FALSE(result.hadError);
-    REQUIRE(cap.contains("Warning"));
+    REQUIRE(result.hadError);
     REQUIRE(cap.contains("does not always return"));
 }
 

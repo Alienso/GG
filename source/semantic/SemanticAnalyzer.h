@@ -389,6 +389,8 @@ private:
     [[nodiscard]] Type analyzeIndex(const IndexExpr& indexExpr);
     [[nodiscard]] Type analyzeIndexAssign(const IndexAssignExpr& indexAssign);
     [[nodiscard]] Type analyzeDestroy(const DestroyExpr& destroy);   // destroy(place) — unsafe dtor
+    // addressOf(local) — unsafe raw address of a local's/parameter's own storage slot.
+    [[nodiscard]] Type analyzeAddressOf(const AddressOfExpr& addressOf);
     // True if a class (transitively) owns a raw ptr/ptr<T> field — can't be a by-value ptr<T> element.
     [[nodiscard]] bool classOwnsRawPtr(const std::string& className,
                                        std::unordered_set<std::string>& seen) const;

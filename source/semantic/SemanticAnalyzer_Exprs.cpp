@@ -43,6 +43,7 @@ Type SemanticAnalyzer::analyzeExpr(const Expr& expr) {
         [&](const NewExpr& newExpr)                   { return analyzeNew(newExpr); },
         [&](const SizeofExpr&)                        { return Type{TypeKind::U64}; },
         [&](const DestroyExpr& destroyExpr)           { return analyzeDestroy(destroyExpr); },
+        [&](const AddressOfExpr& addressOfExpr)       { return analyzeAddressOf(addressOfExpr); },
         [&](const ReflectExpr& reflect)               { return analyzeReflect(reflect); },
         [&](const SwitchExpr& switchExpr)             { return analyzeSwitchExpr(switchExpr); },
         [&](const MatchExpr& matchExpr)               { return analyzeMatchExpr(matchExpr); },
@@ -241,6 +242,48 @@ Type SemanticAnalyzer::analyzeDestroy(const DestroyExpr& destroy) {
         }
     }
     return Type{TypeKind::Void};
+}
+
+// `addressOf(local)` — the raw address of a local variable's/parameter's own storage slot, as a
+// typed ptr<T>. Unsafe FFI/C-binding primitive: requires --unsafe-ptr. v1 supports only a bare
+// local/parameter identifier (no fields, elements, or `this` — those are addressable in principle
+// but need more codegen plumbing; deferred).
+//
+// The element type mirrors what the variable's storage slot actually holds:
+//   - a primitive local `i32 x`        -> ptr<i32>   (address of the scalar's own storage)
+//   - a value-object local `Point p`   -> ptr<Point>  (address of the struct's own storage)
+//   - an owning-reference local `Point& r` -> ptr<Point&> (address of the SLOT HOLDING the
+//     reference — one level of indirection above the object itself, i.e. a pointer-to-pointer;
+//     this is what a C API that writes a new pointer back to you, e.g. an allocator out-param,
+//     needs). A borrow (`Point*`/`i32*`) or nullable/enum local is rejected in v1.
+Type SemanticAnalyzer::analyzeAddressOf(const AddressOfExpr& addressOf) {
+    const auto* id = addressOf.place->node
+        ? std::get_if<IdentifierExpr>(addressOf.place->node.get())
+        : nullptr;
+    const Symbol* sym = id ? symbolTable.lookup(id->name.lexeme) : nullptr;
+
+    if (!allowRawPtr_)
+        error(addressOf.keyword, "'addressOf' produces a raw pointer and requires --unsafe-ptr "
+              "(it is a low-level FFI/C-binding primitive)");
+    else if (!id || !sym || sym->kind != Symbol::Kind::Variable)
+        error(addressOf.keyword, "'addressOf' requires a bare local variable or parameter name "
+              "(v1 does not yet support fields, elements, or 'this')");
+    else {
+        const Type& t = sym->type;
+        if (t.isNullable)
+            error(addressOf.keyword, "'addressOf' does not support a nullable local yet");
+        else if (t.kind == TypeKind::Object)
+            return makeTypedPtr(TypeKind::Object, t.className);
+        else if (t.kind == TypeKind::Reference && !t.borrow)
+            return makeTypedPtr(TypeKind::Reference, t.className);
+        else if (isNumeric(t.kind) || t.kind == TypeKind::Bool || t.kind == TypeKind::Char)
+            return makeTypedPtr(t.kind);
+        else
+            error(addressOf.keyword, "'addressOf' is not supported for '" + typeName(t)
+                  + "' locals yet (v1 supports primitives, value objects, and owning 'Class&' "
+                  "references)");
+    }
+    return Type{TypeKind::Error};
 }
 
 // True if `className` (transitively, through embedded value-object fields) owns a raw `ptr`/`ptr<T>`

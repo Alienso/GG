@@ -182,6 +182,17 @@ struct DestroyExpr {
     std::unique_ptr<Expr> place;   // the object lvalue to destroy
 };
 
+// `addressOf(local)` — the raw address of a local variable's/parameter's own storage slot, as a
+// typed `ptr<T>`. Unsafe (requires --unsafe-ptr); v1 supports a bare local/parameter name only (no
+// fields, elements, or `this`). For a primitive or value-object local this is the address of the
+// value itself (`ptr<i32>` / `ptr<Point>`); for an owning `Class&` local it is the address of the
+// SLOT HOLDING the reference — i.e. one level of indirection above the object (`ptr<Point&>`),
+// which is what a C API that writes a pointer back to you (e.g. an allocator out-param) needs.
+struct AddressOfExpr {
+    Token keyword;                 // the 'addressOf' token
+    std::unique_ptr<Expr> place;   // v1: a bare local-variable/parameter identifier
+};
+
 // Compile-time reflection builtin (`@…`). TRANSIENT: folded/lowered away by the parser's
 // reflection-expansion pass, so it never reaches semantic analysis or codegen.
 //   @typeName(T)      -> string literal
@@ -305,6 +316,7 @@ struct Expr {
         NewExpr,
         SizeofExpr,
         DestroyExpr,
+        AddressOfExpr,
         ReflectExpr,
         SwitchExpr,
         MatchExpr

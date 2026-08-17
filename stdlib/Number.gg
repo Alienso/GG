@@ -21,11 +21,14 @@ class Integer {
 }
 
 
-/*fn parseInt2(str s) -> i32? { //TODO
-    ptr end = alloca(8);
-    i64 res = strtol(s.data, 0 as ptr, 0);
+fn parseInt2(str s) -> i32? {
+    ptr<i32> end = 0 as ptr;
+    i64 res = strtol(s.data, end, 0);
+    if (end == '\0' as i32){
+        return null;
+    }
     return res;
-}*/
+}
 
 fn parseInt<T>(str s, T limit) -> T? {
 

@@ -197,6 +197,11 @@ void AstPrinter::printExpr(const Expr& expr) {
             if (destroyExpr.place) { indent++; printExpr(*destroyExpr.place); indent--; }
         },
 
+        [&](const AddressOfExpr& addressOfExpr) {
+            out("AddressOf");
+            if (addressOfExpr.place) { indent++; printExpr(*addressOfExpr.place); indent--; }
+        },
+
         [&](const ReflectExpr&) {
             out("Reflect");
         },

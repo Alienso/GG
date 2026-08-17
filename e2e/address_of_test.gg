@@ -1,0 +1,62 @@
+// addressOf(local) — raw address of a local's own storage slot, for C-API binding.
+extern memcpy(ptr dst, ptr src, u64 n) -> ptr;
+
+class Point {
+    mut i32 x;
+    mut i32 y;
+    Point(i32 a, i32 b) { x = a; y = b; }
+}
+
+class Counter { static mut i32 live = 0; }
+
+class Node {
+    mut i32 v;
+    Node(i32 x) { v = x; Counter::live = Counter::live + 1; }
+    ~Node() { Counter::live = Counter::live - 1; }
+}
+
+fn main() -> i32 {
+    // 1) primitive local -> ptr<i32>, decays to plain ptr implicitly (like a call arg)
+    i32 n = 42;
+    ptr<i32> pn = addressOf(n);
+    ptr rawPn = addressOf(n);
+    ptr<i32> rawPnBack = rawPn;   // implicit ptr -> ptr<i32>
+    if (pn[0] != 42) { return 1; }
+    if (rawPnBack[0] != 42) { return 2; }
+
+    // write through the typed ptr — mutates n directly (it's n's own storage)
+    pn[0] = 99;
+    if (n != 99) { return 3; }
+
+    // 2) value-object local -> ptr<Point> (address of the struct itself)
+    Point p(1, 2);
+    ptr<Point> pp = addressOf(p);
+    ptr rawPp = pp;
+    ptr rawPp2 = addressOf(p);
+    if (rawPp != rawPp2) { return 4; }   // stable address across calls
+
+    // 3) owning reference local -> ptr<Point&> (address of the SLOT holding the reference,
+    //    one level of indirection above the object — what a C allocator out-param needs)
+    Point& r = new Point(5, 6);
+    ptr<Point&> slot = addressOf(r);
+    Point& r2 = slot[0];   // dereferencing the slot gives back the object's own reference
+    if (r2.x != 5) { return 5; }
+
+    // 4) the motivating use case: hand a local's address to a C API (out-param write-back)
+    i32 dst = 0;
+    i32 srcv = 4321;
+    memcpy(addressOf(dst), addressOf(srcv), 4 as u64);
+    if (dst != 4321) { return 6; }
+
+    // 5) reference-slot aliasing is refcount-balanced (no leak, no double-free)
+    {
+        Node& n = new Node(9);
+        ptr<Node&> nslot = addressOf(n);
+        Node& n2 = nslot[0];      // alias the same heap Node through the slot
+        if (n2.v != 9) { return 7; }
+        if (Counter::live != 1) { return 8; }
+    }
+    if (Counter::live != 0) { return 9; }   // exactly one free, no leak
+
+    return 0;
+}

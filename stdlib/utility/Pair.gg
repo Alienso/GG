@@ -2,14 +2,13 @@ import "std/IO.gg";
 
 class Pair <T, V>  {
 
-    mut T first;
-    mut V second;
+    T first;
+    V second;
 
     Pair(T t, V v){
         first = t;
         second = v;
     }
-
 
 }
 

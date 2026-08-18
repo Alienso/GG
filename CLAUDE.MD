@@ -1052,6 +1052,40 @@ parser-visible** — a bare in-scope local/param/field, `this`, or the static `C
   terse "no method 'm'" (semantics can't see generic-method names — a documented cosmetic gap).
   Tests: `tests/generic_method_tests.cpp` (`[genericmethod]`), `e2e/generic_method_test.gg`.
 
+### Type-parameter sigil substitution — `T*`/`T&` when `T` is itself a reference (`spliceTypeArg`)
+A type parameter's captured argument is a **token span**, not one synthesized token — `Point&`
+captures as `[IDENTIFIER("Point"), AMPERSAND]` (`parseOneTypeArg`, `Parser_Generics.cpp`), so that
+`argMangle` can render `.ref`. Every substitution site splices that whole span wherever `T` appears
+in a template's raw tokens. This broke when the template ALSO writes its own trailing sigil right
+after `T` (`-> T*`, `-> T&`) and `T` is bound to an already-sigiled argument (`T = Point&`): splicing
+produced two sigil tokens back to back (`Point & *`), which `consumeType` cannot decode at all — not
+even a clean semantic error, a raw parser failure (`"expected '{' before method body"`, since
+`consumeType` consumes exactly one trailing sigil and leaves the second dangling before the body's
+`{`). This is distinct from — and cannot be fixed by — C++-style reference collapsing: GG's `&`
+(owning, refcounted) and `*` (borrow, no refcount) are not interchangeable, so a merge-and-pick-a-
+winner rule risks silently handing back the wrong ownership kind. Instead: **the template site's own
+sigil is authoritative and always wins** — `spliceTypeArg` (a free helper at the top of
+`Parser_Generics.cpp`) drops the argument's trailing sigil, not the template's, whenever both are
+present: `nextIdx` (the token right after where `T` was in the template's raw stream) is a sigil AND
+`argToks.back()` is a sigil ⇒ splice `argToks` minus its last token; otherwise splice the whole span
+unchanged (the overwhelmingly common case — `T` bound to a plain value/primitive, or `T` used with no
+following sigil at all — is completely unaffected). This is a **strip, not a merge**: the author of
+`-> T*` always gets a borrow back, never a silently-widened owning reference; the resulting concrete
+type is then validated by the **existing, unchanged** cast rules once the substituted declaration is
+re-parsed and analyzed (owning `Class&` field → `T*` return is the existing Silent "owning → borrow"
+coercion; a value-object field into `T&` is still the existing "cannot bind a value as an owning
+reference" error) — nothing new is invented, the doubled-sigil case just now reaches those checks
+instead of dying in the parser. Applied identically at all three token-splice sites that share this
+pattern: class/free-function templates (the main `runMonomorphization` worklist), generic methods
+(`instantiateMethod`), and generic impls (`impl<T> Trait for Class<T>`) — the pack-substitution branch
+(`Ts... args` → tuple `*` borrow) is untouched, since it always emits its own fixed `*` regardless of
+the pack's element types and was never part of this bug. Zero runtime cost (pure parse-time token
+manipulation); cannot regress prior behavior (the doubled-sigil case was a hard parse error in every
+prior version, so nothing that used to compile can be affected). Tests: `tests/generic_method_tests.cpp`
+(`[genericmethod]`, the "sigil" cases — accept: class-template/generic-method/generic-impl getters
+returning `T*`/`T&` with `T` bound to a reference, plus a same-name non-sigiled control case; reject:
+`T&` still correctly errors when `T` is a primitive or a plain value, unchanged from before).
+
 ### Generic trait bounds (static dispatch)
 `<T: Trait>` / `<T: A + B>` constrain a type parameter to types implementing the named
 trait(s) — user traits **and** built-in operator traits (`Add`/`Ord`/…). Enforced **both** at each
@@ -1202,9 +1236,21 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
     `mut T*`; a shared `T*` errors). Codegen `genAssign` loads the referent ptr and stores.
   - *Create / return*: `genBorrowSource` produces the referent pointer for a borrow source — the
     stored ptr for a borrow identifier, the address for a plain lvalue (`resolveAssignTarget` /
-    `genElementAddress`), or the value itself for a borrow-returning call. Used by `genVarDecl`
-    (primitive-borrow init) and `genReturn` (primitive-borrow return). `analyzeVarDecl` requires the
-    source be an addressable lvalue (`isLvalueExpr`) — a temporary (`a+b`) is rejected.
+    `genElementAddress` / `resolveFieldGEP` for a `MemberAccessExpr`), or the value itself for a
+    borrow-returning call. Used by `genVarDecl` (primitive-borrow init) and `genReturn`
+    (primitive-borrow return). `analyzeVarDecl` requires the source be an addressable lvalue
+    (`isLvalueExpr`) — a temporary (`a+b`) is rejected. **The `MemberAccessExpr` case was missing
+    for a long time** — `genBorrowSource` only ever handled `IdentifierExpr`/`IndexExpr`, so an
+    explicit `obj.field` (or `obj!!.field`) as a primitive-borrow source silently fell through to
+    "not addressable" and returned `""`, emitting a malformed `store ptr , ptr %x.addr` (a missing
+    operand) that only clang's parser caught. An *implicit*-`this` field (`return n;` inside a
+    method, no `this.` prefix) was unaffected — that resolves via the `IdentifierExpr` branch's
+    `resolveAssignTarget` fallback, which already covers implicit fields. Fixed by adding a
+    `MemberAccessExpr` branch (excluding `?.`, which flows through a value slot, not a place) that
+    resolves a static field to its global or an instance field via `resolveFieldGEP`, mirroring
+    `genMemberAccess`'s own field-address logic. Found while wiring up a linked-list stdlib
+    iterator (`ListIter<T>::next()`, `stdlib/utility/List.gg`), whose `T* val = pos!!.value;` was
+    the first stdlib code to exercise a primitive borrow sourced from an explicit member access.
 - **Coercions INTO a class borrow** (`canImplicitlyCast`, `Silent`): owning `Class&`→`Class*`, value
   `Object`→`Class*`, `Class*`→`Class*`. The reverse — a borrow → an owning `Class&` — is **forbidden**.
 - **Borrow fields — allowed only under `--unsafe-ptr`, class borrows only** (`buildClassInfo`): a
@@ -1278,6 +1324,20 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   (implicit wrap); `T? → T` is **None** (must unwrap). `typeName` renders `T?`. `consumeType` reads
   a trailing `?` → a synthesized `"...?"` token; `decodeSynthesizedType` and the semantic/codegen
   resolvers strip it. `resolveTypeToken` rejects nullable value objects + `??` + (Phase-1) primitives.
+- **The `&`/`*` sigil must come BEFORE `?`, never after** (`Class&?`/`i32*?`, not `Class?&`/`i32?*`):
+  the type-suffix grammar is fixed as `BaseType [&|*] [?]`, never the reverse — there is only one
+  nullability axis for a reference (a valid, non-null handle always points at a fully-formed object;
+  there is no separate "valid handle to an absent object" state), so the reversed order could never
+  carry different semantics even if it parsed. `consumeType()` (`Parser.cpp`) throws a precise error
+  ("'&' must come before '?', not after; write 'C&?' instead of 'C?&'") when a `&`/`*` immediately
+  follows a `?`. This requires `typeSpanAt` (`Parser_Generics.cpp`, the type-detection look-ahead used
+  by `parseExpression`'s var-decl branch) to also recognize the reversed `? &`/`? *` order as *part of*
+  the span — otherwise the declaration-detection branch never fires at all (a `?` with no sigil after
+  it looks like a complete, valid nullable type to the look-ahead), and the dangling `&`/`*` gets
+  misparsed as something unrelated (`C?& a = null;` used to fall through to `parseTernary` — `C` as a
+  scrutinee, `?` starting a ternary, then `& a` failing inside the ternary's "then" branch — surfacing
+  a confusing "expected expression" instead of the real cause). Fixed at both sites so the real
+  diagnostic is always reached, for both class and primitive-borrow forms (`i32?*`).
 - **Operators**: `!!` (`analyzeUnwrap`/`genUnwrap`) null-checks and `abort()`s on null (no
   exceptions), else passes the ptr through. `?:` (`analyzeElvis`/`genElvis`) selects the non-null
   operand via a result slot. `== null` / `!= null` route through `classifyEquality`'s new null case
@@ -1972,6 +2032,87 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1347 test cases / 2503 assertions** (as of fixing three bugs found while reviewing the new
+`stdlib/utility/List.gg` — a doubly-linked-list-style singly-linked `List<T>`/`Node<T>` with an
+`Iterator`/`Iterable` impl: (1) `List::add` never advanced `last` past the first insertion — every
+add after the first overwrote `last.next` (the first node's `.next`), silently dropping and
+releasing every "middle" node once a third element was added (`size` stayed correct while the
+actual chain lost nodes — fixed by also assigning `last = node;` in the non-empty branch); (2)
+`ListIter::hasNext` checked "does the *current* node have a next" instead of "is there a current
+node", which skipped the last element of every list (a 1-element list iterated zero times) — fixed
+to `return pos != null;`; (3) a genuine compiler gap in `genBorrowSource` (`CodeGen_Exprs.cpp`,
+documented above under the `T*` invariant) that made `ListIter::next`'s `T* val = pos!!.value;`
+fail to compile at all — a primitive borrow sourced from an explicit `obj.field`/`obj!!.field`
+member access had no codegen case and silently produced malformed IR. `tests/ref_tests.cpp`
+(`[ref]`, +2: a semantic accept for a primitive borrow from both a plain and a `!!`-unwrapped
+member access, and a codegen check that the emitted IR uses a `getelementptr`, not a malformed
+empty `store`), `e2e/list_test.gg` (runtime: empty/single/multi-element iteration order and sum,
+plus a live-object-counter check that `List<Counter&>` leaks nothing and frees nothing early).
+Prior baseline was
+**1345 test cases / 2498 assertions** (as of fixing the **reversed nullable-sigil order** —
+`Class?&`/`i32?*` written instead of the correct `Class&?`/`i32*?`): the
+type-suffix grammar (`consumeType`/`consumeTypeCore`, `Parser.cpp`) only ever accepts `&`/`*` BEFORE
+`?`, never after — there is only one nullability axis for a reference (a valid, non-null handle
+always points at a fully-formed object; there's no separate "valid handle to an absent object"
+state), so the reversed order could never be semantically distinct even if parsed. Previously the
+reversed order failed with a confusing, unrelated `"expected expression"` — `typeSpanAt`
+(`Parser_Generics.cpp`, the look-ahead `parseExpression`'s var-decl branch uses to decide "is this a
+type") didn't recognize the trailing sigil as part of the span either, so the declaration-detection
+branch never fired at all and `Class?& a = null;` got misparsed as a ternary (`Class` as the
+scrutinee, `?` starting it, then the dangling `&` failing inside the "then" branch). Fixed at both
+sites: `typeSpanAt` now also consumes a `&`/`*` immediately after a lone `?` as part of the span (so
+the var-decl branch still fires), and `consumeType` then throws a precise diagnostic ("'&' must come
+before '?', not after; write 'C&?' instead of 'C?&'") instead of silently mis-tokenizing. Found while
+reviewing `stdlib/utility/List.gg`'s new `Node<T>`/`List<T>` — which also had an unrelated, real bug
+in the same file: `Node<T>.next` was declared `mut T&? next;` (a nullable reference to a bare `T`)
+instead of `mut Node<T>&? next;` (a nullable reference to the *next node*), which failed to compile
+for any non-class `T` (e.g. `List<i32>`) with `"'&' reference type is only allowed on class types,
+not 'i32'"`; fixed alongside. `tests/nullable_tests.cpp` (`[nullable]`, +2: `C?&` and `i32?*` both
+now give the precise reversed-order error instead of a confusing parse failure). Prior baseline was
+**1343 test cases / 2496 assertions** (as of an edge-case pass over the **type-parameter sigil
+substitution** fix below: confirmed the strip rule also fires correctly in PARAMETER position (not
+just returns), that `T*`/`T&` coexist correctly when both occur in the same instantiation, and that
+`T` bound to a *nested* generic-class reference (`Container<i32>&`, a 2-token span exactly like
+`Point&`) strips identically. Confirmed `-> T?` (nullable) is correctly left untouched by the strip —
+`?` is deliberately not treated as a sigil, so `T = Point&` still yields the pre-existing `Point&?`
+nullable-owning-reference form rather than being over-stripped to `Point?`. Also found, empirically,
+that `argIsSigiled`'s `STAR` branch in `spliceTypeArg` is currently **dead code** for real
+instantiations: `parseOneTypeArg` (the type-argument parser) only ever consumes a trailing `&` for an
+argument, never a `*` — `Pair<Point*, Point*>` fails at "expected '>' to close type arguments" before
+`spliceTypeArg` is ever reached, and no other call-site construction path produces an
+argument span ending in `STAR` either. Harmless (defensive, forward-compatible) but worth being
+honest that it's unexercised by any real code path today — a pre-existing, unrelated gap (borrow-typed
+generic arguments were never supported), not something this fix introduced or needs to close.
+`tests/generic_method_tests.cpp` (+4: parameter-position, `T*`+`T&` coexistence, nested-generic-arg,
+and `T?`-is-unaffected). Prior baseline was
+**1339 test cases / 2491 assertions** (as of fixing **type-parameter sigil substitution**
+(`spliceTypeArg`, `Parser_Generics.cpp`) — a generic class/method/impl whose type parameter `T` is
+bound to an already-sigiled argument (an owning reference `Point&`) used to hard-crash the PARSER
+(not even a clean semantic error) the moment the template site also wrote its own `T*`/`T&` suffix,
+because splicing produced two sigil tokens back to back (`Point & *`) that `consumeType` cannot
+decode. Found via `stdlib/utility/Pair.gg`'s `getFirst()`/`getSecond()`, whose `-> T&` return broke
+for every non-class `T` (including the already-shipped `Pair<i32,i32>`/`Pair<str,str>` — the bug was
+latent all along, since an unused generic method's body is never type-checked until something
+actually instantiates the surrounding class). Fixed with an explicit "author's sigil wins" rule
+(a strip, not a C++-style merge — GG's `&`/`*` carry different ownership semantics, so a
+merge-and-pick-a-winner rule risks silently returning the wrong ownership kind): when splicing `T`'s
+own argument tokens, if the argument itself ends in a sigil AND the template site's very next token
+is also a sigil, drop the argument's trailing sigil and let the template's own sigil (already
+present, un-modified) apply — validated by the same, unchanged cast rules every other return/field
+assignment already goes through. Applied identically at all three token-splice sites that share this
+pattern (class/free-function templates, generic methods, generic impls); the pack-substitution branch
+was untouched (it always emits a fixed `*` of its own, unrelated to this bug). Zero runtime cost
+(pure parse-time token surgery) and strictly additive — the doubled-sigil case was a hard parser
+failure in every prior version, so nothing that used to compile is affected.
+Also fixed an unrelated, adjacent bug found while chasing this down: `setupReturnAliasLocal`
+(the primitive/value return-slot zero-init) always emitted the scalar literal `store <ty> 0` — invalid
+LLVM for an aggregate return type (`str`'s `{ptr,i64}`, a nullable primitive's `{i1,iN}`) or a raw
+`ptr`, which need `zeroinitializer`/`null` respectively. Surfaced by a generic `-> T out` value-return
+getter instantiated with `T = str` (`Pair<str,str>`), which had compiled to malformed IR before this
+fix. `tests/generic_method_tests.cpp` (`[genericmethod]`, +7: three class-template getter cases
+(`T*`/`T&`/a same-name non-sigiled primitive+value control), one generic-method case, one
+generic-impl case, and two "still a clean error" negatives for `T&` with a primitive/value `T`
+unchanged from before). Prior baseline was
 **1332 test cases / 2482 assertions** (as of extending **`addressOf`** to accept a `ptr`/`ptr<T>`-typed
 local, returning `ptr<ptr>` — the missing piece for binding a C API whose out-param is itself a
 pointer (`strtoll`'s `char **endptr`), motivated by fixing the `parseInt2` draft in

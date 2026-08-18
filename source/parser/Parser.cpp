@@ -212,6 +212,15 @@ Token Parser::consumeType() {
     if (match({ TokenType::QUESTION })) {
         if (check(TokenType::QUESTION))
             throw error(peek(), "nested '?\?' is not allowed; a nullable type is written 'T?'");
+        // The '&'/'*' suffix must come BEFORE '?', never after (`Class&?`/`Class*?`, not
+        // `Class?&`/`Class?*`) — there is only one nullability axis for a reference (the handle
+        // itself is either null or points at a fully-formed object; there is no separate "valid
+        // handle to an absent object" state), so the reversed order is never meaningful and would
+        // otherwise fail later with a confusing, unrelated "expected expression".
+        if (check(TokenType::AMPERSAND) || check(TokenType::STAR))
+            throw error(peek(), "'" + peek().lexeme + "' must come before '?', not after; write '" +
+                                     base.lexeme + peek().lexeme + "?' instead of '" + base.lexeme +
+                                     "?" + peek().lexeme + "'");
         return Token{ TokenType::IDENTIFIER, base.lexeme + "?", base.line };
     }
     return base;

@@ -274,3 +274,211 @@ TEST_CASE("genericmethod - a `<` comparison of a member named like a generic met
     )");
     REQUIRE(ir.find("icmp slt") != std::string::npos);   // the comparison survived
 }
+
+// ============================================================
+// Type-parameter sigil substitution — when a type parameter T is itself bound to a reference/borrow
+// (T's own captured argument tokens end in `&`/`*`) AND the template site independently applies its
+// OWN `&`/`*` suffix (e.g. a return type written `-> T*`), the two sigils used to concatenate into an
+// undecodable token sequence (`Point & *`) — not even a clean semantic error, a raw parser failure
+// ("expected '{' before method body"). The fix (`spliceTypeArg` in Parser_Generics.cpp): the
+// template-site's own sigil is authoritative and always wins — the substituted argument's trailing
+// sigil is dropped, never silently merged/widened. Applied identically at all three substitution
+// sites: class templates, generic methods (`fn m<T>`), and generic impls (`impl<T> Trait for C<T>`).
+// ============================================================
+
+TEST_CASE("genericmethod - class-template field getter -> T* strips T's own '&' (author's sigil wins)",
+          "[genericmethod][codegen]") {
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getStar() -> T* { return v; } }
+        fn main() -> i32 {
+            Point& o = new Point(9);
+            Box<Point&> b(o);
+            Point* p = b.getStar();
+            return p.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Box$Point.ref_getStar(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - class-template field getter -> T& also strips T's own '&'",
+          "[genericmethod][codegen]") {
+    // Before the fix this specific combination (T already a reference, template also writes `&`)
+    // failed to even PARSE ("expected '{' before method body") — this is the original reported bug.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getRef() -> T& { return v; } }
+        fn main() -> i32 {
+            Point& o = new Point(9);
+            Box<Point&> b(o);
+            Point& r = b.getRef();
+            return r.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Box$Point.ref_getRef(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - sigil strip does not fire when T carries no sigil of its own",
+          "[genericmethod][codegen]") {
+    // T bound to a plain primitive/value — the overwhelmingly common case — must be completely
+    // unaffected: the full argument span (with no trailing sigil to strip) splices exactly as before.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getStar() -> T* { return v; } }
+        fn main() -> i32 {
+            Box<i32> bi(5);
+            i32* pi = bi.getStar();
+            Point p(7);
+            Box<Point> bv(p);
+            Point* pv = bv.getStar();
+            return pi + pv.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Box$i32_getStar(") != std::string::npos);
+    REQUIRE(ir.find("define ptr @Box$Point_getStar(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - sigil strip applies at the generic-METHOD (fn m<T>) substitution site too",
+          "[genericmethod][codegen]") {
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Holder { fn wrap<U>(U val) -> U* { return val; } }
+        fn main() -> i32 {
+            Holder h;
+            Point& o = new Point(9);
+            Point* p = h.wrap<Point&>(o);
+            return p.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Holder_wrap$Point.ref(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - sigil strip applies at the generic-IMPL (impl<T> Trait for C<T>) site too",
+          "[genericmethod][codegen]") {
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Holder<T> { mut T v; Holder(T x) { v = x; } }
+        impl<T> Index for Holder<T> {
+            fn get(i32 i) -> T* { return v; }
+            fn set(i32 i, T v2) mut { v = v2; }
+        }
+        fn main() -> i32 {
+            Point& o = new Point(9);
+            Holder<Point&> h(o);
+            Point* p = h[0];
+            return p.x;
+        }
+    )");
+    REQUIRE(ir.find("@Holder$Point.ref_get(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - '-> T&' with T bound to a primitive is still a clean error", "[genericmethod][semantic]") {
+    // The strip rule only fires when T ITSELF carries a sigil. T = i32 (no sigil) + template's own
+    // '&' splices to a plain 'i32&', which the existing "'&' only on class types" check still catches.
+    // This specific check lives in the PARSER's type-token consumer (Parser.cpp), not semantic
+    // analysis — it fires while re-parsing the substituted class body, so it's a parse error that
+    // parseString's try/catch swallows into an empty Program (hadError stays false); the message is
+    // still printed to stderr before being swallowed.
+    StderrCapture cap;
+    (void)analyzeString(R"(
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getRef() -> T& { return v; } }
+        fn main() -> i32 { Box<i32> b(5); return 0; }
+    )");
+    REQUIRE(cap.contains("'&' reference type is only allowed on class types"));
+}
+
+TEST_CASE("genericmethod - '-> T&' with T bound to a value object is still a clean error", "[genericmethod][semantic]") {
+    // T = Point (a value, no sigil of its own) + template's '&' splices to 'Point&' (parses fine), but
+    // `return v;` (v: Object{Point}) into an owning-reference return type is still rejected — a value
+    // can't be returned as an owning reference (the existing "cannot take a reference to a stack value"
+    // rule this whole feature was designed to preserve, never to bypass).
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getRef() -> T& { return v; } }
+        fn main() -> i32 { Point p(5); Box<Point> b(p); return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("cannot implicitly convert Point to Point&"));
+}
+
+TEST_CASE("genericmethod - sigil strip applies in PARAMETER position, not just return type",
+          "[genericmethod][codegen]") {
+    // spliceTypeArg fires on any occurrence of T immediately followed by a sigil in the template's
+    // raw token stream — a parameter `T* incoming` is exactly as affected as a return type.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Reader<T> {
+            mut i32 lastSeen;
+            Reader() { lastSeen = 0; }
+            fn readStar(T* incoming) mut { lastSeen = incoming.x; }
+        }
+        fn main() -> i32 {
+            Point& b = new Point(7);
+            mut Reader<Point&> r;
+            r.readStar(b);
+            return r.lastSeen;
+        }
+    )");
+    REQUIRE(ir.find("define void @Reader$Point.ref_readStar(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - '*' and '&' returns coexist correctly in the SAME instantiation",
+          "[genericmethod][codegen]") {
+    // Two independent occurrences of T, each followed by a different sigil, must each strip/keep
+    // correctly on their own — not cross-contaminate from a single substitution pass over the class.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Dual<T> {
+            mut T v;
+            Dual(T x) { v = x; }
+            fn asStar() -> T* { return v; }
+            fn asRef() -> T& { return v; }
+        }
+        fn main() -> i32 {
+            Point& o = new Point(5);
+            Dual<Point&> d(o);
+            Point* viaStar = d.asStar();
+            Point& viaRef = d.asRef();
+            return viaStar.x + viaRef.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Dual$Point.ref_asStar(") != std::string::npos);
+    REQUIRE(ir.find("define ptr @Dual$Point.ref_asRef(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - sigil strip applies when T is bound to a NESTED generic class reference",
+          "[genericmethod][codegen]") {
+    // T = Container<i32>& (a mangled nested instantiation + '&', a 2-token span exactly like Point&)
+    // must strip the same way as a plain class reference.
+    std::string ir = codegenString(R"(
+        class Container<T> { mut T item; Container(T x) { item = x; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn getStar() -> T* { return v; } }
+        fn main() -> i32 {
+            Container<i32>& c = new Container<i32>(42);
+            Box<Container<i32>&> b(c);
+            Container<i32>* got = b.getStar();
+            return got.item;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Box$Container$i32.ref_getStar(") != std::string::npos);
+}
+
+TEST_CASE("genericmethod - '-> T?' (nullable) is unaffected by the sigil-strip rule",
+          "[genericmethod][codegen]") {
+    // '?' is deliberately NOT treated as a sigil by spliceTypeArg — T = Point& followed by the
+    // template's own '?' must splice the FULL 'Point&' span unchanged, yielding the pre-existing
+    // 'Class&?' nullable-owning-reference form, not an over-stripped 'Point?'.
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; Point(i32 a) { x = a; } }
+        class Box<T> { mut T v; Box(T x) { v = x; } fn maybe() -> T? { return v; } }
+        fn main() -> i32 {
+            Point& o = new Point(9);
+            Box<Point&> b(o);
+            Point&? m = b.maybe();
+            if (m == null) { return 1; }
+            return m!!.x;
+        }
+    )");
+    REQUIRE(ir.find("define ptr @Box$Point.ref_maybe(") != std::string::npos);
+}

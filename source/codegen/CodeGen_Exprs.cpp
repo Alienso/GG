@@ -816,6 +816,24 @@ std::string CodeGen::genBorrowSource(const Expr& source) {
             std::string elemIr;
             return genElementAddress(*idx->object, *idx->index, elemIr);
         }
+        // A class field (`obj.field`) is an addressable lvalue — its GEP is the borrow source.
+        // `?.` is excluded: a safe-call result flows through a value slot, not a place.
+        if (const auto* ma = std::get_if<MemberAccessExpr>(source.node.get()); ma && !ma->safe) {
+            if (std::holds_alternative<IdentifierExpr>(*ma->object->node)) {
+                const auto& id = std::get<IdentifierExpr>(*ma->object->node);
+                if (findStaticField(id.name.lexeme, ma->field.lexeme))
+                    return "@" + id.name.lexeme + "$" + ma->field.lexeme;
+            }
+            Type objType = exprType(*ma->object);
+            if (objType.kind == TypeKind::Object || objType.kind == TypeKind::Reference
+                || objType.kind == TypeKind::Enum) {
+                std::string objPtr = genExpr(*ma->object);
+                if (findStaticField(objType.className, ma->field.lexeme))
+                    return "@" + objType.className + "$" + ma->field.lexeme;
+                auto [gepReg, fieldType] = resolveFieldGEP(objPtr, objType.className, ma->field.lexeme);
+                if (fieldType.kind != TypeKind::Error) return gepReg;
+            }
+        }
     }
     return "";  // not addressable (a temporary) — semantic analysis rejects this
 }

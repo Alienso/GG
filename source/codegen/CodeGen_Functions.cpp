@@ -237,7 +237,16 @@ void CodeGen::setupReturnAliasLocal(const std::string& aliasName, const Type& al
         // never released in-function. Any intermediate value from a re-assignment is released
         // by genAssign's rebind (release-old) — not here.
     } else {
-        emitStore(irt, isFloat(aliasType.kind) ? "0.0" : "0", ptrName);   // zero-init
+        // Pick the zero literal by IR shape: an aggregate (str `{ptr,i64}`, nullable primitive
+        // `{i1,iN}`, array) needs `zeroinitializer`; a raw pointer (`ptr`/`ptr<T>`) needs `null`;
+        // a float needs `0.0`; everything else (int/bool/char) takes `0`. A plain `store <agg> 0`
+        // or `store ptr 0` is invalid LLVM.
+        std::string zero;
+        if (!irt.empty() && (irt.front() == '{' || irt.front() == '['))  zero = "zeroinitializer";
+        else if (irt == "ptr")                                           zero = "null";
+        else if (isFloat(aliasType.kind))                                zero = "0.0";
+        else                                                             zero = "0";
+        emitStore(irt, zero, ptrName);   // zero-init
     }
 }
 

@@ -1,0 +1,55 @@
+import "std/utility/List.gg";
+
+class Counter {
+    static mut i32 live = 0;
+    i32 v;
+    Counter(i32 x) { v = x; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+}
+
+fn main() -> i32 {
+    // Empty list: zero iterations, no crash.
+    mut List<i32> empty{};
+    mut i32 emptyCount = 0;
+    for (i32 x : empty) { emptyCount = emptyCount + 1; }
+    if (emptyCount != 0) { return 1; }
+
+    // Single element: must be visited exactly once (regression for the hasNext() off-by-one,
+    // which used to check "does the current node have a next" instead of "is there a current
+    // node" and so skipped the last element of every list).
+    mut List<i32> single{};
+    single.add(42);
+    mut i32 singleCount = 0;
+    mut i32 singleSum = 0;
+    for (i32 x : single) { singleCount = singleCount + 1; singleSum = singleSum + x; }
+    if (singleCount != 1) { return 2; }
+    if (singleSum != 42) { return 3; }
+
+    // Multiple elements in order: regression for `last` never advancing past the first node in
+    // add(), which silently dropped/freed every middle node.
+    mut List<i32> list{};
+    list.add(10);
+    list.add(20);
+    list.add(30);
+    mut i32 count = 0;
+    mut i32 sum = 0;
+    for (i32 x : list) { count = count + 1; sum = sum + x; }
+    if (count != 3) { return 4; }
+    if (sum != 60) { return 5; }
+
+    // Reference-typed elements: exercises a `T*` iterator return where T is itself an owning
+    // reference, and confirms no leak / no premature free across the list + iterator lifetime.
+    {
+        mut List<Counter&> refs{};
+        refs.add(new Counter(1));
+        refs.add(new Counter(2));
+        refs.add(new Counter(3));
+        mut i32 seen = 0;
+        for (Counter* c : refs) { seen = seen + 1; }
+        if (seen != 3) { return 6; }
+        if (Counter::live != 3) { return 7; }
+    }
+    if (Counter::live != 0) { return 8; }
+
+    return 0;
+}

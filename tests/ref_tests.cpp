@@ -416,6 +416,39 @@ TEST_CASE("Ref - passing a stack value object to an escaping borrow param is rej
     REQUIRE(cap.contains("escapes"));
 }
 
+TEST_CASE("Ref - a primitive borrow can bind an explicit class-field member access", "[ref][semantic]") {
+    // `genBorrowSource` previously handled only a bare identifier / index expression as an
+    // addressable source — an explicit `obj.field` member access fell through to "not
+    // addressable" and produced malformed IR (a `store` with a missing operand). This exercises
+    // the fix: both a plain reference receiver and a `!!`-unwrapped nullable receiver.
+    auto r = analyzeString(R"(
+        class Node { mut i32 v; Node(i32 x) { v = x; } }
+        fn main() -> i32 {
+            Node& n = new Node(5);
+            i32* a = n.v;
+            Node&? m = new Node(7);
+            i32* b = m!!.v;
+            return a + b;
+        }
+    )");
+    REQUIRE_FALSE(r.hadError);
+}
+
+TEST_CASE("Ref - a primitive borrow from a class-field member access emits a valid GEP, not a malformed store",
+          "[ref][codegen]") {
+    std::string ir = codegenString(R"(
+        class Node { mut i32 v; Node(i32 x) { v = x; } }
+        fn grab(Node& n) -> i32 { i32* a = n.v; return a; }
+    )");
+    REQUIRE(ir.find("store ptr , ") == std::string::npos);
+    auto pos = ir.find("@grab");
+    REQUIRE(pos != std::string::npos);
+    auto end = ir.find("\n}", pos);
+    REQUIRE(end != std::string::npos);
+    std::string body = ir.substr(pos, end - pos);
+    REQUIRE(body.find("getelementptr") != std::string::npos);
+}
+
 // ---- codegen: no refcount traffic ----
 
 TEST_CASE("Ref - borrow lowers to a plain ptr with no retain/release", "[ref][codegen]") {

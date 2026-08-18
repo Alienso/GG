@@ -1,0 +1,57 @@
+class List<T>  {
+
+    mut i32 size;
+    mut Node<T>&? first;
+    mut Node<T>&? last;
+
+    List(){
+        size = 0;
+        first = null;
+        last = null;
+    }
+
+    fn add(T val) mut {
+        Node<T>& node = new Node<T>(val);
+        if (last != null){
+            last.next = node;
+        } else {
+            first = node;
+
+        }
+        last = node;
+        size++;
+    }
+
+}
+
+class Node<T> {
+    mut T value;
+    mut Node<T>&? next;
+
+    Node(T value){
+        this.value = value;
+        this.next = null;
+    }
+}
+
+
+
+class ListIter<T> {
+    mut Node<T>&? pos;
+}
+
+impl <T> Iterator for ListIter<T> {
+    fn hasNext() -> bool { return pos != null; }
+    fn next() mut -> T* {
+        T* val = pos!!.value;
+        pos = pos!!.next;
+        return val;
+    }
+}
+
+impl <T> Iterable for List<T> {
+    fn iter() -> ListIter<T> it {
+        it.pos = first;
+        return it;
+    }
+}

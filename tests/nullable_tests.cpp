@@ -25,6 +25,25 @@ TEST_CASE("Nullable - nested `??` is a parse error", "[nullable][parser]") {
     REQUIRE(cap.contains("nested '?\?'"));
 }
 
+// The '&'/'*' suffix must come BEFORE '?' (`C&?`, never `C?&`) — a reference's nullability is a
+// single axis (the handle is either null or points at a fully-formed object; there is no separate
+// "valid handle to an absent object" state), so the reversed order is never meaningful. Confirm the
+// reversed order is rejected with a precise diagnostic (not a confusing downstream parse failure
+// from the dangling sigil being misread as the start of some other construct).
+TEST_CASE("Nullable - `C?&` (sigil after '?') is a clean parse error, not a dangling-token failure",
+          "[nullable][parser]") {
+    StderrCapture cap;
+    parseString("class C { i32 x; } fn main() -> i32 { C?& a = null; return 0; }");
+    REQUIRE(cap.contains("must come before '?'"));
+}
+
+TEST_CASE("Nullable - `i32?*` (borrow after nullable primitive) is the same clean parse error",
+          "[nullable][parser]") {
+    StderrCapture cap;
+    parseString("fn main() -> i32 { i32?* a = null; return 0; }");
+    REQUIRE(cap.contains("must come before '?'"));
+}
+
 // ---- Semantic: accepted ----
 
 TEST_CASE("Nullable - a nullable reference accepts null and a non-null value", "[nullable][semantic]") {

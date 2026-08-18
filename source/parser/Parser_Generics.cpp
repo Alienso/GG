@@ -10,6 +10,35 @@
 // declared so the prescan can record it for variadic methods.
 static size_t fixedParamCount(const std::vector<Token>& toks);
 
+// Splice a type-parameter's captured argument tokens into a monomorphization output stream, at the
+// point where the template's raw tokens named the type parameter. Ordinarily this is a straight
+// copy of `argToks` — but when the argument is ITSELF a reference/borrow (its own token span ends
+// in `&` or `*`, e.g. `T` bound to `Point&`) AND the template site immediately follows with its OWN
+// `&`/`*` suffix (e.g. a return type written `-> T*`), splicing the full span would leave two sigil
+// tokens back to back (`Point & *`) — which the type parser can't decode at all (not even a clean
+// semantic error: a raw "expected '{' before method body"-style parse failure, since `consumeType`
+// only ever consumes ONE trailing sigil).
+//
+// The fix: the author's own sigil at the template site is authoritative and always wins — drop the
+// argument's trailing sigil so only the template's survives. This is a strip, not a merge: the
+// author of `-> T*` always gets a borrow, never a silently-widened owning reference, and the
+// resulting concrete type is then validated by the ordinary cast rules once the substituted
+// declaration is re-parsed and analyzed (e.g. `return first;` from an owning `Point&` field into a
+// `Point*` return type is the existing Silent "owning -> borrow" coercion; a value-object field
+// into `T&` is still the existing "cannot bind a value as an owning reference" error — nothing new
+// is invented here, the doubled-sigil case just now reaches those checks instead of dying in the
+// parser). Never fires when the argument carries no sigil of its own (the overwhelmingly common
+// case — `T` bound to a plain value or primitive) or when the template site has no sigil following.
+static void spliceTypeArg(const std::vector<Token>& argToks, const std::vector<Token>& siteToks,
+                          size_t nextIdx, std::vector<Token>& out) {
+    bool argIsSigiled = !argToks.empty()
+        && (argToks.back().type == TokenType::AMPERSAND || argToks.back().type == TokenType::STAR);
+    bool siteHasSigil = nextIdx < siteToks.size()
+        && (siteToks[nextIdx].type == TokenType::AMPERSAND || siteToks[nextIdx].type == TokenType::STAR);
+    size_t n = (argIsSigiled && siteHasSigil) ? argToks.size() - 1 : argToks.size();
+    for (size_t i = 0; i < n; ++i) out.push_back(argToks[i]);
+}
+
 
 void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
     // Register class names defined in this token stream. A class followed by '<'
@@ -441,10 +470,26 @@ size_t Parser::typeSpanAt(size_t from) const {
         }
     }
     // reference suffix: `&` (owning heap reference) or `*` (non-owning borrow)
+    bool hadSigil = false;
     if (i < tokens.size()
-        && (tokens[i].type == TokenType::AMPERSAND || tokens[i].type == TokenType::STAR)) ++i;
+        && (tokens[i].type == TokenType::AMPERSAND || tokens[i].type == TokenType::STAR)) {
+        ++i;
+        hadSigil = true;
+    }
     // nullable suffix: `T?`
-    if (i < tokens.size() && tokens[i].type == TokenType::QUESTION) ++i;
+    bool hadQuestion = false;
+    if (i < tokens.size() && tokens[i].type == TokenType::QUESTION) {
+        ++i;
+        hadQuestion = true;
+    }
+    // A sigil written AFTER '?' (`T?&`/`T?*`) is the wrong order (the sigil must come first —
+    // `T&?`/`T*?`) and `consumeType()` raises a precise error for it, but that error is only
+    // reached if this span still includes the sigil — otherwise the declaration-detection branch
+    // in `parseExpression` never recognizes this as a type at all, and the trailing `?` gets
+    // misparsed as the start of a ternary (`Node ? ...`), surfacing a confusing, unrelated
+    // "expected expression" instead of the real diagnostic.
+    if (!hadSigil && hadQuestion && i < tokens.size()
+        && (tokens[i].type == TokenType::AMPERSAND || tokens[i].type == TokenType::STAR)) ++i;
     return i - from;
 }
 
@@ -640,7 +685,7 @@ bool Parser::instantiateMethod(const GenericInstantiation& inst, Program& progra
         }
         if (t.type == TokenType::IDENTIFIER) {
             auto sit = sub.find(t.lexeme);
-            if (sit != sub.end()) { for (const Token& a : sit->second) out.push_back(a); continue; }
+            if (sit != sub.end()) { spliceTypeArg(sit->second, tmpl.tokens, idx + 1, out); continue; }
         }
         out.push_back(t);
     }
@@ -1215,7 +1260,7 @@ void Parser::runMonomorphization(Program& program) {
             if (t.type == TokenType::IDENTIFIER) {
                 auto sit = sub.find(t.lexeme);
                 if (sit != sub.end()) {
-                    for (const Token& a : sit->second) out.push_back(a);
+                    spliceTypeArg(sit->second, tmpl.tokens, idx + 1, out);
                     continue;
                 }
             }
@@ -1261,10 +1306,11 @@ void Parser::runMonomorphization(Program& program) {
                     isub.emplace(impl.targetParamAtPos[pos], inst.args[pos]);
 
                 std::vector<Token> iout;
-                for (const Token& t : impl.tokens) {
+                for (size_t idx = 0; idx < impl.tokens.size(); ++idx) {
+                    const Token& t = impl.tokens[idx];
                     if (t.type == TokenType::IDENTIFIER) {
                         auto sit = isub.find(t.lexeme);
-                        if (sit != isub.end()) { for (const Token& a : sit->second) iout.push_back(a); continue; }
+                        if (sit != isub.end()) { spliceTypeArg(sit->second, impl.tokens, idx + 1, iout); continue; }
                     }
                     iout.push_back(t);
                 }

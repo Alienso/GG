@@ -7,7 +7,7 @@
 // destroyed the right number of times. A nonzero counter = leak; a crash = double-free.
 // Expected exit code: 0.
 
-import "std/Array.gg";
+import std.Array;
 
 class Ctr {
     mut static i32 live;

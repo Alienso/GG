@@ -1,0 +1,36 @@
+module std.io;
+
+import std.crt;
+
+/*fn print<...Ts> (str* formatString, Ts... args) {
+    print(formatString, 0, args...);
+}*/
+
+// TODO private
+/*fn print<...Ts> (str* formatString, i32 cursor, Ts... args) {
+    match args {
+            ()     -> { print(formatString, cursor); }
+            (x:xs) -> {
+                // while formatString[cursor] != '{' ... print;
+                // print(x);
+                // print(formatString[cursor + 1], cursor + 1, xs);
+            }
+        }
+}*/
+
+// TODO private
+fn print(str s, i32 begin, i32 end){
+    for (mut i32 i = begin; i < end; i++){ //bounds check?
+        putchar(s[i]);
+    }
+}
+
+fn print(str s, i32 begin){
+    for (mut i32 i = begin; i < s.len; i++){ //bounds check?
+        putchar(s[i]);
+    }
+}
+
+/*fn print(str s) {
+    fputs(s.data, gg_stdout());
+}*/

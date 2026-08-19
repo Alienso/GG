@@ -1,2 +1,3 @@
-import "vector/Vector2.gg";
-import "vector/Vector3.gg";
+module std.math;
+
+import std.math.vector;

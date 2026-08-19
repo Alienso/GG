@@ -2,7 +2,7 @@
 // tuples, `._0`/`._1` access, and an object-element tuple (`(String, i32)`) that deep-clones its
 // element. Exit 0 = all checks held; a non-zero exit names the failing scenario.
 
-import "std/String.gg";
+import std.String;
 
 // Multiple return values via a tuple return-alias.
 fn divmod(i32 a, i32 b) -> (i32, i32) out {

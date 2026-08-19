@@ -17,8 +17,9 @@
 // buffer. (`data`/`size` are `mut` only so the `clone` hook can rebuild them; the type is otherwise
 // used immutably.)
 
-import "crt/cmem.gg";
-import "crt/cstring.gg";
+module std;
+
+import std.crt;
 
 class String {
     private mut ptr data;   // owned, null-terminated UTF-8 byte buffer //TODO make this str

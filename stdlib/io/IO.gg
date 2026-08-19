@@ -1,6 +1,7 @@
-import "std/crt/cio.gg";
-import "std/crt/cmem.gg";
-import "std/String.gg";
+module std.io;
+
+import std.crt;
+import std.String;
 
 
 // ============================================================

@@ -1,0 +1,9 @@
+module geo.shapes;
+
+// Deliberately shares the `geo` prefix with the single-segment `mods/geo.gg` module, to exercise
+// longest-prefix disambiguation (a bare/FQN reference to `geo.shapes.X` must fold as module
+// `geo.shapes` + name `X`, not module `geo` + a dangling `.shapes.X` chain).
+
+class Circle { mut i32 r; Circle(i32 rad) { this.r = rad; } fn area() -> i32 { return this.r * this.r * 3; } }
+
+fn describe(i32 r) -> i32 { return r * 2; }

@@ -1,3 +1,5 @@
+module std.crt;
+
 // stdlib/mem.gg — memory management bindings
 //
 // Wraps the C heap allocation functions.

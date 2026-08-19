@@ -7,6 +7,7 @@
 #include "lexer/Token.h"
 #include "parser/Parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
@@ -109,6 +110,125 @@ void ImportResolver::reportMissingImport(const std::string& filePath) {
         std::cerr << "  (search root: " << root << ")\n";
 }
 
+// ============================================================
+// Dotted-import → module-directory resolution (self-loading imports)
+// ============================================================
+
+ImportResolver::ModuleDir ImportResolver::resolveModuleDir(const std::vector<std::string>& segments,
+                                                           const fs::path& importerDir) const {
+    if (segments.empty()) return {};
+    std::error_code ec;
+    auto isDir = [&](const fs::path& p) { return fs::exists(p, ec) && fs::is_directory(p, ec); };
+
+    // A valid `import` is either a bare module (whole path is the module dir, e.g. `import std.crt;`)
+    // or module + one trailing symbol (`import std.utility.Pair;`). So only the full length and
+    // all-but-last are candidate module prefixes; anything shorter would leave >1 trailing segment.
+    for (size_t prefixLen = segments.size();
+         prefixLen >= 1 && prefixLen + 1 >= segments.size(); --prefixLen) {
+        // Candidate roots mirror resolveImportPath: `std` → stdlibDir; else importer-relative then
+        // each configured search root.
+        std::vector<fs::path> bases;
+        size_t relStart = 0;
+        if (!config_.stdlibDir.empty() && segments[0] == "std") {
+            bases.emplace_back(config_.stdlibDir);
+            relStart = 1;
+        } else {
+            bases.push_back(importerDir);
+            for (const std::string& r : config_.searchRoots) bases.emplace_back(r);
+        }
+        fs::path rel;
+        for (size_t k = relStart; k < prefixLen; ++k) rel /= segments[k];
+
+        for (const fs::path& base : bases) {
+            fs::path cand = rel.empty() ? base : base / rel;
+            if (isDir(cand)) {
+                ModuleDir md;
+                md.dir   = cand.string();
+                md.found = true;
+                for (size_t k = 0; k < prefixLen; ++k) {
+                    if (k) md.moduleName += ".";
+                    md.moduleName += segments[k];
+                }
+                return md;
+            }
+        }
+        if (prefixLen == 1) break;   // avoid size_t wraparound past 0
+    }
+    return {};
+}
+
+std::vector<std::string> ImportResolver::moduleFiles(const std::string& dir) const {
+    std::vector<std::string> files;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".gg")
+            files.push_back(entry.path().string());
+    }
+    std::sort(files.begin(), files.end());   // deterministic load order across platforms
+    return files;
+}
+
+void ImportResolver::verifyModuleDir(const std::string& dir, const std::string& expectedModule) {
+    if (!verifiedModuleDirs_.insert(dir).second) return;   // verify each directory only once
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!(entry.is_regular_file(ec) && entry.path().extension() == ".gg")) continue;
+        std::vector<std::string> paths{ entry.path().string() };
+        Lexer lexer(paths);
+        lexer.lex();
+        std::string module;
+        std::unordered_map<std::string, std::string> bindings;
+        std::unordered_set<std::string> ambiguous;
+        Parser::scanModuleDirectives(lexer.tokens()[0], module, bindings, ambiguous);
+        if (module != expectedModule) {
+            std::cerr << "Error: file '" << entry.path().string()
+                      << "' is loaded as part of module '" << expectedModule
+                      << "' (from its directory) but declares module '"
+                      << (module.empty() ? "<none>" : module) << "'\n";
+        }
+    }
+}
+
+std::vector<std::string> ImportResolver::dependencyPaths(const std::vector<Token>& tokens,
+                                                         const fs::path& importerDir) {
+    std::vector<std::string> deps;
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type != TokenType::IMPORT) continue;
+        const Token& next = tokens[i + 1];
+
+        // Quoted `import "path"` — a single file load (unchanged behavior).
+        if (next.type == TokenType::STRING) {
+            deps.push_back(resolveImportPath(importerDir, stripQuotes(next.lexeme)));
+            continue;
+        }
+        if (next.type != TokenType::IDENTIFIER) continue;
+
+        // Dotted `import a.b.C;`. The name may arrive already folded into one "a.b.C" token (in
+        // passes that qualify their tokens) or as an unfolded IDENT '.' IDENT … run — accumulate the
+        // full dotted string either way, then split into segments.
+        std::string dotted = next.lexeme;
+        size_t j = i + 2;
+        while (j + 1 < tokens.size() && tokens[j].type == TokenType::DOT
+               && tokens[j + 1].type == TokenType::IDENTIFIER) {
+            dotted += "." + tokens[j + 1].lexeme;
+            j += 2;
+        }
+        std::vector<std::string> segs;
+        for (size_t k = 0, start = 0; k <= dotted.size(); ++k) {
+            if (k == dotted.size() || dotted[k] == '.') {
+                segs.push_back(dotted.substr(start, k - start));
+                start = k + 1;
+            }
+        }
+
+        ModuleDir md = resolveModuleDir(segs, importerDir);
+        if (!md.found) continue;   // no matching directory → a pure name binding, loads no file
+        verifyModuleDir(md.dir, md.moduleName);
+        for (std::string& f : moduleFiles(md.dir)) deps.push_back(std::move(f));
+    }
+    return deps;
+}
+
 std::vector<Token> ImportResolver::qualifyFileTokens(const std::vector<Token>& tokens) const {
     std::string module;
     std::unordered_map<std::string, std::string> bindings;
@@ -146,10 +266,8 @@ void ImportResolver::scanModules(const std::string& filePath,
                               sharedGenerics_.moduleFuncs, sharedGenerics_.moduleNames);
 
     fs::path parentDir = canonical.parent_path();
-    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-        if (tokens[i].type == TokenType::IMPORT && tokens[i + 1].type == TokenType::STRING)
-            scanModules(resolveImportPath(parentDir, stripQuotes(tokens[i + 1].lexeme)), visitedPaths);
-    }
+    for (const std::string& dep : dependencyPaths(tokens, parentDir))
+        scanModules(dep, visitedPaths);
 }
 
 void ImportResolver::prescanTemplates(const std::string& filePath,
@@ -174,13 +292,8 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
     seedParser.prescanTemplateNames(qualifyFileTokens(tokens));
 
     fs::path parentDir = canonical.parent_path();
-    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-        if (tokens[i].type == TokenType::IMPORT && tokens[i + 1].type == TokenType::STRING) {
-            std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
-            std::string absPath = resolveImportPath(parentDir, rawPath);
-            prescanTemplates(absPath, visitedPaths, seedParser);
-        }
-    }
+    for (const std::string& dep : dependencyPaths(tokens, parentDir))
+        prescanTemplates(dep, visitedPaths, seedParser);
 }
 
 // ============================================================
@@ -210,24 +323,19 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
     std::unordered_set<std::string> names;
     fs::path parentDir = canonical.parent_path();
 
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        // Collect class and enum names defined in this file (both are type names — the
-        // monomorphization parser needs them to recognise e.g. `@variants(Color)` after a
-        // generic type parameter is substituted with a concrete enum).
-        if (i + 1 < tokens.size()
-            && (tokens[i].type == TokenType::CLASS || tokens[i].type == TokenType::ENUM)
+    // Collect class and enum names defined in this file (both are type names — the monomorphization
+    // parser needs them to recognise e.g. `@variants(Color)` after a generic type parameter is
+    // substituted with a concrete enum).
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if ((tokens[i].type == TokenType::CLASS || tokens[i].type == TokenType::ENUM)
             && tokens[i + 1].type == TokenType::IDENTIFIER) {
             names.insert(tokens[i + 1].lexeme);
         }
-        // Follow import statements to collect from transitive dependencies
-        if (tokens[i].type == TokenType::IMPORT
-            && i + 1 < tokens.size()
-            && tokens[i + 1].type == TokenType::STRING) {
-            std::string rawPath = stripQuotes(tokens[i + 1].lexeme);
-            std::string absPath = resolveImportPath(parentDir, rawPath);
-            auto imported = collectClassNames(absPath, visitedPaths);
-            names.insert(imported.begin(), imported.end());
-        }
+    }
+    // Collect transitively from every dependency (quoted file imports + dotted module directories).
+    for (const std::string& dep : dependencyPaths(tokens, parentDir)) {
+        auto imported = collectClassNames(dep, visitedPaths);
+        names.insert(imported.begin(), imported.end());
     }
     return names;
 }
@@ -261,29 +369,30 @@ Program ImportResolver::processFile(const std::string& filePath) {
     std::vector<std::string> paths = { canonicalString };
     Lexer lexer(paths);
     lexer.lex();
+    const std::vector<Token>& tokens = lexer.tokens()[0];
     // Bind to the shared generics registry and defer monomorphization — resolve()
     // expands all instantiations once after every file has been parsed.
     Parser parser(std::move(allClassNames), &sharedGenerics_);
-    Program rawProgram = parser.parse(lexer.tokens()[0], canonicalString, /*runMonomorphization=*/false);
+    Program rawProgram = parser.parse(tokens, canonicalString, /*runMonomorphization=*/false);
 
     fs::path parentDirectory = canonical.parent_path();
     Program result;
 
+    // Splice in every dependency's declarations first (quoted file imports + dotted module
+    // directories), dependency-first. Declaration order in the flattened Program is not
+    // load-bearing — semantic/codegen run their own name-collection passes — so a uniform
+    // dependencies-then-own-decls order is fine and handles both import kinds identically.
+    for (const std::string& dep : dependencyPaths(tokens, parentDirectory)) {
+        Program imported = processFile(dep);
+        for (Stmt& importedDecl : imported.declarations)
+            result.declarations.push_back(std::move(importedDecl));
+    }
+    // Then this file's own declarations, dropping ImportStmt nodes (quoted imports — already
+    // followed above; dotted imports produce no AST node at all).
     for (Stmt& declaration : rawProgram.declarations) {
         if (!declaration.node) continue;
-
-        if (std::holds_alternative<ImportStmt>(*declaration.node)) {
-            // Resolve the import path relative to the current file's directory.
-            const auto& importStmt   = std::get<ImportStmt>(*declaration.node);
-            std::string relativePath = stripQuotes(importStmt.path.lexeme);
-            std::string absolutePath = resolveImportPath(parentDirectory, relativePath);
-
-            Program imported = processFile(absolutePath);
-            for (Stmt& importedDecl : imported.declarations)
-                result.declarations.push_back(std::move(importedDecl));
-        } else {
-            result.declarations.push_back(std::move(declaration));
-        }
+        if (std::holds_alternative<ImportStmt>(*declaration.node)) continue;
+        result.declarations.push_back(std::move(declaration));
     }
 
     return result;

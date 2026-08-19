@@ -1,4 +1,6 @@
-import "std/io.gg";
+module std.math.vector;
+
+import std.io.print;
 
 //TODO Eq use some eps
 

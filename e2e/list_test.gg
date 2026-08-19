@@ -1,4 +1,4 @@
-import "std/utility/List.gg";
+import std.utility.List;
 
 class Counter {
     static mut i32 live = 0;

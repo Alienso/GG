@@ -33,9 +33,15 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
     Program program;
     while (!isAtEnd()) {
         // Consume module-namespacing directives (already recorded above); they emit no AST node.
-        if (check(TokenType::MODULE)) {                 // `module NAME ;`
+        if (check(TokenType::MODULE)) {                 // `module NAME ('.' NAME)* ;`
             advance();
-            if (check(TokenType::IDENTIFIER)) advance();
+            if (check(TokenType::IDENTIFIER)) {
+                advance();
+                while (check(TokenType::DOT) && peekNext().type == TokenType::IDENTIFIER) {
+                    advance();   // '.'
+                    advance();   // IDENT
+                }
+            }
             (void)match({ TokenType::SEMICOLON });
             continue;
         }

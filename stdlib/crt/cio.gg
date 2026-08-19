@@ -1,4 +1,6 @@
-// stdlib/io.gg — standard I/O bindings
+module std.crt;
+
+// stdlib/io/io.gg — standard I/O bindings
 //
 // Wraps the C standard I/O functions available in libc.
 // Import this module for basic console output and input.

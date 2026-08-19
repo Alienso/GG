@@ -13,7 +13,7 @@
 // slot that was just destroy()'d (whose raw bytes are stale, not zero).
 // Expected exit code: 0.
 
-import "std/crt/cmem.gg";
+import std.crt;
 
 class Ctr {
     mut static i32 live;

@@ -1,3 +1,5 @@
+module std.crt;
+
 // stdlib/string.gg — C string utility bindings
 //
 // Wraps the standard null-terminated string functions from <string.h>.

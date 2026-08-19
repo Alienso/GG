@@ -14,7 +14,9 @@
 // The buffer and its size/capacity are PRIVATE — the interface never exposes a `ptr`.
 // Requires --unsafe-ptr for the internal `ptr<T>` buffer + `destroy` (compile.ps1 passes it).
 
-import "crt/cmem.gg";
+module std;
+
+import std.crt;
 
 class Array<T> {
     private mut ptr<T> data;   // owned buffer of `cap` slots

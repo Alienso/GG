@@ -78,10 +78,16 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
             while (nameIdx < toks.size()
                    && (toks[nameIdx].type == TokenType::STATIC || toks[nameIdx].type == TokenType::PRIVATE))
                 ++nameIdx;
-            if (!(nameIdx + 1 < toks.size()
-                  && toks[nameIdx].type == TokenType::IDENTIFIER
-                  && toks[nameIdx + 1].type == TokenType::LESS))
+            if (nameIdx >= toks.size() || toks[nameIdx].type != TokenType::IDENTIFIER) continue;
+            bool isGenericDecl = nameIdx + 1 < toks.size() && toks[nameIdx + 1].type == TokenType::LESS;
+            if (!isGenericDecl) {
+                // An ordinary (non-generic) top-level function — record its name so the call-site
+                // inference gate knows a bare call to this name might ALSO resolve to a plain
+                // overload, even when the same bare name is a generic template elsewhere.
+                if (classBody.empty() && toks[nameIdx].lexeme != "main")
+                    gen_->ordinaryFuncNames.insert(toks[nameIdx].lexeme);
                 continue;
+            }
             size_t j = nameIdx + 2; int depth = 1;
             while (j < toks.size() && depth > 0) {
                 if (toks[j].type == TokenType::LESS)             depth++;

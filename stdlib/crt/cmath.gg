@@ -1,3 +1,5 @@
+module std.crt;
+
 // stdlib/math.gg — mathematical function bindings
 //
 // Wraps the standard math functions from <math.h>.

@@ -1,5 +1,6 @@
-import "std/math/vector/Vector2.gg";
-import "std/math/Math.gg";
+module std.math.vector;
+
+import std.math.Math;
 
 class vec3 {
     mut f32 x;

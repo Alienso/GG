@@ -3,8 +3,8 @@
 // NUL-terminated `ptr` for FFI. `str` is safe (no --unsafe-ptr) and implicitly decays to `ptr`.
 // Returns a unique number on the first failing check; 0 on success.
 
-import "std/crt/cstring.gg";   // strlen(ptr) -> u64
-import "std/String.gg";        // String(str)
+import std.crt;         // strlen(ptr) -> u64
+import std.String;      // String(str)
 
 // str as a parameter and a return type.
 fn label() -> str { return "hello"; }

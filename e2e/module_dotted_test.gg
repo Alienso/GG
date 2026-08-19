@@ -1,0 +1,21 @@
+// Dotted (multi-segment) module names and import paths (`module a.b;`, `import a.b.C;`), plus
+// longest-prefix FQN disambiguation against a sibling single-segment module that shares a textual
+// prefix (`geo` vs `geo.shapes`). Returns 0 on success.
+import "mods/geo.gg";
+import "mods/geo_shapes.gg";
+import geo.shapes.Circle;
+
+fn main() -> i32 {
+    Circle c(3);                          // bare -> geo.shapes.Circle (dotted import)
+    if (c.area() != 27) { return 1; }     // 3*3*3
+
+    geo.shapes.Circle c2(2);              // inline FQN; longest-prefix fold picks "geo.shapes" over "geo"
+    if (c2.area() != 12) { return 2; }    // 2*2*3
+
+    if (geo.shapes.describe(5) != 10) { return 3; }   // qualified free-fn call through a dotted module
+
+    geo.Point p(3, 4);                    // sibling single-segment module "geo" still resolves fine
+    if (p.sum() != 7) { return 4; }
+
+    return 0;
+}

@@ -7,7 +7,7 @@
 // own constructor — `data[i] = Box(args...)` — with zero temporary object and zero clone.
 // Exit 0 = all checks held.
 
-import "std/crt/cmem.gg";
+import std.crt;
 
 class Ctr {
     mut static i32 live;

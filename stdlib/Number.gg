@@ -1,5 +1,6 @@
-import "crt/util.gg";
-import "crt/cmem.gg";
+module std;
+
+import std.crt;
 
 class Integer {
 

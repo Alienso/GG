@@ -60,6 +60,14 @@ struct GenericRegistry {
     std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
     std::unordered_set<std::string>                  funcNames;     // generic function names
     std::unordered_set<std::string>                  classNames;    // generic class names
+    // Top-level free functions with at least one ORDINARY (non-generic) declaration somewhere in the
+    // program — a bare name may be BOTH a generic template (in funcNames) AND have plain overloads
+    // under GG's overload model (e.g. a stdlib module declaring `fn print(i32)` in one file and
+    // `fn print<...Ts>(...)` in another, both loaded together). The call-site inference gate in
+    // Parser_Expr.cpp consults this before hard-erroring on a failed generic-inference attempt, so a
+    // call that doesn't fit the generic template's shape can still fall through to the ordinary
+    // overload instead of being permanently captured by the generic path.
+    std::unordered_set<std::string>                  ordinaryFuncNames;
     // ---- Generic methods (`fn m<T>` on a class) ----
     // A generic method is captured as a template keyed by `OwnerClass::method` (the owner is the
     // possibly-mangled class the method is declared in — e.g. `Box::wrap` or, during a generic

@@ -1,16 +1,10 @@
-import "std/crt/cio.gg";
-import "std/crt/cmem.gg";
-import "std/crt/cstring.gg";
-
-import "std/array.gg";
-import "std/string.gg";
-import "std/number.gg";
-import "std/math/vector.gg";
-import "std/math/math.gg";
-import "std/utility/Pair.gg";
-import "std/utility/List.gg";
-
-import "std/io.gg";
+import std.math.vector.vec2;
+import std.utility.Pair;
+import std.io.print;
+import std.io.println;
+import std.io.printObj;
+import std.String;
+import std.utility.List;
 
 class Instance{
     i32 x;

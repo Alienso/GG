@@ -4,7 +4,7 @@
 // cursor always goes through the collection's current buffer. (A snapshot cursor would dangle on the
 // old, freed buffer and crash / read garbage.) Expected exit code: 0.
 
-import "std/Array.gg";
+import std.Array;
 
 fn main() -> i32 {
     mut Array<i32>& a = new Array<i32>();   // initial capacity 8

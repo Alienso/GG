@@ -3,7 +3,7 @@
 // form, and an object-element `(String, i32)` tuple matched + dropped (a clean run = no double-free).
 // Exit 0 = all checks held; a non-zero exit names the failing scenario.
 
-import "std/String.gg";
+import std.String;
 
 class Point {
     i32 x;

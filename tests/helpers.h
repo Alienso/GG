@@ -149,9 +149,10 @@ inline std::string codegenString(const std::string& source,
 // Used by stdlib tests that operate on actual source files rather than inline strings.
 // options defaults to defaultTestOptions() (allowRawPtr=true).
 inline std::string codegenFile(const std::string& path,
-                                CompilerOptions options = defaultTestOptions()) {
+                                CompilerOptions options = defaultTestOptions(),
+                                const ModuleSearchConfig& config = {}) {
     ImportResolver resolver;
-    Program ast = resolver.resolve(path);
+    Program ast = resolver.resolve(path, config);
     SemanticAnalyzer analyzer;
     SemanticResult semanticResult = analyzer.analyze(ast, path, options);
     CodeGen codeGenerator;

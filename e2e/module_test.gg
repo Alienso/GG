@@ -5,9 +5,9 @@
 // Returns 0 on success.
 import "mods/geo.gg";
 import "mods/phys.gg";
-import "std/String.gg";
 import geo.Point;
 import geo.Kind;
+import std.String;
 
 fn main() -> i32 {
     Point p(3, 4);                         // bare → geo.Point

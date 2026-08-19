@@ -1,5 +1,6 @@
-import "std/crt/cmath.gg";
-import "std/IO.gg";
+module std.math;
+
+import std.crt;
 
 class Math{
 

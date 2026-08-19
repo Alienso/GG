@@ -5,8 +5,8 @@
 //
 // Exit 0 = all assertions held. A non-zero exit names the failing scenario.
 
-import "std/String.gg";
-import "std/Array.gg";
+import std.String;
+import std.Array;
 
 class Point {
     mut i32 x;

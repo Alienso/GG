@@ -1,3 +1,5 @@
+module std.crt;
+
 extern strtol(ptr string, ptr end, i32 base) -> i64;
 extern strtoll(ptr string, ptr end, i32 base) -> i64;
 extern strtoull(ptr string, ptr end, i32 base) -> u64;

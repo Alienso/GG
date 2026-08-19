@@ -843,11 +843,19 @@ Expr Parser::parsePrimary() {
                     return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                               std::move(args), std::move(argNames) });
                 }
-                // A generic function with no explicit `<…>` whose type arguments we could not deduce:
-                // a clear error beats the confusing "unknown function" a bare template name causes
-                // later (only mangled instantiations are ever defined).
-                throw error(name, "cannot infer type argument(s) for generic function '" + name.lexeme
-                            + "'; specify them explicitly, e.g. " + name.lexeme + "<Type>(...)");
+                // A generic function with no explicit `<…>` whose type arguments we could not deduce.
+                // If the same bare name ALSO has an ordinary (non-generic) declaration somewhere in
+                // the program, this call may simply be meant for that overload — GG allows a bare
+                // name to be both a generic template and a set of plain overloads at once (e.g. a
+                // stdlib module that grows a generic overload alongside its existing plain ones) — so
+                // fall through to an ordinary call and let semantic overload resolution decide.
+                // Only hard-error when there is no such fallback: a PURELY generic function's bare
+                // name would otherwise resolve to nothing later (only mangled instantiations are ever
+                // defined), producing a much more confusing "unknown function" error instead.
+                if (!gen_->ordinaryFuncNames.count(name.lexeme)) {
+                    throw error(name, "cannot infer type argument(s) for generic function '" + name.lexeme
+                                + "'; specify them explicitly, e.g. " + name.lexeme + "<Type>(...)");
+                }
             }
             return makeExpr(CallExpr{ name, std::move(args), std::move(argNames) });
         }

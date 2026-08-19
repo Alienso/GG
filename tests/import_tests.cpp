@@ -259,3 +259,58 @@ TEST_CASE("ImportResolver - a missing `std/` import reports against the stdlib d
     REQUIRE(capture.contains("Error"));
     REQUIRE(capture.contains("std/ resolves to"));
 }
+
+// ============================================================
+// ImportResolver — dotted imports self-load their module directory (no quoted file import needed)
+// ============================================================
+
+TEST_CASE("ImportResolver - a dotted module import self-loads every file in its directory", "[import]") {
+    // A `std`-anchored package directory with two files that TOGETHER form module `std.geo`. Importing
+    // one symbol (`import std.geo.Point;`) must load the whole directory — both Point and Vec — with
+    // no quoted `import "..."` anywhere.
+    fs::path pkg = fs::temp_directory_path() / "gg_selfload_std" / "geo";
+    fs::create_directories(pkg);
+    std::ofstream((pkg / "Point.gg").string())
+        << "module std.geo;\nclass Point { i32 x; Point(i32 v) { this.x = v; } }";
+    std::ofstream((pkg / "Vec.gg").string())
+        << "module std.geo;\nclass Vec { i32 n; Vec(i32 v) { this.n = v; } }";
+
+    // `import std.geo.Point;` binds the bare name `Point` AND loads its whole module directory.
+    // `Vec` lives in a sibling file of the same module — not import-bound here, but loaded by the
+    // same directory pull, so it resolves by its fully-qualified name.
+    std::string mainPath = writeTempFileIn("gg_selfload_app", "main.gg",
+        "import std.geo.Point;\nfn main() -> i32 { Point p(1); std.geo.Vec v(2); return 0; }");
+
+    ModuleSearchConfig cfg;
+    cfg.stdlibDir = (fs::temp_directory_path() / "gg_selfload_std").string();
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(result, mainPath, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);   // Point (imported) + Vec (FQN, same dir) both resolved → dir loaded
+}
+
+TEST_CASE("ImportResolver - a file whose declared module mismatches its directory is reported",
+          "[import]") {
+    // One file in the `std.geo` directory wrongly declares `module std.wrong;`. Loading the module
+    // directory must report the mismatch (a file's location must match its declared module).
+    fs::path pkg = fs::temp_directory_path() / "gg_mismatch_std" / "geo";
+    fs::create_directories(pkg);
+    std::ofstream((pkg / "Ok.gg").string())
+        << "module std.geo;\nclass Ok { i32 x; Ok(i32 v) { this.x = v; } }";
+    std::ofstream((pkg / "Bad.gg").string())
+        << "module std.wrong;\nclass Bad { i32 y; Bad(i32 v) { this.y = v; } }";
+
+    std::string mainPath = writeTempFileIn("gg_mismatch_app", "main.gg",
+        "import std.geo.Ok;\nfn main() -> i32 { Ok o(1); return 0; }");
+
+    ModuleSearchConfig cfg;
+    cfg.stdlibDir = (fs::temp_directory_path() / "gg_mismatch_std").string();
+
+    StderrCapture capture;
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath, cfg);
+    REQUIRE(capture.contains("declares module 'std.wrong'"));
+    REQUIRE(capture.contains("module 'std.geo'"));
+}

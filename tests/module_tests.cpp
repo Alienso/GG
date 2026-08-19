@@ -208,3 +208,136 @@ TEST_CASE("Module - a cross-module free function is callable by its qualified na
     std::ostringstream out; IRPrinter{}.print(ir, out);
     REQUIRE(out.str().find("@lib.twice(") != std::string::npos);
 }
+
+// ------------------------------------------------------------
+// Dotted (multi-segment) module names and import paths
+// ------------------------------------------------------------
+// `module std.utility;` / `import std.utility.Pair;` generalize the single-segment grammar to a
+// dot-separated chain: the module-name read and the import-path split both accept `IDENT
+// ('.' IDENT)*`, and an import's LAST segment is always the symbol (unambiguous — GG top-level
+// decls are always flat, never nested).
+
+TEST_CASE("Module - a dotted module name qualifies its class type in IR", "[module]") {
+    auto ir = codegenString(R"(
+        module std.utility;
+        class Pair { mut i32 a; Pair(i32 v) { this.a = v; } fn get() -> i32 { return this.a; } }
+        fn main() -> i32 { Pair p(5); return p.get(); }
+    )");
+    REQUIRE(ir.find("%std.utility.Pair = type") != std::string::npos);
+    REQUIRE(ir.find("@std.utility.Pair_get(")   != std::string::npos);
+}
+
+TEST_CASE("Module - a dotted import path binds only the last segment (not a prefix segment)", "[module]") {
+    // Regression guard: the import-scanner used to pattern-match exactly one dot (`IDENT.IDENT`),
+    // so `import a.b.Widget;` wrongly registered a binding for the simple name `b` -> "a.b" (a
+    // dangling, meaningless target) while `Widget` (the actually-wanted symbol) was never imported
+    // at all — surfacing later as an unrelated "expected expression"/"not a known type" error.
+    writeIn("gg_mod_dotted_import", "lib.gg",
+            "module a.b;\nclass Widget { mut i32 x; Widget(i32 v) { this.x = v; } }");
+    std::string root = writeIn("gg_mod_dotted_import", "main.gg", R"(
+        import "lib.gg";
+        import a.b.Widget;
+        fn main() -> i32 { Widget w(9); return w.x - 9; }
+    )");
+
+    ImportResolver resolver;
+    Program program = resolver.resolve(root);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+
+    CodeGen cg;
+    IRModule ir = cg.generate(program, sem, defaultTestOptions());
+    std::ostringstream out; IRPrinter{}.print(ir, out);
+    REQUIRE(out.str().find("%a.b.Widget = type") != std::string::npos);
+}
+
+TEST_CASE("Module - an inline fully-qualified dotted reference folds without any import line", "[module]") {
+    writeIn("gg_mod_dotted_fqn", "lib.gg",
+            "module a.b;\nclass Widget { mut i32 x; Widget(i32 v) { this.x = v; } }");
+    std::string root = writeIn("gg_mod_dotted_fqn", "main.gg", R"(
+        import "lib.gg";
+        fn main() -> i32 { a.b.Widget w(4); return w.x - 4; }
+    )");
+
+    ImportResolver resolver;
+    Program program = resolver.resolve(root);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+
+    CodeGen cg;
+    IRModule ir = cg.generate(program, sem, defaultTestOptions());
+    std::ostringstream out; IRPrinter{}.print(ir, out);
+    REQUIRE(out.str().find("%a.b.Widget = type") != std::string::npos);
+}
+
+TEST_CASE("Module - longest-prefix FQN fold picks a longer registered module over a shorter overlapping one",
+          "[module]") {
+    writeIn("gg_mod_longest_prefix", "a.gg", "module a;\nfn x() -> i32 { return 1; }");
+    writeIn("gg_mod_longest_prefix", "ab.gg", "module a.b;\nfn y() -> i32 { return 42; }");
+    std::string root = writeIn("gg_mod_longest_prefix", "main.gg", R"(
+        import "a.gg";
+        import "ab.gg";
+        fn main() -> i32 { return a.x() + a.b.y(); }
+    )");
+
+    ImportResolver resolver;
+    Program program = resolver.resolve(root);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+
+    CodeGen cg;
+    IRModule ir = cg.generate(program, sem, defaultTestOptions());
+    std::ostringstream out; IRPrinter{}.print(ir, out);
+    std::string s = out.str();
+    REQUIRE(s.find("@a.x(")   != std::string::npos);
+    REQUIRE(s.find("@a.b.y(") != std::string::npos);   // proves "a.b.y" folds as module a.b + name y,
+                                                        // not module a + a dangling ".b.y" chain
+}
+
+TEST_CASE("Module - a declaration's own name is never hijacked by an import of the same bare name",
+          "[module]") {
+    // Regression guard for a pre-existing bug in the qualifier (not introduced by dotted-module
+    // support): module `a` declares `fn f()`; module `b` ALSO declares its own `fn f()` AND imports
+    // `a.f` under the same bare name `f`. Before the fix, `qualifyTokens` resolved a declaration's
+    // own name the same way as any call site (import binding first) — so `b`'s own `fn f()` would
+    // get silently renamed/collided into `a.f` instead of declaring `b.f`. A declaration always
+    // belongs to its own module; only ordinary call sites (like `callImported`'s bare `f()`) should
+    // resolve through the import binding.
+    writeIn("gg_mod_decl_collision", "a.gg", "module a;\nfn f() -> i32 { return 1; }");
+    std::string root = writeIn("gg_mod_decl_collision", "main.gg", R"(
+        module b;
+        import "a.gg";
+        import a.f;
+        fn f() -> i32 { return 2; }
+        fn callImported() -> i32 { return f(); }
+        fn main() -> i32 {
+            if (b.f() != 2) { return 1; }
+            if (b.callImported() != 1) { return 2; }
+            return 0;
+        }
+    )");
+
+    ImportResolver resolver;
+    Program program = resolver.resolve(root);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+
+    CodeGen cg;
+    IRModule ir = cg.generate(program, sem, defaultTestOptions());
+    std::ostringstream out; IRPrinter{}.print(ir, out);
+    std::string s = out.str();
+    REQUIRE(s.find("@a.f(") != std::string::npos);
+    REQUIRE(s.find("@b.f(") != std::string::npos);   // b's own decl kept its own identity
+    // b's internal bare f() call resolves through the import to a.f, not to b's own f.
+    auto callImportedPos = s.find("@b.callImported(");
+    REQUIRE(callImportedPos != std::string::npos);
+    auto bodyEnd = s.find("\n}", callImportedPos);
+    REQUIRE(bodyEnd != std::string::npos);
+    std::string body = s.substr(callImportedPos, bodyEnd - callImportedPos);
+    REQUIRE(body.find("@a.f(") != std::string::npos);
+    REQUIRE(body.find("@b.f(") == std::string::npos);
+}

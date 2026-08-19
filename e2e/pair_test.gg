@@ -1,7 +1,7 @@
 // e2e: one by-value Pair<T,V> constructor serves primitives, value-objects (borrow + clone; source
 // stays valid), and owning references (co-own). A live-object counter proves no leak / double-free
 // across all forms. Expected exit code: 0.
-import "std/utility/Pair.gg";
+import std.utility.Pair;
 
 class Counted {
     mut i32 v;

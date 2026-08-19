@@ -2,7 +2,7 @@
 // standard library regardless of this file's location on disk (no `../stdlib` walk).
 // Returns 0 on success.
 
-import "std/String.gg";
+import std.String;
 
 fn main() -> i32 {
     String s("café");

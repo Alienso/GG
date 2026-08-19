@@ -1,3 +1,5 @@
+module std.crt;
+
 // stdlib/process.gg — process control bindings
 //
 // Wraps the standard process management functions from <stdlib.h>.

@@ -3,7 +3,7 @@
 // `match args { () -> …; (x:xs) -> … }` recurses over the pack (head `x` = args._0, tail-pack `xs`
 // spread with `xs...`) down to the empty `()` base case. Exit 0 = all checks held.
 
-import "std/String.gg";
+import std.String;
 
 // Pure arity via cons-recursion over a HETEROGENEOUS pack.
 fn count<...Ts>(Ts... args) -> i32 {

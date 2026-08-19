@@ -10,8 +10,17 @@ static std::string stdlibPath(const std::string& filename) {
     return std::string(GG_SOURCE_DIR) + "/stdlib/" + filename;
 }
 
+// The stdlib is namespaced under `std`, and its files self-load their dependencies via dotted
+// imports (`import std.crt;`), which require the `std/` anchor to be configured — exactly as
+// main.cpp/compile.ps1 always do. Point it at the real stdlib directory.
+static ModuleSearchConfig stdlibConfig() {
+    ModuleSearchConfig cfg;
+    cfg.stdlibDir = std::string(GG_SOURCE_DIR) + "/stdlib";
+    return cfg;
+}
+
 static std::string stdlibIR(const std::string& filename) {
-    return codegenFile(stdlibPath(filename));
+    return codegenFile(stdlibPath(filename), defaultTestOptions(), stdlibConfig());
 }
 
 // Analyze a stdlib file with the default test options (allowRawPtr = true, so the
@@ -19,7 +28,7 @@ static std::string stdlibIR(const std::string& filename) {
 // compiles the stdlib with --unsafe-ptr).
 static SemanticResult analyzeStdlib(const std::string& filename) {
     ImportResolver resolver;
-    Program program = resolver.resolve(stdlibPath(filename));
+    Program program = resolver.resolve(stdlibPath(filename), stdlibConfig());
     SemanticAnalyzer analyzer;
     return analyzer.analyze(program, "", defaultTestOptions());
 }
@@ -93,27 +102,27 @@ TEST_CASE("stdlib/string.gg - semantic analysis passes", "[stdlib][string]") {
 
 TEST_CASE("stdlib/string.gg - IR defines the String type, ctor and dtor", "[stdlib][string]") {
     std::string ir = stdlibIR("String.gg");
-    REQUIRE(ir.find("%String = type") != std::string::npos);
-    REQUIRE(ir.find("@String_String(ptr") != std::string::npos);
-    REQUIRE(ir.find("@String_dtor(ptr") != std::string::npos);
+    REQUIRE(ir.find("%std.String = type") != std::string::npos);
+    REQUIRE(ir.find("@std.String_std.String(ptr") != std::string::npos);
+    REQUIRE(ir.find("@std.String_dtor(ptr") != std::string::npos);
 }
 
 TEST_CASE("stdlib/string.gg - IR defines the UTF-8 accessor methods", "[stdlib][string]") {
     std::string ir = stdlibIR("String.gg");
-    REQUIRE(ir.find("@String_byteLength(") != std::string::npos);
-    REQUIRE(ir.find("@String_length(")     != std::string::npos);
-    REQUIRE(ir.find("@String_charAt(")     != std::string::npos);
-    REQUIRE(ir.find("@String_eq(")         != std::string::npos);   // the Eq impl
+    REQUIRE(ir.find("@std.String_byteLength(") != std::string::npos);
+    REQUIRE(ir.find("@std.String_length(")     != std::string::npos);
+    REQUIRE(ir.find("@std.String_charAt(")     != std::string::npos);
+    REQUIRE(ir.find("@std.String_eq(")         != std::string::npos);   // the Eq impl
 }
 
 TEST_CASE("stdlib/string.gg - IR defines the Java-like query methods", "[stdlib][string]") {
     std::string ir = stdlibIR("String.gg");
-    REQUIRE(ir.find("@String_startsWith(") != std::string::npos);
-    REQUIRE(ir.find("@String_endsWith(")   != std::string::npos);
-    REQUIRE(ir.find("@String_contains(")   != std::string::npos);
-    REQUIRE(ir.find("@String_indexOf(")    != std::string::npos);
-    REQUIRE(ir.find("@String_compareTo(")  != std::string::npos);
-    REQUIRE(ir.find("@String_cmp(")        != std::string::npos);   // the Ord impl
+    REQUIRE(ir.find("@std.String_startsWith(") != std::string::npos);
+    REQUIRE(ir.find("@std.String_endsWith(")   != std::string::npos);
+    REQUIRE(ir.find("@std.String_contains(")   != std::string::npos);
+    REQUIRE(ir.find("@std.String_indexOf(")    != std::string::npos);
+    REQUIRE(ir.find("@std.String_compareTo(")  != std::string::npos);
+    REQUIRE(ir.find("@std.String_cmp(")        != std::string::npos);   // the Ord impl
 }
 
 TEST_CASE("stdlib/string.gg - transitively declares the C string/memory bindings", "[stdlib][string]") {

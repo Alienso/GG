@@ -54,6 +54,40 @@ private:
     // decl names, populating sharedGenerics_.moduleMembers / moduleNames before any parsing.
     void scanModules(const std::string& filePath, std::unordered_set<std::string>& visitedPaths);
 
+    // A dotted import (`import std.utility.Pair;`) that maps to a module directory, resolved by
+    // resolveModuleDir. `moduleName` is the dot-joined module path (`std.utility`); `dir` is the
+    // directory whose `*.gg` files together form that module.
+    struct ModuleDir {
+        std::string dir;
+        std::string moduleName;
+        bool        found = false;
+    };
+
+    // Collect every dependency FILE a source file pulls in via its imports:
+    //   - a quoted `import "path"`      → resolveImportPath (one file).
+    //   - a dotted `import a.b.C;`      → every `*.gg` in the module directory a.b maps to (Go-style:
+    //     the module IS its directory), if such a directory exists; otherwise nothing (the dotted
+    //     import is then a pure name binding, e.g. a module living in a single quoted-import file).
+    // Verifies (once per directory) that every file in a module directory declares that module.
+    // Non-const: mutates verifiedModuleDirs_ / reportedMissing_.
+    std::vector<std::string> dependencyPaths(const std::vector<Token>& tokens,
+                                             const std::filesystem::path& importerDir);
+
+    // Map dotted module segments to an existing directory (the module's files). Tries the whole path
+    // (a bare module import, `import std.crt;`) then all-but-last (module + trailing symbol,
+    // `import std.utility.Pair;`), longest first. Roots mirror resolveImportPath: `std` → stdlibDir,
+    // else importer-relative then each search root. Returns {found=false} if no directory matches.
+    ModuleDir resolveModuleDir(const std::vector<std::string>& segments,
+                               const std::filesystem::path& importerDir) const;
+
+    // The `*.gg` files directly in `dir` (non-recursive), sorted for deterministic load order.
+    std::vector<std::string> moduleFiles(const std::string& dir) const;
+
+    // Verify (once per directory) that every `*.gg` file in `dir` declares `module expectedModule;`.
+    // A mismatch is reported to stderr — a file's location must match its declared module.
+    void verifyModuleDir(const std::string& dir, const std::string& expectedModule);
+    std::unordered_set<std::string> verifiedModuleDirs_;
+
     // Apply module qualification (fold FQNs + prefix bare names) to a lexed file's tokens using the
     // shared module tables — so names scanned/registered here match what the parser produces.
     std::vector<Token> qualifyFileTokens(const std::vector<Token>& tokens) const;

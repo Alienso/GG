@@ -1,4 +1,4 @@
-import "std/IO.gg";
+module std.utility;
 
 class Pair <T, V>  {
 

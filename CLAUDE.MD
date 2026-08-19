@@ -796,16 +796,39 @@ existing wins):
 3. **`searchRoots`**, in order — `<root>/rawPath`.
 4. Fallback: the file-relative candidate (so the existing "cannot find imported file" error names the
    most likely path; the error also lists the `std/` target + roots that were tried).
+- **Dotted imports SELF-LOAD their module directory** (Go/Java-style — the module IS its directory):
+  a `import a.b.C;` (or bare-module `import a.b;`) is no longer only a name binding — the resolver
+  now also **loads every `*.gg` file in the directory that module maps to**, so a consuming file needs
+  just the one dotted line (no companion quoted `import "…"`). Resolution
+  (`ImportResolver::resolveModuleDir`) maps the dotted module path to a directory using the SAME roots
+  as `resolveImportPath` (`std` → `stdlibDir`; else importer-relative then each search root), trying
+  the whole path (bare module, `import std.crt;`) then all-but-last (module + trailing symbol,
+  `import std.utility.Pair;`) — longest first. The last segment is the symbol, everything before it the
+  module path (unambiguous — GG top-level decls are flat). A dotted import that maps to **no**
+  directory contributes no file and stays a pure name binding (backward-compatible: a module living in
+  a single quoted-import file, e.g. `e2e/mods/geo.gg`, still works — its `import geo.Point;` binds and
+  the `import "mods/geo.gg";` loads). All four graph-walking passes (`scanModules`,
+  `prescanTemplates`, `collectClassNames`, `processFile`) share one `dependencyPaths(tokens,
+  importerDir)` helper that returns both quoted-file and dotted-directory dependencies, so they always
+  agree on the file set. Loading a directory pulls in the WHOLE module (all its files), so importing
+  one symbol makes its siblings available too (by FQN or their own import) — importing `std.String`
+  compiles all of `module std` (Array/Number/String); unused generics cost nothing, unused non-generic
+  decls are dead IR. **Verification** (`verifyModuleDir`, once per directory): every `*.gg` in a
+  loaded module directory must declare that module — a file whose declared `module` mismatches its
+  directory is reported to stderr (a file's location must match its module). Quoted `import "path"`
+  is unchanged and remains the escape hatch for module-less / ad-hoc files.
 - **`stdlibDir` auto-detection** (`main.cpp`, `findStdlibDir(argv0)`): honors `$GG_STDLIB` first,
   else walks **up from the GG executable's directory** for a `stdlib/` folder (confirmed by its
   `crt/` subdir). `searchRoots` come from `$GG_PATH` (`;`-separated, `findSearchRoots`). Both are
   computed in `main`, passed via the `GG(paths, options, ModuleSearchConfig)` ctor →
   `resolver.resolve(file, config)`. The default `resolve(file)` (no config) is file-relative only,
   so the resolver **unit tests are unaffected** (they use temp files + relative imports).
-- The stdlib's own internal imports stay file-relative (`import "crt/cmem.gg"` — siblings, robust);
-  `e2e/` + `samples/` were migrated from `../stdlib/...` to `std/...`. **v1 scope**: this is axis-A
-  (resolution) only — symbols are still flattened into one flat-global `Program` (no per-module
-  namespacing; that's the deferred axis B). No manifest / dependency versioning yet.
+- The stdlib and its consumers now use **dotted self-loading imports exclusively** — there are no
+  quoted `import "…"` lines anywhere in `stdlib/`, `e2e/`, or `samples/` for stdlib deps. Each stdlib
+  file pulls its siblings/dependencies with dotted imports (`import std.crt;`, `import std.String;`,
+  `import std.io.print;`), and each consumer writes a single `import std.<Symbol>;` per bare stdlib
+  name it uses — the file is loaded and the name bound by that one line (see the dotted-self-load
+  bullet above). **v1 scope**: symbols are still flattened into one flat-global `Program`.
   Tests: `tests/import_tests.cpp` (`[import]`), `e2e/module_std_test.gg`.
 - **A missing/unresolvable import used to fail SILENTLY in three of the four passes that walk the
   import graph** (`scanModules`, `prescanTemplates`, `collectClassNames` — only `processFile` printed
@@ -823,21 +846,27 @@ existing wins):
 
 ### Module namespacing — `module` + Java-style `import a.B` (axis B)
 Per-module namespaces so two files may each declare `class Foo` without colliding (the deferred
-axis-B counterpart to the `std/` resolver above). A file declares `module geo;`; its top-level names
-are qualified with that prefix (`geo.Foo`, `geo.Foo_method`, `geo.Vec$i32`). **Java model**:
-`import geo.Point;` lets you write bare `Point`; two imported modules that both export `Point` make
-the bare name ambiguous, resolved by the fully-qualified `geo.Point` at the use site.
+axis-B counterpart to the `std/` resolver above). A file declares `module geo;` (or a **dotted**
+`module std.utility;` — see below); its top-level names are qualified with that prefix (`geo.Foo`,
+`geo.Foo_method`, `geo.Vec$i32`, `std.utility.Pair`). **Java model**: `import geo.Point;` lets you
+write bare `Point`; two imported modules that both export `Point` make the bare name ambiguous,
+resolved by the fully-qualified `geo.Point` at the use site.
 - **Key design — qualify the name STRING in the parser, as a whole-token rewrite** (mirrors generic
   monomorphization, which turns `Vec<i32>` into the bare className `Vec$i32`). Because `mangleType`
   returns `t.className` verbatim and codegen builds every `%`/`@` symbol from the className string,
   baking the module prefix into the name early means **semantic and codegen need no changes** — the
   qualified name flows through as an ordinary className. The rewrite (`Parser::qualifyTokens`) runs
   in `parse()` after reading the file's directives, before the parse loop:
-  1. **Fold FQNs**: `IDENT(mod) '.' IDENT(Name)` where `mod` ∈ `moduleNames` → one `"mod.Name"`
-     token. So a fully-qualified reference becomes a single identifier — never three tokens — and
-     `consumeTypeCore`/`isTypeName`/`parsePrimary`/decl builders are **untouched** (they see one
-     already-qualified token). This is also why ctor/dtor "just work": the class name **and** the
-     ctor/dtor names (which equal it) are qualified together, so `name == className` still holds.
+  1. **Fold FQNs**: greedy LONGEST-PREFIX match — collect the maximal dotted identifier chain, then
+     try module-name candidates (from `moduleNames`, which may itself be dotted) from longest to
+     shortest, leaving ≥1 trailing segment as "Name"; the first (longest) hit folds into one
+     `"mod.Name"` token. This is what makes `std.io.print` fold as module `std.io` + name `print`
+     rather than module `std` + a dangling `.io.print` chain, when both `std` and `std.io` happen to
+     be registered modules. So a fully-qualified reference becomes a single identifier — never
+     N tokens — and `consumeTypeCore`/`isTypeName`/`parsePrimary`/decl builders are **untouched**
+     (they see one already-qualified token). This is also why ctor/dtor "just work": the class name
+     **and** the ctor/dtor names (which equal it) are qualified together, so `name == className`
+     still holds.
   2. **Qualify bare names — context-aware** (so a field/local named like a module free function
      isn't mistaken for it): the module tables are split into **types** (class/enum/trait/annotation)
      and **funcs**, because they qualify differently. A **TYPE** name is qualified in **any** position
@@ -849,7 +878,29 @@ the bare name ambiguous, resolved by the fully-qualified `geo.Point` at the use 
      (member field / `Type::member` / enum variant access), a **method or enum-member decl name** (a
      bare name right after `fn` at brace depth > 0), an already-qualified name, `main`, and `extern`.
      Ambiguous imports (`X` from two modules) are left bare → a hard compile error at use.
+  3. **A top-level `fn`'s own declared name is NEVER looked up via `bindings`** (any depth — this is
+     distinct from, and in addition to, the depth > 0 method/enum-member exemption above): it always
+     resolves to `currentModule.empty() ? name : currentModule + "." + name`, bypassing the
+     bindings-then-current-module-fallback logic entirely for that one token. A declaration doesn't
+     *refer* to anything — it introduces a new symbol belonging to its own module by construction —
+     so without this, an unrelated `import mod.f;` for some OTHER module's same-named function would
+     silently hijack THIS file's own `fn f(...)` declaration to that other qualified name instead of
+     its own module. (This was a pre-existing bug in the single-segment v1, not something dotted
+     names introduced — it just never had a reason to manifest until a file both declared and
+     imported the same bare name for the first time; see `stdlib/math/vector/Vector2.gg`'s
+     `fn print(vec2&)`, which imports `std.io.print` under the same bare name `print` for its
+     internal calls and relies on this exemption to keep its own declaration as
+     `std.math.vector.print` rather than being renamed to `std.io.print`.) Ordinary call sites are
+     unaffected — they still resolve via bindings-first, else current-module fallback, unchanged.
 - **Separator = `.`** (`geo.Foo`) — a legal unquoted LLVM identifier char, matching the FQN spelling.
+- **Dotted (multi-segment) module names and import paths**: `module std.utility;` and
+  `import std.utility.Pair;` both read a greedy `IDENT ('.' IDENT)*` chain (in `scanModuleDirectives`
+  and, for the real parse, `Parser::parse()`'s module-line skip — the two must stay in lockstep, or a
+  dotted `module` line parses differently between the prescan and the real parse and `currentModule_`
+  desyncs). An import path's LAST segment is always the imported symbol; everything before it
+  (dot-joined) is always the module path — unambiguous at any depth, since GG top-level decls are
+  always flat, never nested. A single-segment name is just the degenerate case of the same grammar
+  (zero extra dot-segments), so existing single-segment code is byte-identical.
 - **Per-module symbol table** — `GenericRegistry::moduleMembers` (module → simple top-level decl
   names) + `moduleNames`, shared across files. `ImportResolver` fills them in a new **pass 0**
   (`scanModules`, before all parsing) so a file can qualify references to a sibling file's
@@ -863,17 +914,34 @@ the bare name ambiguous, resolved by the fully-qualified `geo.Point` at the use 
 - **Duplicate diagnostic** (`collectClasses`): a duplicate type within one module now errors
   ("class/type … already defined"), closing the old silent first-wins gap; cross-module same names
   are distinct keys → no error.
-- **v1 scope / limits** (all → a clean error, never a miscompile): single-segment module names only
-  (`module geo;`, not `module a.b;`); no `import a.*;` wildcard, no import aliasing, no module-private
-  visibility (namespacing only). `import a.B;` does **not** load a file — the defining file must
-  still be `import "…"`-loaded. An ambiguous bare name errors with a generic message (use the FQN).
-  A local named identically to a module name would shadow the FQN fold (module wins; don't do it).
+- **Caveat — overload sets are scoped per exact module string, never merged across a dotted
+  family**: `std.io.print(...)` and `std.math.vector.print(...)` are two entirely distinct qualified
+  functions, even though one textually nests under the other; a bare `print` in a file resolves to
+  at most ONE of them (import binding, else the current module's own membership) — never a
+  cross-module overload union. A file that needs to call a same-named function from a *different*
+  module, while also declaring its own same-named function, imports the foreign one under the bare
+  name (safe — see the declaration exemption above) and calls it bare; a file that needs to call
+  BOTH of two *different* modules' same-named functions bare would create an ambiguous import-binding
+  collision (`scanModuleDirectives`'s existing ambiguity check) and must fall back to the FQN for at
+  least one of them.
+- **v1 scope / limits** (all → a clean error, never a miscompile): no `import a.*;` wildcard, no
+  import aliasing, no module-private visibility (namespacing only). `import a.B;` does **not** load a
+  file — the defining file must still be `import "…"`-loaded. An ambiguous bare name errors with a
+  generic message (use the FQN). A local named identically to a module name (or a module-name prefix)
+  would shadow the FQN fold (module wins; don't do it).
   Residual name-collision edges (all → a clean error, never a miscompile, all niche): a **field or
   enum-variant named identically to a module TYPE** (types qualify in any position, but the field's
   `.`-access does not → "no field/variant"); a **local named identically to a top-level function**
   used in a `<` comparison (`count < 9` parses `<` as generic-call position → "cannot use function as
-  value"). Rename one. Tests: `tests/module_tests.cpp` (`[module]`), `e2e/module_test.gg`
-  (+ `e2e/mods/*.gg`).
+  value"). Rename one. Tests: `tests/module_tests.cpp` (`[module]`), `e2e/module_test.gg`,
+  `e2e/module_dotted_test.gg` (+ `e2e/mods/*.gg`).
+- **The entire stdlib is namespaced under `std`**: `std` (top-level `Array.gg`/`Number.gg`/
+  `String.gg`), `std.crt` (`crt/*.gg` — a no-op today since `extern` is never qualified, kept for
+  consistency), `std.io` (`io/IO.gg`), `std.math` (`math/Math.gg`, `math/Vector.gg`),
+  `std.math.vector` (`math/vector/Vector2.gg`, `Vector3.gg`), `std.utility` (`utility/List.gg`,
+  `Pair.gg`). Every consuming `.gg` file must `import std.<Symbol>;` (or the appropriate
+  sub-namespace) for each bare stdlib name it uses, in addition to the existing `import "std/…";`
+  file-load line.
 
 ### SemanticAnalyzer — 3 passes
 1. `collectClasses`  — build `classRegistry` (fields, methods, destructor).
@@ -2032,6 +2100,44 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1354 test cases / 2522 assertions** (as of making **dotted imports self-load their module
+directory** (Go/Java-style): `import std.utility.Pair;` now both binds the name AND loads every
+`*.gg` in the directory that module maps to (`resolveModuleDir` + `moduleFiles`, shared across all
+four import-graph passes via a new `dependencyPaths` helper in `ImportResolver`), so a consumer needs
+just the one dotted line — every quoted `import "std/…"` / `import "crt/…"` line across `stdlib/`,
+`e2e/`, and `samples/` was dropped. Each loaded module directory is **verified** (`verifyModuleDir`):
+a file whose declared `module` mismatches its directory is reported. Quoted `import "path"` is
+unchanged and remains the escape hatch for module-less / ad-hoc files (e.g. `e2e/mods/geo.gg`, still
+loaded by a quoted import while its `import geo.Point;` only binds). `tests/import_tests.cpp`
+(`[import]`, +2: a dotted import self-loads its whole directory incl. a sibling reachable only by
+FQN; a directory/module mismatch is reported), `tests/stdlib_tests.cpp` (now configures `stdlibDir`
+so the stdlib's dotted self-imports resolve, mirroring main.cpp/compile.ps1). Prior baseline was
+**1352 test cases / 2519 assertions** (as of adding **dotted (multi-segment) module names and
+import paths** (`module std.utility;`, `import std.utility.Pair;`) — generalizing the previous
+single-segment-only grammar — and using the new capability to **namespace the entire stdlib under
+`std`** (`std`, `std.crt`, `std.io`, `std.math`, `std.math.vector`, `std.utility`). Two independent
+compiler bugs were found and fixed along the way: (1) the import-path scanner
+(`scanModuleDirectives`) previously pattern-matched exactly one dot, so `import a.b.C;` silently
+mis-scanned — registering a bogus binding for the *middle* segment (`b` → `"a.b"`) while never
+importing `C` at all — fixed by a general greedy segment split (last segment = symbol, everything
+before it = module path, unambiguous since GG top-level decls are always flat); (2) a pre-existing
+bug in the *already-shipped* single-segment qualifier: a top-level `fn`'s own declared name was
+qualified via the same bindings-first lookup as an ordinary call site, so an unrelated
+`import mod.f;` for a different module's same-named function could silently hijack a file's own
+`fn f(...)` declaration into that other module — fixed by exempting a `fn`'s own name from the
+bindings lookup entirely (it always belongs to its own declaring module), which is what let
+`stdlib/math/vector/Vector2.gg`'s `fn print(vec2&)` import `std.io.print` under the same bare name
+`print` for its internal calls without the declaration itself being renamed. Also fixed two
+unrelated, independently-discovered bugs while migrating: `Vector2.gg` imported
+`"std/io/io.gg"` (wrong case — the real file is `IO.gg`; only worked because NTFS folds case), and
+`e2e/io_print_test.gg` imported `"std/IO.gg"` (wrong path — the real file is `std/io/IO.gg`), which
+meant that e2e file wasn't actually compiling before this work at all. `tests/module_tests.cpp`
+(`[module]`, +5: dotted-module IR qualification, dotted-import binds-last-segment regression,
+inline FQN fold with no import, longest-prefix disambiguation between overlapping module names, and
+the declaration-vs-import-binding collision regression), `tests/stdlib_tests.cpp` (`String.gg`'s
+IR-content assertions updated with the `std.` prefix), `e2e/module_dotted_test.gg` +
+`e2e/mods/geo_shapes.gg` (new), all 18 existing stdlib-consuming e2e/samples files updated with the
+matching `import std.…;` lines and re-verified to still exit 0. Prior baseline was
 **1347 test cases / 2503 assertions** (as of fixing three bugs found while reviewing the new
 `stdlib/utility/List.gg` — a doubly-linked-list-style singly-linked `List<T>`/`Node<T>` with an
 `Iterator`/`Iterable` impl: (1) `List::add` never advanced `last` past the first insertion — every

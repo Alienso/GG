@@ -1,7 +1,8 @@
 // e2e/io_print_test.gg — exercises IO.print's two-digit-per-iteration integer formatting across
 // every integer width/signedness, including each type's MIN/MAX edge. Prints the values (visual
 // check) and returns 0 on a clean run (regression smoke test: compiles + runs without a crash).
-import "std/IO.gg";
+import std.io.print;
+import std.io.println;
 
 fn main() -> i32 {
     print(0);            putchar(10);

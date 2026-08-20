@@ -662,19 +662,41 @@ std::string CodeGen::genBinary(const BinaryExpr& binary, const Type& resolvedTyp
         }
     }
 
-    // Short-circuit logical ops
+    // Short-circuit logical ops. The right operand must NOT be evaluated when the left operand
+    // already determines the result (`&&`: left false; `||`: left true) — not just as an
+    // optimization, but for correctness: a guard like `i < len && arr[i] == x` must never evaluate
+    // `arr[i]` once `i < len` is false, since arr[i]'s own runtime bounds check would otherwise fire
+    // on the very out-of-range index the guard exists to prevent. (Previously this eagerly evaluated
+    // both operands and combined them with a plain `and`/`or` — a real bug, not a false economy: it
+    // silently turned every `guard && use-guarded-value` idiom in GG into a potential crash.)
     if (operatorType == TokenType::AND || operatorType == TokenType::OR) {
-        // Eager evaluation — emit and i1 / or i1
+        bool isAnd = operatorType == TokenType::AND;
         Type        leftType  = exprType(*binary.left);
+        std::string leftValue = genExpr(*binary.left);
+        std::string leftBool  = emitToBool(leftValue, leftType);
+
+        std::string slot = "%" + freshTemp();
+        emitAlloca(slot, "i1");
+
+        std::string shortLabel = freshLabel(isAnd ? "and.short" : "or.short");
+        std::string evalLabel  = freshLabel(isAnd ? "and.rhs"   : "or.rhs");
+        std::string merge      = freshLabel(isAnd ? "and.merge" : "or.merge");
+        if (isAnd) emitCondBr(leftBool, evalLabel, shortLabel);   // false ⇒ short-circuit to false
+        else       emitCondBr(leftBool, shortLabel, evalLabel);   // true  ⇒ short-circuit to true
+
+        switchBlock(shortLabel);
+        emitStore("i1", leftBool, slot);   // leftBool IS the short-circuited result in both cases
+        emitBr(merge);
+
+        switchBlock(evalLabel);
         Type        rightType = exprType(*binary.right);
-        std::string leftValue  = genExpr(*binary.left);
         std::string rightValue = genExpr(*binary.right);
-        std::string leftBool   = emitToBool(leftValue,  leftType);
         std::string rightBool  = emitToBool(rightValue, rightType);
-        std::string tempName   = freshTemp();
-        std::string instruction = (operatorType == TokenType::AND) ? "and" : "or";
-        emit("%" + tempName + " = " + instruction + " i1 " + leftBool + ", " + rightBool);
-        return "%" + tempName;
+        emitStore("i1", rightBool, slot);
+        emitBr(merge);
+
+        switchBlock(merge);
+        return emitLoad("i1", slot);
     }
 
     // Comparison ops — result is Bool (i1)

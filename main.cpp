@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
     ModuleSearchConfig moduleConfig;
     moduleConfig.stdlibDir   = findStdlibDir(argv[0]);
     moduleConfig.searchRoots = findSearchRoots();
+    options.stdlibDir        = moduleConfig.stdlibDir;
 
     GG gg{paths, options, moduleConfig};
     return gg.run();

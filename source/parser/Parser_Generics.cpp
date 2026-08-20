@@ -371,9 +371,13 @@ bool Parser::tryCaptureClassTemplate() {
     // wholesale-replaces, as before; this just compiles against the new vector-valued map.
     // fixedCount is left at its default (0) — meaningless/unused for a class template (there's no
     // single param list to count; overload-set selection never runs for classes).
-    gen_->templates[name] = std::vector<GenericTemplate>{
-        GenericTemplate{ std::move(typeParams), std::move(bounds),
-                         std::move(isPack), std::move(captured) } };
+    // `sourceFile` (the template's OWN declaring file) lets runMonomorphization attribute the
+    // instantiated class to where `class Foo<T>` was actually written (e.g. stdlib), not to whichever
+    // user file triggered `Foo<i32>` — load-bearing for the stdlib raw-ptr exemption (a monomorphized
+    // Array$i32's `ptr<T>` buffer field must report Array.gg, not the caller's file).
+    GenericTemplate tmpl{ std::move(typeParams), std::move(bounds), std::move(isPack), std::move(captured) };
+    tmpl.sourceFile = filename;
+    gen_->templates[name] = std::vector<GenericTemplate>{ std::move(tmpl) };
     gen_->classNames.insert(name);
     current = k;
     return true;
@@ -643,8 +647,9 @@ void Parser::captureMethodTemplate(const std::string& ownerClass, bool isStatic,
     // sets, not the generic ones. Register them here too (a backstop for the prescan, which may miss a
     // `fn static/private m<…>` when the class is defined after a same-file call site).
     bool isVariadic = !isPack.empty() && isPack.back();
-    gen_->methodTemplates[key] = GenericTemplate{ std::move(typeParams), std::move(bounds),
-                                                  std::move(isPack), captured };
+    GenericTemplate methodTmpl{ std::move(typeParams), std::move(bounds), std::move(isPack), captured };
+    methodTmpl.sourceFile = filename;   // the owner class's own file (methods can't be split cross-file)
+    gen_->methodTemplates[key] = std::move(methodTmpl);
     gen_->genericMethodNames.insert(nameTok.lexeme);
     gen_->genericMethodKeys.insert(key);
     if (isVariadic) {
@@ -1071,6 +1076,45 @@ std::optional<Token> Parser::deduceArgTypeToken(const Expr* arg) const {
         base = ne->className.lexeme; line = ne->className.line;        // `new Class(...)`
     } else if (const auto* th = std::get_if<ThisExpr>(&node)) {
         if (!currentClassName_.empty()) { base = currentClassName_; line = th->keyword.line; }  // `this`
+    } else if (const auto* ma = std::get_if<MemberAccessExpr>(&node)) {
+        // `obj.field` — resolve the object's class, then look up the field's declared type in
+        // GenericRegistry::classFieldTypes. `?.` is skipped (v1: its result flows through a nullable
+        // slot, not a plain value) — falls through to the "cannot infer" error like any other
+        // unhandled shape.
+        if (!ma->safe) {
+            std::string objClass;
+            // `Class::field` (static form, same MemberAccessExpr node as `.`) — the object names a
+            // class directly, not a variable, so it would never resolve via the recursive call below
+            // (deduceArgTypeToken's IdentifierExpr case only looks in scopes_/classFieldScope_).
+            if (const auto* oid = std::get_if<IdentifierExpr>(ma->object->node.get())) {
+                if (classNames.count(oid->name.lexeme) || gen_->classNames.count(oid->name.lexeme))
+                    objClass = oid->name.lexeme;
+            }
+            if (objClass.empty()) {
+                // `obj.field` — resolve the object's own type recursively (identifier/`this`/ctor/
+                // `new`/another member access), so a chain like `a.b.c` works as long as each step is
+                // a plain field of an already-parsed class.
+                if (std::optional<Token> objType = deduceArgTypeToken(ma->object.get()))
+                    objClass = genericArgBaseName(*objType);
+            }
+            if (!objClass.empty()) {
+                auto cit = gen_->classFieldTypes.find(objClass);
+                if (cit != gen_->classFieldTypes.end()) {
+                    auto fit = cit->second.find(ma->field.lexeme);
+                    if (fit != cit->second.end()) {
+                        // Decay the field's OWN declared type the same way an identifier's type is
+                        // decayed below (strip a nullable '?' / owning '&' / borrow 'ref:' prefix).
+                        // Without this, a reference/borrow/nullable-typed field (`Point& p;`,
+                        // `i32* b;`, `i32? m;`) would reach requestTupleType's mangling verbatim —
+                        // '&'/':'/'?' are not valid identifier characters and would emit an
+                        // unparsable tuple class name. Mirrors the plain-identifier case: a reference
+                        // local and a value local of the same class both decay to one plain element.
+                        base = genericArgBaseName(fit->second);
+                        line = ma->field.line;
+                    }
+                }
+            }
+        }
     }
     if (base.empty()) return std::nullopt;
     return Token{ primTokenFor(base), base, line };

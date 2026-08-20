@@ -1,22 +1,3 @@
-// stdlib/String.gg — a heap-owned, UTF-8 string with a Java-like interface.
-//
-// The bytes are stored verbatim (a copy of the source), so any valid UTF-8 input —
-// including non-ASCII — round-trips unchanged. The internal byte length drives the
-// O(1) queries; the character (Unicode codepoint) count is computed on demand, since
-// UTF-8 is variable-width (1-4 bytes per codepoint). A GG `char` is 32-bit, so a
-// decoded codepoint fits directly in a `char`.
-//
-// The raw buffer (`data`) and everything that touches a `ptr` are PRIVATE — the public
-// interface never exposes a `ptr`. The one exception is the constructor, which takes a
-// `ptr`: a GG string literal *is* a `ptr` to bytes, so `String s("hi")` needs it. That
-// is the only entry point into the type from raw memory.
-//
-// Ownership: a String owns its buffer and frees it in the destructor. It is a value object holding a
-// raw buffer, so a naive memberwise copy would alias the pointer and double-free. `impl Clone` (below)
-// gives it a proper deep copy, so `String b = a;` and `Array<String>` work — the copy owns a fresh
-// buffer. (`data`/`size` are `mut` only so the `clone` hook can rebuild them; the type is otherwise
-// used immutably.)
-
 module std;
 
 import std.crt;

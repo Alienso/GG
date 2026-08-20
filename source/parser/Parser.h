@@ -130,6 +130,16 @@ struct GenericRegistry {
     // clone, dtor, structeq — no back-end changes). Shared across files; deduped by the mangled name.
     std::unordered_map<std::string, std::vector<Token>> tupleRequests;
 
+    // Class/enum name → field name → declared type token. Populated for EVERY class/enum as its
+    // member list is parsed (Parser::parseMemberList), regardless of which class is "current" —
+    // unlike classFieldScope_ (which only ever holds the class actively being parsed, for lambda
+    // capture). Lets Parser::deduceArgTypeToken resolve a member access (`v1.x`) to its field's type
+    // when deducing a variadic-pack/generic-function argument's type, so `printf("{}", v1.x)` works
+    // for a field of a class parsed anywhere in the program (shared across files, like tupleRequests;
+    // relies on the same "dependencies parsed before dependents" ordering already documented for
+    // cross-file generic inference).
+    std::unordered_map<std::string, std::unordered_map<std::string, Token>> classFieldTypes;
+
     // ---- Module namespacing (shared across files) ----
     // module name → simple top-level decl names it declares, split by kind because they qualify
     // differently: a TYPE name (class/enum/trait/annotation) is qualified in every position, while a

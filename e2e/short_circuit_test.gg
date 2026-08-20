@@ -1,0 +1,49 @@
+// End-to-end regression guard for `&&`/`||` short-circuit evaluation.
+// Returns 0 on success; a non-zero exit or a crash means short-circuiting is broken.
+//
+// Regression: genBinary used to EAGERLY evaluate both operands of `&&`/`||` and combine them with a
+// plain `and i1`/`or i1`, despite being labeled "short-circuit". That silently turned every
+// `guard && use-guarded-value` idiom into a potential crash — e.g. `i < len && arr[i] == x` would
+// still evaluate `arr[i]` (and hit its own bounds-check trap) even when `i < len` was false, because
+// the "guard" only affected the final boolean result, not whether the right side ran at all.
+
+// `i < len` is false, so the whole `&&` must be false WITHOUT evaluating `buf[i]` — if the right
+// side were still (wrongly) evaluated, `buf[i]` would trap out of bounds and abort() the process.
+fn private andShortCircuitsOnFalse() -> bool {
+    char[4] buf;
+    buf[0] = 'a'; buf[1] = 'b'; buf[2] = 'c'; buf[3] = 'd';
+    i32 len = 4;
+    mut i32 i = len;
+    return i < len && buf[i] == 'a';
+}
+
+fn private orShortCircuitsOnTrue() -> bool {
+    char[4] buf;
+    buf[0] = 'a'; buf[1] = 'b'; buf[2] = 'c'; buf[3] = 'd';
+    i32 len = 4;
+    mut i32 i = len;
+    // `i >= len` is true, so the right side (which would trap) must never run.
+    return i >= len || buf[i] == 'a';
+}
+
+// Sanity checks that && / || still compute the RIGHT answer when both sides are safe to evaluate.
+fn private logicalValuesAreCorrect() -> bool {
+    bool t = true;
+    bool f = false;
+    if (!(t && t)) { return false; }
+    if (t && f)    { return false; }
+    if (f && t)    { return false; }
+    if (f && f)    { return false; }
+    if (!(t || t)) { return false; }
+    if (!(t || f)) { return false; }
+    if (!(f || t)) { return false; }
+    if (f || f)    { return false; }
+    return true;
+}
+
+fn main() -> i32 {
+    if (andShortCircuitsOnFalse())  { return 1; }   // must be false (and must not have crashed to get here)
+    if (!orShortCircuitsOnTrue())   { return 2; }   // must be true (and must not have crashed to get here)
+    if (!logicalValuesAreCorrect()) { return 3; }
+    return 0;
+}

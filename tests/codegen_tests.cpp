@@ -381,18 +381,30 @@ TEST_CASE("CodeGen - unsigned shift right uses lshr", "[codegen]") {
 // Logical operators
 // ============================================================
 
-TEST_CASE("CodeGen - logical AND emits and i1", "[codegen]") {
+TEST_CASE("CodeGen - logical AND short-circuits via a conditional branch", "[codegen]") {
+    // Must NOT eagerly evaluate both operands and `and i1` them — the right operand may be unsafe to
+    // evaluate when the left is false (e.g. `i < len && arr[i] == x`), so the codegen has to branch
+    // around it instead. See the "logical AND/OR short-circuit correctness" test below for the
+    // end-to-end behavioral regression guard.
     auto ir = codegenString(R"(
         fn main() -> i32 { bool a = true; bool b = false; bool c = a && b; return 0; }
     )");
-    REQUIRE(irContains(ir, "and i1"));
+    REQUIRE(irContains(ir, "br i1"));
+    REQUIRE(irContains(ir, "and.rhs"));
+    REQUIRE(irContains(ir, "and.short"));
+    REQUIRE(irContains(ir, "and.merge"));
+    REQUIRE_FALSE(irContains(ir, "and i1"));   // no eager `and` combining both operands
 }
 
-TEST_CASE("CodeGen - logical OR emits or i1", "[codegen]") {
+TEST_CASE("CodeGen - logical OR short-circuits via a conditional branch", "[codegen]") {
     auto ir = codegenString(R"(
         fn main() -> i32 { bool a = true; bool b = false; bool c = a || b; return 0; }
     )");
-    REQUIRE(irContains(ir, "or i1"));
+    REQUIRE(irContains(ir, "br i1"));
+    REQUIRE(irContains(ir, "or.rhs"));
+    REQUIRE(irContains(ir, "or.short"));
+    REQUIRE(irContains(ir, "or.merge"));
+    REQUIRE_FALSE(irContains(ir, "or i1"));   // no eager `or` combining both operands
 }
 
 // ============================================================

@@ -331,7 +331,19 @@ monomorphization.
 - **Call-site collection** (`deduceVariadicInstantiation`, `Parser_Expr.cpp` free-fn path): split the
   call's fixed prefix from the trailing pack; **deduce** each pack element's type at parse time
   (`deduceArgTypeToken` — literals default-typed `1`→i32/`1.0`→f64/`"x"`→str/bool/char, in-scope
-  identifiers, ctor/`new`); build the pack tuple (`requestTupleType`, allows internal unit/1-tuples),
+  identifiers, ctor/`new`, `this`, and a **field access** `obj.field` — resolves `obj`'s class (either
+  a known class name directly, for the static `Class::field` form — `Class::field` and `obj.field`
+  parse to the identical `MemberAccessExpr` node — or recursively via `deduceArgTypeToken`, for every
+  other receiver shape), then looks up `field`'s declared type in `GenericRegistry::classFieldTypes`
+  [class/enum name → field name → type token, populated for EVERY class as its member list is parsed,
+  regardless of which class is "current" — see `Parser::parseMemberList`]. The looked-up field type is
+  decayed through `genericArgBaseName` (strip a trailing `?`/`&` or a `ref:` borrow prefix) exactly
+  like an identifier's declared type already is, before it can reach the tuple mangling — a
+  reference/borrow/nullable-typed field must never contribute a raw sigil-bearing lexeme to
+  `requestTupleType` (`&`/`:`/`?` are not valid unquoted LLVM identifier characters). So
+  `printf("{}", v.x)` works for any field (plain, reference, or static) of any already-parsed class,
+  chaining through `a.b.c` as long as each step is a plain field]; build the pack tuple
+  (`requestTupleType`, allows internal unit/1-tuples),
   mangle `f$Tuple$…`, and rewrite the args to `[fixed…, one tuple literal]`. A trailing **spread**
   `xs...` (parsed by `parseCallArgs`) passes an existing pack tuple through directly **when the
   target `f` is itself pack-bearing** (re-tuples/re-instantiates, as above). When the target is
@@ -375,10 +387,16 @@ monomorphization.
   the `()` base case; terminates because the pack strictly shrinks. Distinct from the runtime `match`
   (arms bind different types per arity — must be comptime).
 - **v1 limits** (clean errors): heterogeneous packs only (no homogeneous `i32...`→Array, no C-extern
-  `printf(ptr,…)`); pack element types must be **parser-deducible** (a nested-call arg → "cannot
-  infer", same limitation as generic inference incl. forward-reference); explicit `<…>` on a variadic
-  is rejected (the pack is inferred); pack elements are value/primitive (tuple-element rules); pack
-  trait bounds deferred (overloaded helpers like `weight(x)` per element suffice). Tests:
+  `printf(ptr,…)`); pack element types must be **parser-deducible** (a nested-**call** arg, e.g.
+  `f(g()).y`, → "cannot infer", same limitation as generic inference incl. forward-reference — a
+  field access on an already-parsed class, e.g. `v.x`, IS deducible, see above); explicit `<…>` on a
+  variadic is rejected (the pack is inferred); pack elements are value/primitive (tuple-element
+  rules); pack trait bounds deferred (overloaded helpers like `weight(x)` per element suffice). A
+  field access on a **synthesized tuple** (`args._0`, from a spread-unwrap) is NOT deducible even
+  though it's the same `MemberAccessExpr` shape — the tuple class isn't synthesized/parsed until
+  `runMonomorphization` (well after the call site's own parse), so `classFieldTypes` has no entry for
+  it yet; this is what keeps `identity(args...)` (no explicit `<i32>`) a clean "cannot infer" error
+  (the explicit `identity<i32>(args...)` is unaffected — it needs no inference). Tests:
   `tests/variadic_tests.cpp` (`[variadic]`), `e2e/variadic_test.gg`,
   `e2e/variadic_spread_unwrap_test.gg`.
 
@@ -1714,6 +1732,32 @@ toward zero. Both operands are `emitCast` to the common type before the op.
   requires equal shift-operand types). (Symmetric `& | ^` still use the common type.)
 - Tests: `tests/cast_tests.cpp` `[arith]`.
 
+### Logical `&&`/`||` genuinely short-circuit (fixed correctness bug)
+`genBinary`'s `AND`/`OR` branch is labeled "short-circuit logical ops" in a comment but used to
+**eagerly evaluate both operands** and combine them with a plain `and i1`/`or i1` — no branching at
+all. This was a real, silent correctness bug, not just a missed optimization: it meant every
+`guard && use-guarded-value` idiom in GG (the standard way to make an unsafe operation conditional —
+null checks, bounds guards, etc.) was unsound. E.g. `i < len && arr[i] == x` would still evaluate
+`arr[i]` (and hit *its own* runtime bounds check) even when `i < len` was false — the guard changed
+the final boolean result but never prevented the right-hand side from running. Caught via a stdlib
+`printf`-style scanner (`stdlib/io/IO.gg`'s `nextPlaceholder`) that used exactly this pattern
+(`i + 1 < len && s[i + 1] == '{'`) and crashed with a bounds-check trap instead of safely returning
+false at the end of the string.
+- **Fix** (`CodeGen_Exprs.cpp::genBinary`): real branching, mirroring `genElvis`'s result-slot
+  pattern. Evaluate the left operand; branch (`and`: false → short-circuit, true → evaluate right;
+  `or`: true → short-circuit, false → evaluate right) via `emitCondBr` to a `*.short`/`*.rhs` block;
+  each path stores its result (the left value on the short-circuit path, the right value otherwise)
+  into an `i1` alloca; a `*.merge` block loads and returns it. The right operand's code — including
+  any bounds check / null deref it contains — is only ever emitted on the path that actually runs it.
+- No AST/semantic change — `analyzeBinary`'s typing of `&&`/`||` was already correct (always `bool`);
+  only the codegen shape changed. Byte-identical results when both operands are side-effect-free;
+  behaviorally different (correctly so) whenever the right operand is unsafe to evaluate under a
+  false/true guard.
+- Tests: `tests/codegen_tests.cpp` (`[codegen]`, asserts the branch/label shape and the ABSENCE of a
+  bare `and i1`/`or i1`), `e2e/short_circuit_test.gg` (behavioral: an out-of-bounds guard that would
+  abort() if the right side were still evaluated, for both `&&` and `||`, plus a truth-table sanity
+  check that the boolean VALUE is unchanged by the new codegen shape).
+
 ### Integer overflow checks — `--overflow-checks` (Rust-style, opt-in)
 Off by default; when enabled, integer overflow and out-of-range narrowing **trap at runtime**
 (`abort()`). `CompilerOptions::overflowChecks` (parsed from `--overflow-checks` in `main.cpp`;
@@ -1935,8 +1979,33 @@ registry and folded away, riding the same reflection-expansion pipeline.
   is a `ptr<T>` field.
 - **Gated behind `--unsafe-ptr`**: the semantic analyser rejects any variable declaration,
   function return type, or parameter of type `ptr`/`ptr<T>` unless `CompilerOptions::allowRawPtr`
-  is true. `extern` declarations are always exempt.
-- `compile.ps1` always passes `--unsafe-ptr`; test helpers default to `allowRawPtr = true`.
+  is true. `extern` declarations are always exempt. The gate fires only at these DECLARATION sites
+  (var/param/return/field types, plus `destroy`/`addressOf`/`var`-inference) — a bare expression of
+  type `Ptr` (e.g. `str.data`) flowing through as a call argument is never gated, since it declares
+  nothing.
+- **Stdlib internals are exempt automatically, independent of the `--unsafe-ptr` flag**
+  (`SemanticAnalyzer::rawPtrAllowedHere` = `allowRawPtr_ || pathUnder(filename, stdlibDir_)`):
+  `CompilerOptions::stdlibDir` (mirrors `ModuleSearchConfig::stdlibDir`, wired in `main.cpp`) names
+  the compiler's own stdlib root; a declaration whose current `filename` (the per-declaration save/
+  restore already done for error attribution in `analyzeFunctionDecl`/`analyzeClassDecl`/
+  `analyzeImplDecl`/`analyzeEnumDecl`) resolves under that root may use raw pointers with no flag —
+  so `Array<T>`'s `private mut ptr<T> data;` field, `String`'s local `ptr<u8>` scans, and CRT-binding
+  files all compile without `--unsafe-ptr`, while a plain user file declaring `ptr<i32>` still needs
+  it. Path comparison (`pathUnder`, `SemanticAnalyzer.cpp`) normalizes via `std::filesystem` and
+  lowercases on Windows (mirroring `ImportResolver`'s `dedupKey`), and does nothing when
+  `stdlibDir_` is empty (e.g. every unit test, which never sets it and instead defaults
+  `allowRawPtr = true`) — so this is purely additive for real compiler invocations.
+  **Load-bearing fix for generics**: a monomorphized class (`Array$i32`) must attribute back to
+  wherever `class Array<T>` was actually written, not to whichever user file triggered `Array<i32>`
+  — `runMonomorphization` already swapped `filename` to `GenericTemplate::sourceFile` during a
+  template's re-parse for the free-function `private`-warning feature, but `tryCaptureClassTemplate`
+  and `captureMethodTemplate` never populated `sourceFile` on the `GenericTemplate`s they build (a
+  latent gap — the existing DWARF-attribution note already called this "usually correct" and
+  deferred it). Both now stamp `sourceFile = filename` at capture time, so this exemption (and DWARF
+  file attribution) is accurate for monomorphized classes/methods too, not just free functions.
+- `compile.ps1` still always passes `--unsafe-ptr` (unchanged) — the stdlib exemption above only
+  matters when invoking `GG.exe` directly without that flag. Test helpers default to
+  `allowRawPtr = true` and never set `stdlibDir`, so the exemption is inert in the test suite.
 
 ### `addressOf(local)` — raw address of a local's storage slot (FFI/C-binding primitive)
 A `sizeof`/`destroy`-style intrinsic (`AddressOfExpr{keyword, place}`, same shape as `DestroyExpr`)
@@ -2314,6 +2383,76 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1387 test cases / 2592 assertions** (as of hardening the `MemberAccessExpr` case in
+`Parser::deduceArgTypeToken` added just below — a self-review pass looking for edge cases the
+original fix missed found two real gaps, both now fixed):
+1. **A reference/borrow/nullable-typed FIELD reached the pack-tuple mangling verbatim.** The
+   original fix returned the field's declared type token exactly as stored in `classFieldTypes` —
+   correct for a plain primitive field (`f32 x;`, the reported case) but wrong for a field declared
+   `Class&`/`Class*`/`T?`: the token's lexeme carries the sigil (`"Inner&"`, `"ref:Inner"`, `"i32?"`),
+   and `requestTupleType` mangles a pack element's type by appending its lexeme verbatim (`"$" +
+   e.lexeme`) — `&`/`:`/`?` are not valid unquoted LLVM identifier characters, so e.g. `take(h.item,
+   1)` where `item` is `Inner&` would have silently emitted an unparsable tuple class name
+   (`%Tuple$Inner&$i32`), caught only by clang's parser (GG doesn't self-verify its IR). Fixed by
+   routing the field's type through the SAME `genericArgBaseName` decay an identifier's declared type
+   already gets (strip a trailing `?`/`&` or a `ref:` borrow prefix) before falling through to the
+   shared `base`/`primTokenFor` return path — a reference-typed field and a value-typed field of the
+   same class now both decay to one plain class element, exactly like a reference-typed local already
+   did. Verified via generated IR: `take(h.item, 1)` now correctly emits `%Tuple$Inner$i32 = type {
+   %Inner, i32 }` (not `Tuple$Inner&$i32`).
+2. **`Class::field` (a static field via `::`) was not deducible at all.** `Class::field` parses to
+   the identical `MemberAccessExpr` node as `obj.field` (see the "Static members" invariant) — but the
+   object is an `IdentifierExpr` naming a CLASS, not a variable, so the existing recursive
+   `deduceArgTypeToken(ma->object)` call (which only searches `scopes_`/`classFieldScope_` for a
+   local/param/field binding) always returned `nullopt` for it, making `take(Holder::counter, 2)`
+   silently un-inferable (fell through to the "cannot infer" error). Fixed by special-casing an
+   object that is itself a known class name (`classNames`/`gen_->classNames`, the same check already
+   used for the analogous `Class::method<T>()`/`Class::method(...)` receiver resolution a few lines
+   above in `Parser_Expr.cpp`) before falling back to the recursive-variable-binding case.
+3. Chaining through a reference-typed intermediate field (`h.item.v`, where `item` is `Inner&`) was
+   exercised as a byproduct of fix #1 (the decayed `"Inner"` base name is what makes the recursive
+   `classFieldTypes` lookup for `.v` succeed at all) and confirmed working, not a separate bug.
+
+2 new `tests/variadic_tests.cpp` cases (`[variadic][codegen]`): a reference-typed field passed
+directly into a pack argument (asserts the correctly-decayed `Tuple$Inner$i32`, not a broken
+`Tuple$Inner&$i32`), and a static field accessed via `Class::field` as a pack argument. Net: +2 test
+cases, +4 assertions (2592 vs. 2588). Prior baseline was
+**1385 test cases / 2588 assertions** (as of teaching `Parser::deduceArgTypeToken` to resolve a
+**field access** (`v.x`) as a pack/generic-argument type — found dogfooding `printf`: calling
+`printf("There are {} vectors...", 2, v1.x, v1.y)` (`v1.x`/`v1.y` being plain `f32` fields of a
+`vec2` value) failed with "cannot infer the type of a variadic argument to 'std.io.printf'", even
+though the field's type is perfectly knowable at parse time — `deduceArgTypeToken` simply had no
+case for `MemberAccessExpr` at all (only literals, in-scope identifiers, `Class(...)`/`new Class(...)`,
+and `this`). Fixed by adding a `GenericRegistry::classFieldTypes` map (class/enum name → field name →
+declared type token), populated for **every** class/enum as `Parser::parseMemberList` parses its
+member list — regardless of which class is "current" (unlike the pre-existing `classFieldScope_`,
+which only ever holds the ONE class actively being parsed, for lambda capture, and is cleared on
+every new class). `deduceArgTypeToken` gained a `MemberAccessExpr` case: recursively deduce the
+object's class (reusing the existing identifier/`this`/ctor/`new` cases), then look up the field's
+type in `classFieldTypes` — so `a.b.c` chains work as long as each step is a plain field of an
+already-parsed class. Relies on the same "a file's dependencies are parsed before its own tokens"
+ordering already documented for cross-file generic inference (`std.math.vector.vec2` is parsed
+before `samples/std_lib.gg`'s own call site, so its fields are already registered). Deliberately does
+**not** help `args._0` on a synthesized pack tuple (`identity(args...)`, the pre-existing "cannot
+infer" case for a spread into an inferred generic) — the tuple class isn't synthesized/parsed until
+`runMonomorphization`, well after the call site's own parse, so it has no `classFieldTypes` entry yet
+at deduction time; that limitation is unchanged (see the "Variadic parameters" invariant above). 1
+new `tests/variadic_tests.cpp` case (`[variadic][codegen]`): a field of a value-object local passed
+straight into a pack argument, asserting the correct `Tuple$i32$i32` instantiation. Net: +1 test
+case, +2 assertions (2588 vs. 2586). Prior baseline was
+**1384 test cases / 2586 assertions** (as of fixing `&&`/`||` to genuinely short-circuit — see the
+"Logical `&&`/`||` genuinely short-circuit" invariant above. `genBinary` was eagerly evaluating both
+operands and combining them with a plain `and i1`/`or i1` despite being commented "short-circuit",
+making every `guard && use-guarded-value` idiom unsound (the guarded side still ran, and could still
+trap, even when the guard was false). Caught via a stdlib `printf` format-string scanner
+(`stdlib/io/IO.gg`) that used exactly that idiom for its own bounds guard. Fixed with real branching
+in `CodeGen_Exprs.cpp::genBinary` (mirrors `genElvis`'s result-slot pattern) — no AST/semantic
+change. 2 existing `tests/codegen_tests.cpp` cases were updated (they asserted the OLD eager `and
+i1`/`or i1` shape, which no longer appears) to assert the new branch/label shape instead, and to
+assert a full AND/OR truth table stays correct. 1 new `e2e/short_circuit_test.gg` (behavioral: an
+out-of-bounds array guard that would abort() if the right operand were still evaluated, for both
+`&&` and `||`). Net: 0 new test cases (2 rewritten in place), +8 assertions (2586 vs. 2578). Prior
+baseline was
 **1384 test cases / 2578 assertions** (as of adding Java-style wildcard imports, `import a.b.*;` —
 binds every top-level member (type or free function) that module `a.b` declares, non-recursively
 (a submodule `a.b.c` is a distinct registry key, never pulled in). Implemented entirely in
@@ -2332,69 +2471,7 @@ module's directory exactly as a bare `import a.b;` would. See the "Module namesp
 above. `samples/std_lib.gg` was updated to use `import std.io.*;` in place of 4 separate
 single-symbol imports, as a real-world smoke test. 3 new `tests/module_tests.cpp` cases
 (`[module]`): a wildcard binding every module member (type + free function), a non-recursion guard
-(a submodule's member is NOT pulled in), and a wildcard-vs-explicit-import ambiguity case. Prior
-baseline was
-**1381 test cases / 2573 assertions** (as of adding `private` support for generic free functions —
-a gap surfaced by the same dogfooding session below: the user asked whether `private` was supported
-at all, and marking `stdlib/io/IO2.gg`'s internal `printf<...Ts>(str* fmt, i32 cursor, Ts... args)`
-`private` to guard against the residual overload-ambiguity limitation noted below hit a hard
-"expected '(' after function name" parse error — `tryCaptureFunctionTemplate` was name-first and
-never anticipated a `private` token before the name, even though `prescanTemplateNames` already
-tolerated it (masking the gap until an actual declaration was written). Fixed with **zero new
-semantic-layer code**: the capture now skips `private`, re-emits it into the captured tokens so the
-monomorphized instantiation is an ordinary `isPublic=false` `FunctionDeclStmt` (reusing the existing
-cross-file warning check verbatim), and `GenericTemplate` gained a `sourceFile` (the template's own
-declaring file) that `runMonomorphization` temporarily swaps `filename` to during the instantiation's
-re-parse — otherwise every instantiation would attribute to the single entry/root file the whole
-monomorphization pass runs under, silently suppressing the warning whenever that happens to equal the
-calling file (the common case). See the "`private` on free functions" invariant above. 9 new
-`tests/semantic_tests.cpp` cases (`[private][genoverload]`) — the original 4 (same-file silent,
-cross-file warns, public-generic cross-file silent, used-internally-then-imported warns only at the
-cross-file site, all with a pack template) plus 5 found reviewing for missed edge cases: a
-**non-variadic** `<T>` template (the original 4 only covered `<...Ts>`, the one shape where the
-`declNameIdx` token-index fix actually mattered — a plain `<T>`'s rename logic isn't index-sensitive
-at all, so it didn't exercise that fix, but needed its own check since capture/`sourceFile` threading
-aren't variadic-specific); the same non-variadic template's same-file case; an **explicit**
-`unwrap<Box>(b)` call (a different parser code path — `Parser_Expr.cpp`'s explicit `name<Targs>`
-branch — than the inferred-call tests, which reach `inferGenericTypeArgs` instead); and an **overload
-set** with one public and one private candidate (the actual motivating shape,
-`stdlib/io/IO2.gg`'s `printf` pair, which none of the first 4 tests exercised at all) — one case
-confirming an external call landing on the public candidate stays silent, another confirming an
-external call that (via the documented residual overload-selection ambiguity) lands on the private
-one warns. One authoring bug caught by these while writing them: two of the five declared `class Box`
-in BOTH the library and the importing body string, which GG's flat-Program import model correctly
-rejected as a duplicate-class error (`hadError` unexpectedly true) — GG does not scope imported
-declarations to a namespace by default, so a shared type must be declared exactly once (see the
-Module namespacing invariant); fixed by declaring `Box` only in the library half of each test. Also
-surfaced, but explicitly OUT OF SCOPE and left unfixed (a pre-existing bug, reproducible with no
-`private` involved at all): `inferGenericTypeArgs` (`Parser_Generics.cpp`, the non-pack "infer
-`<T>` from a call without explicit type args" path) hardcodes `TokenType::IDENTIFIER` for the
-deduced type argument regardless of whether the deduced type is a class name or a PRIMITIVE — every
-existing test of this path only infers class types, where `IDENTIFIER` is correct, so nothing had
-ever exercised inferring a primitive; `fn f<T>(T x) {...}` called as `f(n)` for an in-scope `i32 n`
-now reproducibly errors "expected a parameter type, but 'i32' is not a known type" post-substitution,
-because the synthesized argument token should have used `primTokenFor(base)` (the same helper the
-PACK deduction path — `deducePackTargs`/`deduceArgTypeToken` — already uses correctly) instead of an
-unconditional `IDENTIFIER`. Worked around here by using class-typed arguments in the new non-pack
-tests, matching every pre-existing test of this path. Prior baseline was
-**1372 test cases / 2554 assertions** (as of fixing a fourth real bug found while dogfooding the
-feature — reported by the user testing `stdlib/io/IO2.gg`'s `printf<...Ts>` overload pair: calling
-the public `printf<...Ts>(str* fmt, Ts... args)` (fixedCount=1) from outside the file was silently
-hijacked by the `// TODO private` `printf<...Ts>(str* fmt, i32 cursor, Ts... args)` (fixedCount=2),
-because a lone i32 substitution value (`printf(fmt, 5)`) type-matches BOTH "a pack element" and the
-private overload's `i32 cursor` fixed parameter — stage 2's type filter couldn't distinguish them,
-and the old stage-3 tie-break (largest `fixedCount` wins) picked the private overload, reducing ITS
-pack to zero elements and binding `5` as `cursor` instead. Fixed by inserting a new stage 3 into
-`selectTemplateCandidate` (`Parser_Generics.cpp`) that discards a stage-2 survivor whose pack would
-be reduced to zero elements when another survivor's pack would not be — a no-op for non-pack
-candidates and for cases where every survivor agrees on emptiness, so no other test's dispatch
-changed. **Known residual limitation** (documented, not fixed): with 2+ substitution values whose
-first value's type also matches the extra fixed parameter (e.g. `printf(fmt, 1, 2, 3)`, all i32),
-BOTH candidates' packs end up non-empty and the new stage can't distinguish them either — the old
-tie-break still misroutes one argument into the fixed parameter in that case (see the "Generic
-FREE-FUNCTION overload sets" invariant above). 1 new `tests/generic_overload_tests.cpp` case
-(`[genoverload][codegen]`).
-(Older baseline entries are pruned — this section keeps only the last 3; full history is in git.)
+(a submodule's member is NOT pulled in), and a wildcard-vs-explicit-import ambiguity case.
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released

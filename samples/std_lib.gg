@@ -71,8 +71,8 @@ fn main() -> i32 {
         printObj<Instance>(i);
     }
 
-    printx("Hello world {} world hello!", 5);
-
+    printf("Hello world {} world hello!\n", 5);
+    printf("There are {} vectors in the function. v1.x {}, v1.y {}\n", 2, v1.x ,v1.y);
 
     return 0;
 }

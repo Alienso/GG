@@ -15,6 +15,11 @@ struct CompilerOptions {
     bool overflowChecks = false; // trap on integer overflow (+/-/*) and out-of-range narrowing
                                  // conversions; enabled by --overflow-checks (Rust-style, opt-in)
     std::string sourceFile;    // main source path, used as the DWARF DIFile when debugInfo is on
+    // Root of the compiler's own standard library (same value as ModuleSearchConfig::stdlibDir).
+    // A declaration whose source file lives under this directory is implicitly allowed to use raw
+    // pointers regardless of `allowRawPtr` — stdlib internals (Array<T>'s buffer, CRT bindings, …)
+    // need them; ordinary user code still requires --unsafe-ptr. Empty disables the exemption.
+    std::string stdlibDir;
     // LLVM target triple emitted into the .ll and used by codegen to pick platform-specific runtime
     // (e.g. how stdout/stderr are obtained). Defaults to the HOST so a native build "just works";
     // override with --target=<triple> to cross-compile.

@@ -222,7 +222,7 @@ const Type* SemanticAnalyzer::currentStaticFieldType(const std::string& name) co
 // permitted and lowers to a no-op (so container code is uniform across primitive and object T).
 Type SemanticAnalyzer::analyzeDestroy(const DestroyExpr& destroy) {
     Type placeType = analyzeExpr(*destroy.place);
-    if (!allowRawPtr_)
+    if (!rawPtrAllowedHere())
         error(destroy.keyword, "'destroy' is an unsafe operation and requires --unsafe-ptr "
               "(it is a low-level container primitive)");
     else if (placeType.kind == TypeKind::Reference || placeType.kind == TypeKind::Ptr
@@ -272,7 +272,7 @@ Type SemanticAnalyzer::analyzeAddressOf(const AddressOfExpr& addressOf) {
         : nullptr;
     const Symbol* sym = id ? symbolTable.lookup(id->name.lexeme) : nullptr;
 
-    if (!allowRawPtr_)
+    if (!rawPtrAllowedHere())
         error(addressOf.keyword, "'addressOf' produces a raw pointer and requires --unsafe-ptr "
               "(it is a low-level FFI/C-binding primitive)");
     else if (!id || !sym || sym->kind != Symbol::Kind::Variable)
@@ -1749,7 +1749,7 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
             return Type{TypeKind::Error};
         }
         // A raw-pointer inference (e.g. `var s = "literal";` → ptr) obeys the same --unsafe-ptr gate.
-        if (!allowRawPtr_ && (inferred.kind == TypeKind::Ptr || inferred.kind == TypeKind::TypedPtr)) {
+        if (!rawPtrAllowedHere() && (inferred.kind == TypeKind::Ptr || inferred.kind == TypeKind::TypedPtr)) {
             error(varDecl.name, "'" + typeName(inferred) + "' is a raw pointer type and requires "
                   "--unsafe-ptr (raw pointers are for stdlib/internal use only)");
             return Type{TypeKind::Error};

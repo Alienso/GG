@@ -1,0 +1,182 @@
+module std.io;
+
+import std.crt;
+import std.String;
+
+
+// Signed integers: widen to i64 and route through the negative-domain core.
+fn print(i64 n) {
+    if (n < 0) {
+        putchar(45);              // '-'
+        emitNeg(n);               // already <= 0 — pass through, no overflowing negation
+    } else {
+        emitNeg(0 - n);           // -n is in [MIN + 1, 0] for n in [0, MAX]: always safe
+    }
+}
+fn print(i32 n) { print(n as i64); }
+fn print(i16 n) { print(n as i64); }
+fn print(i8  n) { print(n as i64); }
+
+// Unsigned integers: widen to u64 and route through the positive-domain core.
+fn print(u64 n) { emitPos(n); }
+fn print(u32 n) { print(n as u64); }
+fn print(u16 n) { print(n as u64); }
+fn print(u8  n) { print(n as u64); }
+
+fn print(f32 x) { print(x as f64); }
+
+fn print(bool b) {
+    if (b) { print("true"); } else { print("false"); }
+}
+
+fn print(str* s) {
+    fputs(s.data, gg_stdout());
+}
+
+fn print(char c) {
+    i32 cp = c as i32;
+    if (cp < 0x80) {
+        putchar(cp);
+    } else if (cp < 0x800) {
+        putchar(0xC0 | (cp >> 6));
+        putchar(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        putchar(0xE0 | (cp >> 12));
+        putchar(0x80 | ((cp >> 6) & 0x3F));
+        putchar(0x80 | (cp & 0x3F));
+    } else {
+        putchar(0xF0 | (cp >> 18));
+        putchar(0x80 | ((cp >> 12) & 0x3F));
+        putchar(0x80 | ((cp >> 6) & 0x3F));
+        putchar(0x80 | (cp & 0x3F));
+    }
+}
+
+//TODO temp
+fn print(String& s) {
+    fputs(s.cStr(), gg_stdout());
+}
+
+
+//Print Line
+//-----------------------------
+
+fn println(i64 n) { print(n); putchar(10); }
+fn println(i32 n) { print(n); putchar(10); }
+fn println(i16 n) { print(n); putchar(10); }
+fn println(i8 n) { print(n); putchar(10); }
+
+fn println(u64 n) { print(n); putchar(10); }
+fn println(u32 n) { print(n); putchar(10); }
+fn println(u16 n) { print(n); putchar(10); }
+fn println(u8 n) { print(n); putchar(10); }
+
+fn println(f32 x) { print(x); putchar(10); }
+fn println(f64 x) { print(x); putchar(10); }
+
+fn println(bool b) { print(b); putchar(10); }
+fn println(char c) { print(c); putchar(10); }
+fn println(String& s) { print(s); putchar(10); }
+fn println(str s) { print(s); putchar(10); }
+
+fn printObj<T>(T obj) {
+    inline for (f in @fields(T)) {
+        print(f.name); print(": "); print(@field(obj, f.name)); print("\n");
+    }
+}
+
+
+// ============================================================
+// Integer printing — two decimal digits per iteration (the Java Integer.getChars / C++
+// std::to_chars technique). A single 200-char rodata table holds the pairs "00".."99"; indexing it
+// at r*2 yields the two ASCII digit bytes of any r in 0..99. Doing ÷100 / %100 (two digits at a time)
+// halves the number of divisions vs the naive ÷10 loop — division is the expensive step.
+//
+// ONE table serves EVERY integer width and signedness, because the table is pure digits — it knows
+// nothing about the value's type. Only the driver differs, and both drivers reduce to a single core:
+//   • signed   i8/i16/i32/i64  → widen to i64, work in the NEGATIVE domain so each type's MIN_VALUE
+//                                (whose magnitude overflows the type) is still representable;
+//   • unsigned u8/u16/u32/u64  → widen to u64, work in the positive domain (no sign, no MIN edge).
+// Each 0..99 chunk is written least-significant-first into a small stack buffer, then flushed left to
+// right. Buffer size 24 covers u64's 20 digits and i64's 19 digits + slack.
+// ============================================================
+
+fn private digitPairs() -> str {
+    return "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+}
+
+// Emit the decimal digits of a NON-POSITIVE i64 (m <= 0) — the sign, if any, is printed by the caller.
+fn private emitNeg(i64 m) {
+    char[24] buf;
+    str t = digitPairs();
+    mut i32 pos = 24;
+    mut i64 n = m;
+    while (n <= -100) {
+        i64 q = n / 100;
+        i32 r = (q * 100 - n) as i32;      // 0..99  (q*100 - n == |n| % 100, since n <= 0)
+        n = q;
+        pos = pos - 1; buf[pos] = t[r * 2 + 1];
+        pos = pos - 1; buf[pos] = t[r * 2];
+    }
+    i32 last = (0 - n) as i32;             // 0..99  (n is now in -99..0)
+    if (last >= 10) {
+        pos = pos - 1; buf[pos] = t[last * 2 + 1];
+        pos = pos - 1; buf[pos] = t[last * 2];
+    } else {
+        pos = pos - 1; buf[pos] = (48 + last) as char;
+    }
+    mut i32 i = pos;
+    while (i < 24) { putchar(buf[i] as i32); i = i + 1; }
+}
+
+// Emit the decimal digits of a u64 (positive domain — no sign, no MIN edge case).
+fn private emitPos(u64 m) {
+    char[24] buf;
+    str t = digitPairs();
+    mut i32 pos = 24;
+    mut u64 n = m;
+    while (n >= 100) {
+        u64 q = n / 100;
+        i32 r = (n - q * 100) as i32;      // 0..99
+        n = q;
+        pos = pos - 1; buf[pos] = t[r * 2 + 1];
+        pos = pos - 1; buf[pos] = t[r * 2];
+    }
+    i32 last = n as i32;                   // 0..99
+    if (last >= 10) {
+        pos = pos - 1; buf[pos] = t[last * 2 + 1];
+        pos = pos - 1; buf[pos] = t[last * 2];
+    } else {
+        pos = pos - 1; buf[pos] = (48 + last) as char;
+    }
+    mut i32 i = pos;
+    while (i < 24) { putchar(buf[i] as i32); i = i + 1; }
+}
+
+
+// MSVCRT/UCRT-only, non-variadic float-to-string conversion — see the print(f64)/print(f32) comment.
+extern _gcvt(f64 value, i32 ndigit, ptr buf) -> ptr;
+
+// Float printing — a TEMPORARY solution via the old MSVCRT/UCRT `_gcvt` helper.
+//
+// `_gcvt` is a genuinely non-variadic C function (value, digit-count, buffer — all fixed), unlike
+// `printf`/`snprintf`. That distinction matters here: GG's `extern` can only declare fixed-arity
+// functions, so calling a REAL variadic CRT function (`snprintf(buf, n, "%g", x)`) by just declaring
+// it with the exact fixed signature you intend to call LOOKS like it should work, but silently
+// prints garbage on Windows x64 — a genuinely variadic callee expects a float argument duplicated
+// into a general-purpose register (for `va_arg`'s benefit), which a plain non-variadic call site
+// never does. `_gcvt` sidesteps the whole issue by not being variadic in the first place.
+//
+// Caveats (hence "temporary"): `_gcvt` is Windows/MSVCRT-only — it does not exist on Linux glibc, so
+// this breaks the "stdlib is platform-agnostic" property every other file in here maintains (see the
+// "Target platform" invariant / `emitStdioHelpers`). It also renders in `_gcvt`'s own style, not a
+// polished one — e.g. `100.0` prints as `100.` (a bare trailing '.', no fraction) rather than `100`
+// or `100.0`. A real fix needs either a portable formatter (Grisu/Ryu-style) or a proper variadic
+// call-site ABI in codegen; `ndigit=15` covers full `f64` precision, buffer sized `ndigit+7` + slack.
+fn print(f64 x) {
+    u64 bufSize = 32;
+    ptr buf = malloc(bufSize);
+    _gcvt(x, 15, buf);
+    fputs(buf, gg_stdout());
+    free(buf);
+}

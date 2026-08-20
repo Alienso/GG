@@ -214,6 +214,11 @@ private:
     // against the top). Empty ⇒ no switch expression in scope ⇒ `yield` is an error.
     std::vector<Type>   switchExprResultStack_;
     bool                allowRawPtr_      = false; // set from CompilerOptions each call
+    // Root of the compiler's own stdlib (CompilerOptions::stdlibDir; "" disables the exemption).
+    // A declaration whose `filename` (the declaring file — see the per-decl filename save/restore in
+    // analyzeFunctionDecl/analyzeClassDecl/analyzeImplDecl/analyzeEnumDecl) lives under this directory
+    // may use raw pointers even when `allowRawPtr_` is false — see `rawPtrAllowedHere`.
+    std::string         stdlibDir_;
     // Active only while checking a generic template body (checkGenericBodies): maps each type
     // parameter name to its bound trait names (empty ⇒ unbounded, permissive). A bare `T` /
     // `T&` value is then an abstract type usable only via what its bounds provide.
@@ -413,7 +418,15 @@ private:
     [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);
 
     // Helpers
-    // Emit an error if typeToken resolves to ptr/ptr<T> and --unsafe-ptr was not given.
+    // True when raw-pointer constructs (ptr/ptr<T>, destroy, addressOf, borrow fields) are allowed
+    // at the currently-analyzed declaration: either --unsafe-ptr was given, or the declaration's own
+    // file (the current `filename`, kept accurate per-declaration by the save/restore in
+    // analyzeFunctionDecl/analyzeClassDecl/analyzeImplDecl/analyzeEnumDecl) lives under the
+    // compiler's stdlib directory. A monomorphized generic class/function is attributed to its
+    // TEMPLATE's own declaring file (GenericTemplate::sourceFile), not the user file that triggered
+    // the instantiation, so e.g. Array<T>'s ptr<T> buffer field is exempt while user code isn't.
+    [[nodiscard]] bool rawPtrAllowedHere() const;
+    // Emit an error if typeToken resolves to ptr/ptr<T> and raw pointers aren't allowed here.
     // Exempt from the check: extern declarations (CRT bindings always need ptr).
     void          checkRawPtrAllowed(const Token& typeToken, const Token& site);
 

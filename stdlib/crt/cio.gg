@@ -1,7 +1,5 @@
 module std.crt;
 
-// stdlib/io/io.gg — standard I/O bindings
-//
 // Wraps the C standard I/O functions available in libc.
 // Import this module for basic console output and input.
 
@@ -10,6 +8,7 @@ extern putchar(i32 c) -> i32;      // write a single character to stdout; return
 extern getchar() -> i32;           // read a single character from stdin; returns the character or EOF (-1)
 extern fflush(ptr stream) -> i32;  // flush a stdio stream; pass 0 (null) to flush all open streams
 extern fputs(ptr s, ptr stream) -> i32;   // write string (NO trailing newline, unlike puts) to a stream
+extern fwrite(ptr buffer, u64 size, u64 count, ptr stream) -> u64;
 
 
 // Portable stdout/stderr FILE* accessors. These are DEFINED by the GG compiler per target platform

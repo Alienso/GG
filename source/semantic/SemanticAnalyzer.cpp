@@ -5,8 +5,34 @@
 #include "SemanticAnalyzer.h"
 #include <iostream>
 #include <functional>
+#include <filesystem>
+#include <cctype>
 
 namespace {
+    // True when `file` (a declaration's source path) lives under `dir` (the stdlib root). Both are
+    // normalized via std::filesystem (so "/"-vs-"\\" and "."/".." don't cause a false negative);
+    // compared case-insensitively on Windows, mirroring ImportResolver's dedupKey, since the
+    // filesystem there is case-insensitive too.
+    bool pathUnder(const std::string& file, const std::string& dir) {
+        if (file.empty() || dir.empty()) return false;
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        std::string f = fs::weakly_canonical(fs::path(file), ec).string();
+        if (ec) f = fs::path(file).lexically_normal().string();
+        std::string d = fs::weakly_canonical(fs::path(dir), ec).string();
+        if (ec) d = fs::path(dir).lexically_normal().string();
+#ifdef _WIN32
+        auto lower = [](std::string s) {
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        f = lower(f);
+        d = lower(d);
+#endif
+        if (!d.empty() && d.back() != fs::path::preferred_separator) d += fs::path::preferred_separator;
+        return f.rfind(d, 0) == 0;
+    }
+
     // The escape-analysis "clone slot" name (or "" if there is none): the name of a return alias
     // whose `slot = param` assignment is a by-value COPY into the caller's storage, not an alias —
     // so escape analysis must not propagate escape back through it. That is every return slot
@@ -78,6 +104,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     inferredVarType_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
+    stdlibDir_        = options.stdlibDir;
 
     symbolTable.enterScope();   // global scope
 
@@ -182,7 +209,7 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
                 error(fd.name, "a field cannot be a primitive borrow ('" + typeName(fieldType)
                       + "'); store the value directly (or a raw 'ptr<T>' under --unsafe-ptr)");
                 fieldType = Type{TypeKind::Error};
-            } else if (!allowRawPtr_) {
+            } else if (!rawPtrAllowedHere()) {
                 error(fd.name, "a field cannot be a borrow ('" + fieldType.className
                       + "*'); use an owning reference '" + fieldType.className + "& " + fd.name.lexeme
                       + "' or a value (or compile with --unsafe-ptr to allow non-owning borrow fields)");
@@ -822,8 +849,12 @@ void SemanticAnalyzer::warn(const Token& token, const std::string& message) {
     std::cerr << prefix << token.line << ": Warning: " << message << '\n';
 }
 
+bool SemanticAnalyzer::rawPtrAllowedHere() const {
+    return allowRawPtr_ || pathUnder(filename, stdlibDir_);
+}
+
 void SemanticAnalyzer::checkRawPtrAllowed(const Token& typeToken, const Token& site) {
-    if (allowRawPtr_) return;
+    if (rawPtrAllowedHere()) return;
     Type t = resolveTypeToken(typeToken);
     if (t.kind == TypeKind::Ptr || t.kind == TypeKind::TypedPtr) {
         error(site, "'" + typeName(t) + "' is a raw pointer type and requires --unsafe-ptr "

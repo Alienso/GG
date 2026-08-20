@@ -454,6 +454,10 @@ void Parser::parseMemberList(const Token& name,
         consume(TokenType::SEMICOLON, "expected ';' after field declaration");
         // Make instance fields capturable by a lambda in a later method body.
         if (!isStatic) classFieldScope_.emplace(memberName.lexeme, memberType);
+        // Record the field's type for every class (not just the one being parsed), so a member
+        // access on an arbitrary in-scope object (`v1.x`) can be resolved elsewhere — see
+        // GenericRegistry::classFieldTypes.
+        gen_->classFieldTypes[name.lexeme].emplace(memberName.lexeme, memberType);
         fields.push_back(FieldDecl{
             isPublic, isStatic, isMut, memberType, memberName, std::move(initializer)
         });

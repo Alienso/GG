@@ -1,31 +1,5 @@
 module std.utility;
 
-class List<T>  {
-
-    mut i32 size;
-    mut Node<T>&? first;
-    mut Node<T>&? last;
-
-    List(){
-        size = 0;
-        first = null;
-        last = null;
-    }
-
-    fn add(T val) mut {
-        Node<T>& node = new Node<T>(val);
-        if (last != null){
-            last.next = node;
-        } else {
-            first = node;
-
-        }
-        last = node;
-        size++;
-    }
-
-}
-
 class Node<T> {
     mut T value;
     mut Node<T>&? next;
@@ -36,6 +10,30 @@ class Node<T> {
     }
 }
 
+class List<T>  {
+
+    mut i32 size;
+    mut Node<T>&? begin;
+    mut Node<T>&? end;
+
+    List(){
+        size = 0;
+        begin = null;
+        end = null;
+    }
+
+    fn add(T& val) mut {
+        if (begin == null){
+            begin = new Node<T>(val);
+            end = begin;
+        } else {
+            mut Node<T>&? temp = end;
+            end = new Node<T>(val);
+            temp.next = end;
+        }
+        size++;
+    }
+}
 
 
 class ListIter<T> {
@@ -43,9 +41,9 @@ class ListIter<T> {
 }
 
 impl <T> Iterator for ListIter<T> {
-    fn hasNext() -> bool { return pos != null; }
+    fn hasNext() -> bool { return pos != null && pos!!.next != null; }
     fn next() mut -> T* {
-        T* val = pos!!.value;
+        T* val = pos!!.next!!.value;
         pos = pos!!.next;
         return val;
     }
@@ -53,7 +51,7 @@ impl <T> Iterator for ListIter<T> {
 
 impl <T> Iterable for List<T> {
     fn iter() -> ListIter<T> it {
-        it.pos = first;
+        it.pos = begin;
         return it;
     }
 }

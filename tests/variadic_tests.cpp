@@ -92,6 +92,64 @@ TEST_CASE("variadic - an object (String) pack element is cloned into the tuple",
     REQUIRE(ir.find("@take$Tuple$Str2$i32(ptr") != std::string::npos);
 }
 
+TEST_CASE("variadic - a field access is deducible as a pack argument type", "[variadic][codegen]") {
+    // `p.x` (a MemberAccessExpr) previously had no case in Parser::deduceArgTypeToken, so passing a
+    // field straight into a pack argument (e.g. `printf("{}", v.x)`) failed with "cannot infer the
+    // type of a variadic argument" even though the field's type is perfectly well known at parse
+    // time. deduceArgTypeToken now resolves the receiver's class (recursively, so it also works
+    // through `this`/another field) and looks up the field's declared type in the class's own
+    // member list (GenericRegistry::classFieldTypes), regardless of which class is being parsed when
+    // the call site is reached.
+    std::string ir = codegenString(R"(
+        class Point { i32 x; i32 y; Point(i32 x, i32 y) { this.x = x; this.y = y; } }
+        fn take<...Ts>(Ts... args) -> i32 { return 0; }
+        fn main() -> i32 {
+            Point p(1, 2);
+            return take(p.x, p.y);
+        }
+    )");
+    REQUIRE(ir.find("%Tuple$i32$i32 = type { i32, i32 }") != std::string::npos);
+    REQUIRE(ir.find("@take$Tuple$i32$i32(ptr") != std::string::npos);
+}
+
+TEST_CASE("variadic - a reference-typed field decays to a plain class element in a pack",
+          "[variadic][codegen]") {
+    // A field's OWN declared type must be decayed the same way an identifier's declared type is
+    // (strip a trailing '&'/'*' or nullable '?') before it reaches requestTupleType's mangling —
+    // otherwise a reference-typed field (`Inner& item;`) would produce an unparsable tuple class
+    // name like "Tuple$Inner&$i32" ('&' is not a valid unquoted LLVM identifier character). Caught
+    // by re-checking the MemberAccessExpr fix for edge cases: the first version returned the field's
+    // raw type token verbatim, which happened to work for the reported `v.x`/`v.y` case (plain
+    // primitive fields) but would have silently emitted broken IR for a reference-typed field.
+    std::string ir = codegenString(R"(
+        class Inner { i32 v; Inner(i32 v) { this.v = v; } }
+        class Holder { Inner& item; Holder(Inner& i) { item = i; } }
+        fn take<...Ts>(Ts... args) -> i32 { return 0; }
+        fn main() -> i32 {
+            Inner& n = new Inner(5);
+            Holder h(n);
+            return take(h.item, 1);
+        }
+    )");
+    REQUIRE(ir.find("%Tuple$Inner$i32 = type { %Inner, i32 }") != std::string::npos);
+    REQUIRE(ir.find("@take$Tuple$Inner$i32(ptr") != std::string::npos);
+}
+
+TEST_CASE("variadic - a static field via Class::field is deducible as a pack argument type",
+          "[variadic][codegen]") {
+    // `Class::field` parses to the same MemberAccessExpr node as `obj.field`, but the object names a
+    // class directly rather than a variable — deduceArgTypeToken's IdentifierExpr case only searches
+    // scopes_/classFieldScope_ (locals/params/instance fields), so it would never resolve "Holder" on
+    // its own. The MemberAccessExpr case special-cases an object that is itself a known class name.
+    std::string ir = codegenString(R"(
+        class Holder { static mut i32 counter = 7; }
+        fn take<...Ts>(Ts... args) -> i32 { return 0; }
+        fn main() -> i32 { return take(Holder::counter, 2); }
+    )");
+    REQUIRE(ir.find("%Tuple$i32$i32 = type { i32, i32 }") != std::string::npos);
+    REQUIRE(ir.find("@take$Tuple$i32$i32(ptr") != std::string::npos);
+}
+
 TEST_CASE("variadic - explicit type arguments on a variadic are rejected", "[variadic][semantic]") {
     // Explicit `<…>` can't spell a pack and would mis-bind it; reject with a clear message.
     StderrCapture cap;

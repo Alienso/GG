@@ -697,23 +697,92 @@ Expr Parser::parsePrimary() {
         // Generic function call: name<typeArgs>(args)  →  mangled concrete call.
         if (gen_->funcNames.count(name.lexeme) && check(TokenType::LESS)) {
             // A variadic function's pack is always inferred from the trailing arguments — explicit
-            // `<…>` type arguments can't spell a pack, so reject them (they would mis-bind the pack).
+            // `<…>` type arguments can't spell a pack, so a pack candidate is never eligible for this
+            // call form. Only when the name's ENTIRE candidate set is pack-bearing (no non-pack
+            // alternative could possibly serve this call) do we reject with the friendlier "the pack
+            // is inferred" message — a name whose overload set MIXES pack and non-pack candidates
+            // still lets an explicit call target its non-pack member(s) (previously this rejected the
+            // whole set the moment ANY candidate was pack-bearing, wrongly erroring on a valid call).
             auto tmplIt = gen_->templates.find(name.lexeme);
-            if (tmplIt != gen_->templates.end() && !tmplIt->second.isPack.empty()
-                && tmplIt->second.isPack.back())
+            std::vector<size_t> nonPackCands;
+            bool anyPack = false;
+            if (tmplIt != gen_->templates.end()) {
+                for (size_t i = 0; i < tmplIt->second.size(); ++i) {
+                    const auto& c = tmplIt->second[i];
+                    if (!c.isPack.empty() && c.isPack.back()) anyPack = true;
+                    else nonPackCands.push_back(i);
+                }
+            }
+            if (anyPack && nonPackCands.empty())
                 throw error(name, "variadic function '" + name.lexeme + "' does not take explicit type "
                             "arguments; call it as " + name.lexeme + "(args) — the pack is inferred");
             std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
-            std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
-            recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
+
+            // Parses the call's argument list (unwrapping any spread — a template called with
+            // explicit type arguments is never pack-bearing, rejected above) and builds the CallExpr
+            // for the already-chosen mangled name.
+            auto finishCall = [&](const std::string& mangled) -> Expr {
+                consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
+                std::vector<Token> genNames;
+                std::vector<bool>  genSpreads;
+                std::vector<std::unique_ptr<Expr>> genArgs =
+                    parseCallArgs(genNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &genSpreads);
+                for (bool s : genSpreads) if (s) { unwrapSpreadArgs(genArgs, genNames, genSpreads); break; }
+                return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
+                                          std::move(genArgs), std::move(genNames) });
+            };
+
+            if (tmplIt == gen_->templates.end() || tmplIt->second.size() <= 1) {
+                // Fast path: 0 or 1 candidate — byte-identical to pre-overload-set behavior.
+                std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
+                recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
+                return finishCall(mangled);
+            }
+
+            const std::vector<GenericTemplate>& candidates = tmplIt->second;
+            std::vector<size_t> matching;
+            for (size_t i : nonPackCands)
+                if (candidates[i].typeParams.size() == typeArgs.size()) matching.push_back(i);
+            if (matching.empty())
+                throw error(name, "no generic template '" + name.lexeme + "' takes "
+                            + std::to_string(typeArgs.size()) + " type argument(s)");
+            if (matching.size() == 1) {
+                std::string mangled = mangleInstantiation(name.lexeme, typeArgs, matching.front());
+                recordInstantiation(name.lexeme, mangled, std::move(typeArgs), matching.front());
+                return finishCall(mangled);
+            }
+
+            // Multiple non-pack candidates share this type-argument count — need the call's argument
+            // types too (the fixed-parameter type filter), so parse the args now.
             consume(TokenType::LEFT_PAREN, "expected '(' after generic type arguments");
             std::vector<Token> genNames;
             std::vector<bool>  genSpreads;
             std::vector<std::unique_ptr<Expr>> genArgs =
                 parseCallArgs(genNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &genSpreads);
-            // A template called with EXPLICIT type arguments can never be pack-bearing (rejected
-            // above, since the pack is always inferred) — unconditionally unwrap any spread.
             for (bool s : genSpreads) if (s) { unwrapSpreadArgs(genArgs, genNames, genSpreads); break; }
+            // The fixed-parameter type filter below indexes `genArgs` POSITIONALLY (it inspects the
+            // declared type at each fixed parameter POSITION) — a named argument out of declaration
+            // order would silently misalign against the wrong position and could select the wrong
+            // overload. Rather than risk that, require positional arguments whenever disambiguation
+            // actually needs them (a name with only one matching candidate never reaches this branch,
+            // so named args to a non-ambiguous generic call are unaffected).
+            for (const Token& gn : genNames)
+                if (!gn.lexeme.empty())
+                    throw error(name, "a named-argument call to the overloaded generic function '"
+                                + name.lexeme + "' is ambiguous at parse time; use positional "
+                                "arguments so the matching overload can be determined");
+            size_t idx;
+            CandidateOutcome outcome = selectTemplateCandidate(candidates, matching, typeArgs.size(),
+                                                               genArgs, /*trailingSpread=*/false,
+                                                               gen_->ordinaryFuncNames.count(name.lexeme) > 0,
+                                                               idx);
+            if (outcome == CandidateOutcome::NoMatch)
+                throw error(name, "no generic template '" + name.lexeme + "' matches these arguments");
+            if (outcome == CandidateOutcome::Ambiguous)
+                throw error(name, "ambiguous call to generic function '" + name.lexeme
+                            + "': multiple overloads match these arguments");
+            std::string mangled = mangleInstantiation(name.lexeme, typeArgs, idx);
+            recordInstantiation(name.lexeme, mangled, std::move(typeArgs), idx);
             return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                       std::move(genArgs), std::move(genNames) });
         }
@@ -762,9 +831,22 @@ Expr Parser::parsePrimary() {
             const std::pair<std::vector<Token>, Token>* savedSig = expectedLambdaSig_;
             if (gen_->funcNames.count(name.lexeme)) {
                 auto tit = gen_->templates.find(name.lexeme);
-                if (tit != gen_->templates.end() && tit->second.typeParams.size() == 1
-                    && !tit->second.bounds.empty()) {
-                    for (const std::string& b : tit->second.bounds[0]) {
+                // Only applied when EXACTLY ONE candidate under the name has this shape (today's
+                // only possible count) — an overloaded name with 0 or 2+ such candidates just skips
+                // this best-effort convenience (byte-identical for every existing single-candidate
+                // case; no error, since a missed inference just means an untyped lambda literal here
+                // stays un-pre-typed, not a hard failure).
+                const GenericTemplate* single = nullptr;
+                if (tit != gen_->templates.end()) {
+                    for (const auto& c : tit->second) {
+                        if (c.typeParams.size() == 1 && !c.bounds.empty()) {
+                            if (single) { single = nullptr; break; }   // 2+ — ambiguous, skip
+                            single = &c;
+                        }
+                    }
+                }
+                if (single) {
+                    for (const std::string& b : single->bounds[0]) {
                         if (b.rfind("Call$", 0) != 0) continue;
                         auto sit = gen_->callTraitSigs.find(b);
                         if (sit != gen_->callTraitSigs.end()) expectedLambdaSig_ = &sit->second;
@@ -789,8 +871,13 @@ Expr Parser::parsePrimary() {
                 for (bool s : argSpreads) if (s) { anySpread = true; break; }
                 if (anySpread) {
                     auto tmplIt = gen_->templates.find(name.lexeme);
-                    bool targetIsPack = tmplIt != gen_->templates.end()
-                                     && !tmplIt->second.isPack.empty() && tmplIt->second.isPack.back();
+                    // If ANY candidate under the name is pack-bearing, defer to the variadic path
+                    // below (deduceVariadicInstantiation), which does full multi-candidate selection
+                    // itself; otherwise unwrap immediately as today.
+                    bool targetIsPack = false;
+                    if (tmplIt != gen_->templates.end())
+                        for (const auto& c : tmplIt->second)
+                            if (!c.isPack.empty() && c.isPack.back()) { targetIsPack = true; break; }
                     if (!targetIsPack) unwrapSpreadArgs(args, argNames, argSpreads);
                 }
             }
@@ -800,10 +887,23 @@ Expr Parser::parsePrimary() {
             // type parameter as the lambda's generated class (whose type is otherwise unspellable).
             if (gen_->funcNames.count(name.lexeme)) {
                 auto tit = gen_->templates.find(name.lexeme);
-                if (tit != gen_->templates.end() && tit->second.typeParams.size() == 1
-                    && !tit->second.bounds.empty()) {
+                // Same "exactly one candidate has this shape" restriction as the lambda-signature
+                // exposure above — an overloaded name with 0 or 2+ single-Call-bounded candidates
+                // just skips this inference (falls through to ordinary deduction/error below).
+                const GenericTemplate* single = nullptr;
+                size_t singleIdx = 0;
+                if (tit != gen_->templates.end()) {
+                    for (size_t i = 0; i < tit->second.size(); ++i) {
+                        const auto& c = tit->second[i];
+                        if (c.typeParams.size() == 1 && !c.bounds.empty()) {
+                            if (single) { single = nullptr; break; }
+                            single = &c; singleIdx = i;
+                        }
+                    }
+                }
+                if (single) {
                     bool callBound = false;
-                    for (const std::string& b : tit->second.bounds[0])
+                    for (const std::string& b : single->bounds[0])
                         if (b.rfind("Call$", 0) == 0) { callBound = true; break; }
                     std::string lam;
                     if (callBound)
@@ -813,8 +913,8 @@ Expr Parser::parsePrimary() {
                         }
                     if (!lam.empty()) {
                         std::vector<std::vector<Token>> typeArgs = { { Token{ TokenType::IDENTIFIER, lam, name.line } } };
-                        std::string mangled = mangleInstantiation(name.lexeme, typeArgs);
-                        recordInstantiation(name.lexeme, mangled, std::move(typeArgs));
+                        std::string mangled = mangleInstantiation(name.lexeme, typeArgs, singleIdx);
+                        recordInstantiation(name.lexeme, mangled, std::move(typeArgs), singleIdx);
                         return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                                   std::move(args), std::move(argNames) });
                     }
@@ -837,9 +937,10 @@ Expr Parser::parsePrimary() {
                     }
                 }
                 std::vector<std::vector<Token>> inferred;
-                if (positional && inferGenericTypeArgs(name.lexeme, args, inferred)) {
-                    std::string mangled = mangleInstantiation(name.lexeme, inferred);
-                    recordInstantiation(name.lexeme, mangled, std::move(inferred));
+                size_t candIdx = 0;
+                if (positional && inferGenericTypeArgs(name.lexeme, args, inferred, candIdx)) {
+                    std::string mangled = mangleInstantiation(name.lexeme, inferred, candIdx);
+                    recordInstantiation(name.lexeme, mangled, std::move(inferred), candIdx);
                     return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                               std::move(args), std::move(argNames) });
                 }

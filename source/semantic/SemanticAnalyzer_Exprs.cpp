@@ -470,6 +470,30 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
     }
 
     if (viable.empty()) {
+        // Render the call's actual argument types (`name: Type` for a named argument) — shared by
+        // every branch below so each diagnostic can show what was actually passed.
+        auto renderArgs = [&]() -> std::string {
+            std::string s;
+            for (size_t k = 0; k < argTypes.size(); ++k) {
+                if (k) s += ", ";
+                if (k < argNames.size() && !argNames[k].lexeme.empty())
+                    s += argNames[k].lexeme + ": ";
+                s += typeName(argTypes[k]);
+            }
+            return s;
+        };
+        // Render one candidate's declared parameter signature, e.g. "(i32, str)".
+        auto renderCandidate = [](const OverloadCand& c) -> std::string {
+            std::string s = "(";
+            for (size_t i = 0; i < c.params->size(); ++i) {
+                if (i) s += ", ";
+                if (c.paramNames && i < c.paramNames->size() && !(*c.paramNames)[i].empty())
+                    s += (*c.paramNames)[i] + ": ";
+                s += typeName((*c.params)[i]);
+            }
+            return s + ")";
+        };
+
         // Single non-overloaded candidate with a positional-only call → keep the precise arity
         // diagnostic; otherwise surface the mapping reason (unknown name, missing required, …).
         size_t total    = cands.empty() ? 0 : cands[0].params->size();
@@ -478,11 +502,19 @@ int SemanticAnalyzer::resolveOverload(const Token& at, const std::string& what,
             std::string want = (required == total)
                 ? std::to_string(total)
                 : std::to_string(required) + " to " + std::to_string(total);
-            error(at, what + " expects " + want + " argument(s), got " + std::to_string(args.size()));
+            error(at, what + " expects " + want + " argument(s), got " + std::to_string(args.size())
+                      + ": (" + renderArgs() + ")");
         } else if (cands.size() == 1 && !lastReason.empty()) {
-            error(at, "no matching call to " + what + ": " + lastReason);
+            error(at, "no matching call to " + what + " with argument types (" + renderArgs()
+                      + "): " + lastReason + "; expected " + renderCandidate(cands[0]));
         } else {
-            error(at, "no matching overload for " + what + " with the given argument types");
+            std::string candList;
+            for (size_t i = 0; i < cands.size(); ++i) {
+                if (i) candList += ", ";
+                candList += renderCandidate(cands[i]);
+            }
+            error(at, "no matching overload for " + what + " with argument types (" + renderArgs()
+                      + "); candidates: " + candList);
         }
         return -1;
     }

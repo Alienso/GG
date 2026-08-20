@@ -31,12 +31,33 @@ struct GenericTemplate {
     std::vector<std::string>              typeParams;
     std::vector<std::vector<std::string>> bounds;   // bounds[i] = trait names required of typeParams[i]
     std::vector<bool>                     isPack;    // isPack[i] = typeParams[i] is a variadic pack `...T`
-    std::vector<Token>                    tokens;    // decl tokens; tokens[1] is the name; <...> stripped
+    // Decl tokens; <...> stripped. The name sits right after `fn` (index 1) UNLESS `isPublic` is
+    // false, in which case a synthesized `private` token is inserted first and the name is at
+    // index 2 — see tryCaptureFunctionTemplate / the declNameIdx computation in runMonomorphization.
+    std::vector<Token>                    tokens;
+    // For a pack template: the number of FIXED (non-pack) params. For a non-pack template: its total
+    // declared arity. Computed once at capture time; used by overload-set candidate selection (arity
+    // gate + tie-break) when a bare name has more than one free-function template — see
+    // Parser::selectTemplateCandidate.
+    size_t                                fixedCount = 0;
+    // `fn private name<...>` — file-local, mirroring a plain private function (warning, not an
+    // error, on cross-file call; see the SemanticAnalyzer_Exprs.cpp free-function access check).
+    // `sourceFile` is the template's OWN declaring file, captured at parse time (before
+    // monomorphization's single shared `filename` would otherwise attribute every instantiation to
+    // the entry/root file) — runMonomorphization temporarily swaps `filename` to this value while
+    // re-parsing the concrete instantiation, so `FunctionDeclStmt::sourceFile` (and thus the
+    // cross-file private-call warning) is correct regardless of which file calls it.
+    bool                                   isPublic = true;
+    std::string                           sourceFile;
 };
 struct GenericInstantiation {
     std::string                     templateName;
     std::string                     mangledName;
     std::vector<std::vector<Token>> args;     // each type argument's token slice
+    // Which candidate in `GenericRegistry::templates[templateName]` this instantiation resolved to
+    // at the call site (0 for the overwhelmingly common single-candidate case). Lets
+    // runMonomorphization re-find the exact template without re-running candidate selection.
+    size_t                          candidateIndex = 0;
     // Generic METHOD instantiation: when non-empty, this request is a `fn m<T>` on a class, not a
     // free-function/class template. `ownerClass` is the concrete (possibly mangled) class the
     // instantiated method must be injected into; `bareMethodName` is the source method name (so the
@@ -57,7 +78,11 @@ struct GenericImplTemplate {
     std::string                           traitName;         // the trait this blanket impl provides (for specialization skip)
 };
 struct GenericRegistry {
-    std::unordered_map<std::string, GenericTemplate> templates;     // by template name (fn or class)
+    // By template name (fn or class). A free-function name may have MULTIPLE candidates (overload
+    // set, disambiguated at each call site by arity/pack-shape + fixed-parameter type compatibility —
+    // see Parser::selectTemplateCandidate); a generic class name always has exactly one (class
+    // templates don't support overloading — a redeclaration still silently replaces, unchanged).
+    std::unordered_map<std::string, std::vector<GenericTemplate>> templates;
     std::unordered_set<std::string>                  funcNames;     // generic function names
     std::unordered_set<std::string>                  classNames;    // generic class names
     // Top-level free functions with at least one ORDINARY (non-generic) declaration somewhere in the
@@ -140,9 +165,13 @@ public:
     // ---- Module namespacing (public statics so ImportResolver can reuse them) ----
     // Scan a file's tokens for its `module NAME;` (→ outModule) and every `import a.B;` symbol
     // import (→ outBindings simpleName→qualified; a name imported from >1 module → outAmbiguous).
+    // `import a.b.*;` (wildcard) binds every member listed for module "a.b" in `types`/`funcs` —
+    // non-recursive: a submodule "a.b.c" is a distinct key, never included.
     static void scanModuleDirectives(const std::vector<Token>& toks, std::string& outModule,
                                      std::unordered_map<std::string, std::string>& outBindings,
-                                     std::unordered_set<std::string>& outAmbiguous);
+                                     std::unordered_set<std::string>& outAmbiguous,
+                                     const std::unordered_map<std::string, std::unordered_set<std::string>>& types = {},
+                                     const std::unordered_map<std::string, std::unordered_set<std::string>>& funcs = {});
     // Record a file's top-level decl names (excluding extern + `main`) into types[module] /
     // funcs[module] (by kind) and add `module` to names. Registers the module even with no members.
     static void scanModuleMembers(const std::vector<Token>& toks, const std::string& module,
@@ -205,6 +234,11 @@ private:
     // generic class's methods are registered only when its `Class$args` body is re-parsed). Drained
     // to a fixpoint after the main worklist. See runMonomorphization.
     std::vector<GenericInstantiation>                   pendingMethodInsts_;
+    // Tuple class names already emitted by synthesizeTupleClasses — runMonomorphization may call it
+    // more than once (reflection expansion can enqueue new generic work, including new tuple
+    // requests, requiring another drain-and-synthesize round), and re-emitting an already-synthesized
+    // tuple's class declaration a second time would be a duplicate-class error.
+    std::unordered_set<std::string>                     tupleClassesSynthesized_;
     // Active while parsing a lambda body: names resolved to a scope index < captureBase_ are
     // captured by value into `captures_` (deduped). Nested lambdas are rejected in v1.
     bool                                       capturing_   = false;
@@ -290,9 +324,44 @@ private:
     std::vector<Token>              parseOneTypeArg();       // one arg; nested generics collapsed
     void                            consumeCloseAngle();     // consume '>' (splitting a '>>')
     [[nodiscard]] std::string mangleInstantiation(const std::string& base,
-                                  const std::vector<std::vector<Token>>& args) const;
+                                  const std::vector<std::vector<Token>>& args,
+                                  size_t candidateIndex = 0) const;
     void recordInstantiation(const std::string& templateName, const std::string& mangled,
-                             std::vector<std::vector<Token>> args);
+                             std::vector<std::vector<Token>> args, size_t candidateIndex = 0);
+    // ---- Free-function template overload-set candidate selection ----
+    // A parameter's shape at one raw-token position within a template's declared parameter list:
+    // either a bare reference to the template's OWN type parameter (typeParamName set — this is the
+    // position being inferred, so selection stays lenient there), or a syntactically-determinable
+    // concrete base type name (concreteBase set, e.g. "i32" for `i32 cursor`), or neither (both
+    // empty -> caller stays lenient; too complex to classify at parse time).
+    struct ParamShape { std::string typeParamName; std::string concreteBase; };
+    [[nodiscard]] ParamShape classifyTemplateParamAt(const GenericTemplate& tmpl, size_t pos) const;
+    // Arity/pack-shape gate for one candidate: non-pack -> exact argCount == fixedCount (never a
+    // spread); pack -> trailingSpread ? argCount == fixedCount+1 : argCount >= fixedCount. When
+    // explicitTypeArgCount is set (an explicit `name<T,...>(...)` call), a pack candidate is always
+    // rejected and typeParams.size() must equal it.
+    [[nodiscard]] bool arityCompatible(const GenericTemplate& tmpl, size_t argCount,
+                                       bool trailingSpread,
+                                       std::optional<size_t> explicitTypeArgCount) const;
+    enum class CandidateOutcome { Unique, NoMatch, Ambiguous };
+    // Shared selector over a homogeneous (all-pack or all-non-pack) subset `eligible` of `candidates`:
+    // arity/pack-shape gate -> fixed-parameter type-compatibility filter (via deduceArgTypeToken) ->
+    // largest-fixedCount tie-break among survivors. Never mutates `args`. On Unique, `outIndex` is the
+    // winner; on Ambiguous, `outTied` (if non-null) lists the tied candidate indices.
+    // `hasOrdinaryFallback`: true when the bare name ALSO has a plain (non-generic) declaration
+    // elsewhere (gen_->ordinaryFuncNames) — i.e. a failed/rejected selection here can safely defer
+    // to that ordinary overload instead of guessing. When true, an UNDETERMINABLE fixed-parameter
+    // argument type (e.g. a member access like `obj.field` — deduceArgTypeToken doesn't resolve
+    // those) REJECTS the candidate rather than leniently accepting it, so a call whose fixed-prefix
+    // argument type can't be proven compatible doesn't get silently misrouted into a generic pack
+    // template purely because arity happened to allow zero pack elements. When false (no escape
+    // hatch), undeterminable stays lenient, unchanged from the original design.
+    [[nodiscard]] CandidateOutcome selectTemplateCandidate(
+        const std::vector<GenericTemplate>& candidates, const std::vector<size_t>& eligible,
+        std::optional<size_t> explicitTypeArgCount,
+        const std::vector<std::unique_ptr<Expr>>& args, bool trailingSpread,
+        bool hasOrdinaryFallback,
+        size_t& outIndex, std::vector<size_t>* outTied = nullptr) const;
     // ---- Generic methods (`fn m<T>` on a class) ----
     // Capture a generic method template inside a class body (called from parseMemberList before the
     // param list is parsed). `ownerClass` is the enclosing (possibly mangled) class name. Stores the
@@ -313,9 +382,13 @@ private:
     // type is syntactically known — an in-scope identifier, a `Class(...)`/`Class{...}` constructor
     // call, or `new Class(...)`. Fills `out` (one token-slice per type param, in order) and returns
     // true iff EVERY type parameter was deduced; false otherwise (caller then errors).
+    // `outCandidateIndex` receives which templates[fnName][i] was selected (0 for the common
+    // single-candidate case) so the call site can pass it through to mangleInstantiation/
+    // recordInstantiation.
     bool inferGenericTypeArgs(const std::string& fnName,
                               const std::vector<std::unique_ptr<Expr>>& args,
-                              std::vector<std::vector<Token>>& out);
+                              std::vector<std::vector<Token>>& out,
+                              size_t& outCandidateIndex);
     // ---- Variadic packs ----
     // Best-effort deduce a call argument's TYPE token (proper token kind so it re-parses/mangles
     // correctly): a literal by its default type (int→i32, decimal→f64, string→str, bool, char), an

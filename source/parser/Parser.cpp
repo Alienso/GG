@@ -21,7 +21,8 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
     // possibly-shared registry), then rewrite the token stream so every name carries its module
     // prefix — exactly like generic mangling. Skipped entirely when no module is in play, so a
     // module-less program's tokens (and thus its IR) are byte-identical to before.
-    scanModuleDirectives(tokens, currentModule_, importBindings_, ambiguousImports_);
+    scanModuleDirectives(tokens, currentModule_, importBindings_, ambiguousImports_,
+                        gen_->moduleTypes, gen_->moduleFuncs);
     scanModuleMembers(tokens, currentModule_, gen_->moduleTypes, gen_->moduleFuncs, gen_->moduleNames);
     if (!currentModule_.empty() || !gen_->moduleNames.empty())
         tokens = qualifyTokens(tokens, currentModule_, importBindings_, ambiguousImports_,

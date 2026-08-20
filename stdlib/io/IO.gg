@@ -125,9 +125,9 @@ fn print(bool b) {
 
 // Write WITHOUT a trailing newline (that's `println`'s job). `puts` is wrong here — it appends '\n';
 // `fputs` does not. `stdout()` is the UCRT/MinGW stream handle for fd 1.
-fn print(str s) {
+/*fn print(str s) {
     fputs(s.data, gg_stdout());   // `str`'s .data is a public, NUL-terminated view pointer
-}
+}*/
 
 // `String`'s byte buffer is private (encapsulated), so we don't reach into it for `fputs`; iterate
 // its bytes through the public byteLength()/byteAt() accessors instead.

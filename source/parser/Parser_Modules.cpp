@@ -11,7 +11,9 @@
 
 void Parser::scanModuleDirectives(const std::vector<Token>& toks, std::string& outModule,
                                   std::unordered_map<std::string, std::string>& outBindings,
-                                  std::unordered_set<std::string>& outAmbiguous) {
+                                  std::unordered_set<std::string>& outAmbiguous,
+                                  const std::unordered_map<std::string, std::unordered_set<std::string>>& types,
+                                  const std::unordered_map<std::string, std::unordered_set<std::string>>& funcs) {
     for (size_t i = 0; i < toks.size(); ++i) {
         // `module NAME ('.' NAME)* ;` — the file's module (first one wins). Dotted names (`std.io`)
         // are read as a greedy chain, joined with '.' — must mirror the real parse()'s module-line
@@ -34,6 +36,10 @@ void Parser::scanModuleDirectives(const std::vector<Token>& toks, std::string& o
         // (STRING) is a file load, handled elsewhere. The LAST segment is always the imported
         // symbol; everything before it (dot-joined) is always the module path — unambiguous at any
         // depth, since GG top-level decls are always flat, never nested.
+        // `import a.b.* ;` — wildcard: every segment is part of the module path, and every member
+        // that module declares (types + free functions) is bound, exactly as if each had its own
+        // `import a.b.Name;` line. Non-recursive: a submodule "a.b.c" is a distinct registry key,
+        // never pulled in by a wildcard on "a.b".
         if (toks[i].type == TokenType::IMPORT && i + 1 < toks.size()
             && toks[i + 1].type == TokenType::IDENTIFIER) {
             size_t j = i + 1;
@@ -44,16 +50,30 @@ void Parser::scanModuleDirectives(const std::vector<Token>& toks, std::string& o
                 segs.push_back(toks[j + 1].lexeme);
                 j += 2;
             }
-            if (segs.size() >= 2) {
-                const std::string simple = segs.back();
-                std::string qualified = segs[0];
-                for (size_t k = 1; k + 1 < segs.size(); ++k) qualified += "." + segs[k];
-                qualified += "." + simple;
+            auto bind = [&](const std::string& simple, const std::string& qualified) {
                 auto it = outBindings.find(simple);
                 if (it != outBindings.end() && it->second != qualified)
                     outAmbiguous.insert(simple);        // same simple name from two modules → must qualify
                 else
                     outBindings.emplace(simple, qualified);
+            };
+            bool wildcard = j + 1 < toks.size() && toks[j].type == TokenType::DOT
+                            && toks[j + 1].type == TokenType::STAR;
+            if (wildcard) {
+                std::string module = segs[0];
+                for (size_t k = 1; k < segs.size(); ++k) module += "." + segs[k];
+                auto tIt = types.find(module);
+                if (tIt != types.end())
+                    for (const std::string& name : tIt->second) bind(name, module + "." + name);
+                auto fIt = funcs.find(module);
+                if (fIt != funcs.end())
+                    for (const std::string& name : fIt->second) bind(name, module + "." + name);
+            } else if (segs.size() >= 2) {
+                const std::string simple = segs.back();
+                std::string qualified = segs[0];
+                for (size_t k = 1; k + 1 < segs.size(); ++k) qualified += "." + segs[k];
+                qualified += "." + simple;
+                bind(simple, qualified);
             }
         }
     }

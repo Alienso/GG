@@ -314,3 +314,37 @@ TEST_CASE("ImportResolver - a file whose declared module mismatches its director
     REQUIRE(capture.contains("declares module 'std.wrong'"));
     REQUIRE(capture.contains("module 'std.geo'"));
 }
+
+// ============================================================
+// ImportResolver — dependency-first parse ordering (generic-template capture)
+// ============================================================
+// A generic-function call written WITHOUT explicit `<...>` (deduceVariadicInstantiation /
+// inferGenericTypeArgs, Parser_Generics.cpp) looks up the template directly in the shared
+// GenericRegistry AT PARSE TIME — unlike an explicit `name<Targs>(...)` call, which only needs the
+// template to exist later, once runMonomorphization runs (well after every file is parsed).
+// `processFile` previously parsed a file's OWN tokens BEFORE recursing into its dependencies, so an
+// inferred call to a template declared in an IMPORTED file (parsed later) found nothing and wrongly
+// reported "cannot infer type argument(s)" — even though the call was valid and would have resolved
+// once the dependency's own parse ran. This never surfaced before because every prior generic
+// template happened to be declared in the same file as its non-explicit call sites. Fixed by
+// processing dependencies before parsing the importing file's own tokens.
+
+TEST_CASE("ImportResolver - an inferred call to a generic pack function declared in an imported "
+          "file resolves (dependency-first parse ordering)", "[import][genoverload]") {
+    // Mirrors the real repro: two overloads under the same bare name (only the second is used by
+    // this test's call, but both existing is what originally exposed the ordering bug via the
+    // overload-set machinery) declared in a SEPARATE file from the inferred call site.
+    writeTempFile("gg_printf_lib.gg", R"(
+        fn printf<...Ts> (str* s, Ts... args) -> i32 { return 1; }
+        fn printf<...Ts> (str* s, mut i32 cursor, Ts... args) -> i32 { return 2; }
+    )");
+    std::string mainPath = writeTempFile("gg_printf_main.gg",
+        "import \"gg_printf_lib.gg\";\n"
+        "fn main() -> i32 { str s = \"hi\"; return printf(s, 5); }");
+
+    ImportResolver resolver;
+    Program result = resolver.resolve(mainPath);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(result, mainPath, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+}

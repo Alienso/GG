@@ -179,7 +179,8 @@ void ImportResolver::verifyModuleDir(const std::string& dir, const std::string& 
         std::string module;
         std::unordered_map<std::string, std::string> bindings;
         std::unordered_set<std::string> ambiguous;
-        Parser::scanModuleDirectives(lexer.tokens()[0], module, bindings, ambiguous);
+        Parser::scanModuleDirectives(lexer.tokens()[0], module, bindings, ambiguous,
+                                     sharedGenerics_.moduleTypes, sharedGenerics_.moduleFuncs);
         if (module != expectedModule) {
             std::cerr << "Error: file '" << entry.path().string()
                       << "' is loaded as part of module '" << expectedModule
@@ -233,7 +234,8 @@ std::vector<Token> ImportResolver::qualifyFileTokens(const std::vector<Token>& t
     std::string module;
     std::unordered_map<std::string, std::string> bindings;
     std::unordered_set<std::string> ambiguous;
-    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous);
+    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous,
+                                 sharedGenerics_.moduleTypes, sharedGenerics_.moduleFuncs);
     if (module.empty() && sharedGenerics_.moduleNames.empty())
         return tokens;   // no modules in play — leave tokens (and thus scanned names) unchanged
     return Parser::qualifyTokens(tokens, module, bindings, ambiguous,
@@ -261,7 +263,8 @@ void ImportResolver::scanModules(const std::string& filePath,
     std::string module;
     std::unordered_map<std::string, std::string> bindings;
     std::unordered_set<std::string> ambiguous;
-    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous);
+    Parser::scanModuleDirectives(tokens, module, bindings, ambiguous,
+                                 sharedGenerics_.moduleTypes, sharedGenerics_.moduleFuncs);
     Parser::scanModuleMembers(tokens, module, sharedGenerics_.moduleTypes,
                               sharedGenerics_.moduleFuncs, sharedGenerics_.moduleNames);
 
@@ -365,29 +368,41 @@ Program ImportResolver::processFile(const std::string& filePath) {
     std::unordered_set<std::string> classNameVisited;
     auto allClassNames = collectClassNames(canonicalString, classNameVisited);
 
-    // Lex and parse the file, seeding the parser with the pre-collected class names.
+    // Lex the file (parsing is deferred — see below).
     std::vector<std::string> paths = { canonicalString };
     Lexer lexer(paths);
     lexer.lex();
     const std::vector<Token>& tokens = lexer.tokens()[0];
-    // Bind to the shared generics registry and defer monomorphization — resolve()
-    // expands all instantiations once after every file has been parsed.
-    Parser parser(std::move(allClassNames), &sharedGenerics_);
-    Program rawProgram = parser.parse(tokens, canonicalString, /*runMonomorphization=*/false);
-
     fs::path parentDirectory = canonical.parent_path();
     Program result;
 
-    // Splice in every dependency's declarations first (quoted file imports + dotted module
-    // directories), dependency-first. Declaration order in the flattened Program is not
-    // load-bearing — semantic/codegen run their own name-collection passes — so a uniform
-    // dependencies-then-own-decls order is fine and handles both import kinds identically.
+    // Process every dependency (quoted file imports + dotted module directories) BEFORE parsing
+    // this file's own tokens. This isn't just about declaration order in the flattened `result` —
+    // it's load-bearing for correctness: a generic-function call written WITHOUT explicit `<...>`
+    // (deduceVariadicInstantiation / inferGenericTypeArgs, Parser_Generics.cpp) looks up the
+    // template directly in the shared `gen_->templates` registry AT PARSE TIME, not later at
+    // monomorphization time (unlike an explicit `name<Targs>(...)` call, which only needs the
+    // template to exist once `runMonomorphization` runs, well after every file is parsed). If this
+    // file makes such a call to a template declared in an import — and that import hadn't been
+    // parsed yet — the lookup would find nothing and (wrongly) report "cannot infer type
+    // argument(s)", even though the call is perfectly valid and would have resolved correctly once
+    // the dependency's own parse ran. This never surfaced before because every prior generic
+    // template happened to be declared in the SAME file as its non-explicit call sites (so it was
+    // already captured earlier in that file's own top-to-bottom parse); it surfaces now that a
+    // consumer file can call an inferred generic-pack function declared in a separate imported file
+    // (e.g. `printf(...)` from `stdlib/io/IO2.gg`, called from `samples/std_lib.gg`).
     for (const std::string& dep : dependencyPaths(tokens, parentDirectory)) {
         Program imported = processFile(dep);
         for (Stmt& importedDecl : imported.declarations)
             result.declarations.push_back(std::move(importedDecl));
     }
-    // Then this file's own declarations, dropping ImportStmt nodes (quoted imports — already
+
+    // Now parse this file's own tokens — every dependency's generic templates are already captured
+    // in gen_->templates. Bind to the shared generics registry and defer monomorphization —
+    // resolve() expands all instantiations once after every file has been parsed.
+    Parser parser(std::move(allClassNames), &sharedGenerics_);
+    Program rawProgram = parser.parse(tokens, canonicalString, /*runMonomorphization=*/false);
+    // Append this file's own declarations, dropping ImportStmt nodes (quoted imports — already
     // followed above; dotted imports produce no AST node at all).
     for (Stmt& declaration : rawProgram.declarations) {
         if (!declaration.node) continue;

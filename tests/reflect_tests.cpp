@@ -499,3 +499,68 @@ TEST_CASE("Reflect - @variants composes with a generic function", "[reflect][gen
     // Three variants -> three `n = n + 1` increments after monomorphization + expansion.
     REQUIRE(ir.find("nameCount$Color") != std::string::npos);
 }
+
+// ------------------------------------------------------------
+// Reflection expansion interacting with generic-function call resolution
+// ------------------------------------------------------------
+// `inline for` bodies are re-parsed through the ordinary statement/call-parsing path (see
+// substituteInlineForBody + expandReflectionInStmt), and that re-parse happens at the very END of
+// runMonomorphization, AFTER the main generic-instantiation worklist has already been drained. A
+// call inside a reflected body that targets a GENERIC function (not just an ordinary one) can
+// therefore enqueue a brand-new instantiation that nothing drains afterward — a real bug found
+// when a variadic-pack template shared a bare name with a reflection-driven caller (`printObj<T>`
+// calling a `print<...Ts>` inside its `inline for`). runMonomorphization now loops
+// drain-worklist -> synthesizeTupleClasses -> expandReflection to a joint fixpoint, redraining
+// whenever reflection itself enqueues further generic work.
+
+TEST_CASE("Reflect - a call to an overloaded generic pack function inside an inline-for body is "
+          "fully monomorphized", "[reflect][genoverload]") {
+    // Regression test: previously this call's mangled instantiation was enqueued during
+    // expandReflection but never drained, producing "undeclared function" at semantic analysis.
+    // TWO `take<...Ts>` overloads (mirroring stdlib/io/IO2.gg's two `print<...Ts>` declarations) so
+    // the call goes through selectTemplateCandidate rather than the single-candidate fast path —
+    // a single-candidate template never hit the orphaned-worklist bug at all in this test harness
+    // (only a program with 2+ files exercised it originally), but the multi-candidate path is what
+    // actually needs the redraining fix, since it's the shape that reproduced the real bug.
+    std::string ir = codegenString(R"(
+        class Point { i32 x; i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } }
+        fn take<...Ts>(str s, Ts... args) -> i32 { return 0; }
+        fn take<...Ts>(str s, i32 n, Ts... args) -> i32 { return 1; }
+        fn touchFields<T>(T obj) -> i32 {
+            inline for (f in @fields(T)) { take(f.name); }
+            return 0;
+        }
+        fn main() -> i32 { Point p(1, 2); return touchFields<Point>(p); }
+    )");
+    // Two fields -> two `take(f.name)` calls resolving to the one-fixed-param overload (empty
+    // pack), fully monomorphized (a `define`, not just a dangling `call`).
+    REQUIRE(ir.find("define i32 @take$Tuple.ov0(") != std::string::npos);
+    REQUIRE(ir.find("call i32 @take$Tuple.ov0(") != std::string::npos);
+}
+
+TEST_CASE("Reflect - a reflected @field access defers to an ordinary overload over a "
+          "same-named generic pack template", "[reflect][genoverload]") {
+    // `@field(obj, f.name)` substitutes to a MemberAccessExpr (e.g. `(obj).x`), a shape
+    // deduceArgTypeToken cannot resolve. Regression test for a bug found on review: this
+    // undeterminable argument type used to be treated leniently in the fixed-parameter filter and
+    // silently captured by a pack-generic `show<...Ts>`, producing a "no matching overload"
+    // semantic error once the field's actual type (i32) couldn't bind the generic's `str*` fixed
+    // parameter. TWO `show<...Ts>` overloads (mirroring IO2.gg) so selection goes through
+    // selectTemplateCandidate, not the single-candidate fast path this fix doesn't touch. Must
+    // defer to the ordinary `show(i32)` overload declared alongside them.
+    std::string ir = codegenString(R"(
+        class Point { i32 x; i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b; } }
+        fn show<...Ts>(str* s, Ts... args) -> i32 { return 1; }
+        fn show<...Ts>(str* s, i32 cursor, Ts... args) -> i32 { return 2; }
+        fn show(i32 n) -> i32 { return 3; }
+        fn touchFields<T>(T obj) -> i32 {
+            inline for (f in @fields(T)) { return show(@field(obj, f.name)); }
+            return 0;
+        }
+        fn main() -> i32 { Point p(1, 2); return touchFields<Point>(p); }
+    )");
+    // The ordinary i32 overload is called directly by (unmangled) name — no pack instantiation
+    // of `show` (e.g. `show$Tuple.ov0`) is ever emitted for this call.
+    REQUIRE(ir.find("call i32 @show(") != std::string::npos);
+    REQUIRE(ir.find("show$Tuple") == std::string::npos);
+}

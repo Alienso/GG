@@ -9,6 +9,9 @@
 // Number of fixed (non-pack) params in a variadic template's raw param list. Defined below; forward-
 // declared so the prescan can record it for variadic methods.
 static size_t fixedParamCount(const std::vector<Token>& toks);
+// Total top-level param count in a raw declaration's param list (fixedParamCount minus the pack
+// slot). Used to cache GenericTemplate::fixedCount for NON-pack templates (their full arity).
+static size_t rawParamCount(const std::vector<Token>& toks);
 
 // Splice a type-parameter's captured argument tokens into a monomorphization output stream, at the
 // point where the template's raw tokens named the type parameter. Ordinarily this is a straight
@@ -131,10 +134,13 @@ void Parser::monomorphize(Program& program, const std::string& filenameStr) {
 // ============================================================
 
 bool Parser::tryCaptureFunctionTemplate() {
-    // Unified generic function: `fn name < params > ( args ) [mut] [-> RetType [alias]] { body }`.
-    // The name follows `fn` directly and precedes the '<' type-parameter list.
+    // Unified generic function: `fn [private] name < params > ( args ) [mut] [-> RetType [alias]]
+    // { body }`. An optional `private` sits between `fn` and the name (mirrors the ordinary,
+    // non-generic `parseFnDeclaration`'s `[private] name` grammar) — file-local, warning-not-error
+    // on a cross-file call, same as a plain private function.
     if (peek().type != TokenType::FN) return false;
-    size_t s = current + 1;   // first token after `fn`
+    bool   isPublic = !(current + 1 < tokens.size() && tokens[current + 1].type == TokenType::PRIVATE);
+    size_t s = current + 1 + (isPublic ? 0 : 1);   // first token after `fn [private]`
     if (s + 1 >= tokens.size()
         || tokens[s].type != TokenType::IDENTIFIER
         || tokens[s + 1].type != TokenType::LESS)
@@ -158,10 +164,15 @@ bool Parser::tryCaptureFunctionTemplate() {
                         + tokens[nameIdx].lexeme + "'");
 
     // Capture with the `<...>` list stripped so the monomorphized re-parse sees an ordinary
-    // declaration: `fn`, the name, the parameter list, then everything up to the body
-    // (`[mut] [-> RetType [alias]]`, whose return type may reference a type parameter).
+    // declaration: `fn`, [`private`], the name, the parameter list, then everything up to the body
+    // (`[mut] [-> RetType [alias]]`, whose return type may reference a type parameter). Re-emitting
+    // `private` here (rather than just recording `isPublic` on GenericTemplate) means the concrete
+    // re-parsed instantiation is an ordinary `parseFnDeclaration`-produced FunctionDeclStmt with
+    // isPublic=false — reusing 100% of the existing cross-file private-call warning with no
+    // semantic-layer changes at all.
     std::vector<Token> captured;
     captured.push_back(tokens[current]);   // `fn`
+    if (!isPublic) captured.push_back(Token{ TokenType::PRIVATE, "private", tokens[nameIdx].line });
     captured.push_back(tokens[nameIdx]);   // function name
 
     size_t k = afterGt;
@@ -189,8 +200,15 @@ bool Parser::tryCaptureFunctionTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[nameIdx].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds),
-                                             std::move(isPack), std::move(captured) };
+    bool variadic = !isPack.empty() && isPack.back();
+    size_t fixedCount = variadic ? fixedParamCount(captured) : rawParamCount(captured);
+    // Append (not overwrite): a bare name may have multiple free-function templates — an overload
+    // set disambiguated at each call site by arity/pack-shape + fixed-parameter type compatibility
+    // (see Parser::selectTemplateCandidate). Generic CLASS templates (tryCaptureClassTemplate) still
+    // replace wholesale — classes don't support overloading.
+    gen_->templates[name].push_back(GenericTemplate{ std::move(typeParams), std::move(bounds),
+                                             std::move(isPack), std::move(captured), fixedCount,
+                                             isPublic, filename });
     gen_->funcNames.insert(name);
     current = k;   // advance past the captured declaration
     return true;
@@ -349,8 +367,13 @@ bool Parser::tryCaptureClassTemplate() {
     } while (k < tokens.size() && braceDepth > 0);
 
     const std::string& name = tokens[current + 1].lexeme;
-    gen_->templates[name] = GenericTemplate{ std::move(typeParams), std::move(bounds),
-                                             std::move(isPack), std::move(captured) };
+    // Class templates don't support overloading (unlike free functions) — a redeclaration still
+    // wholesale-replaces, as before; this just compiles against the new vector-valued map.
+    // fixedCount is left at its default (0) — meaningless/unused for a class template (there's no
+    // single param list to count; overload-set selection never runs for classes).
+    gen_->templates[name] = std::vector<GenericTemplate>{
+        GenericTemplate{ std::move(typeParams), std::move(bounds),
+                         std::move(isPack), std::move(captured) } };
     gen_->classNames.insert(name);
     current = k;
     return true;
@@ -543,17 +566,27 @@ void Parser::consumeCloseAngle() {
 }
 
 std::string Parser::mangleInstantiation(const std::string& base,
-                                        const std::vector<std::vector<Token>>& args) const {
+                                        const std::vector<std::vector<Token>>& args,
+                                        size_t candidateIndex) const {
     std::string m = base;
     for (const auto& a : args) m += "$" + argMangle(a);
+    // Only append a discriminator when `base` genuinely has more than one free-function template —
+    // the overwhelming common case (a name with a single candidate, or a class/method name, which
+    // never appears with >1 entry) mangles byte-identically to before this feature existed. Without
+    // this, two overloads instantiated with the same type args (e.g. both taking T=i32) would mangle
+    // to the same symbol and collide via `gen_->instantiated`'s dedup.
+    auto it = gen_->templates.find(base);
+    if (it != gen_->templates.end() && it->second.size() > 1)
+        m += ".ov" + std::to_string(candidateIndex);
     return m;
 }
 
 void Parser::recordInstantiation(const std::string& templateName, const std::string& mangled,
-                                 std::vector<std::vector<Token>> args) {
+                                 std::vector<std::vector<Token>> args, size_t candidateIndex) {
     if (gen_->instantiated.count(mangled)) return;
     gen_->instantiated.insert(mangled);
     gen_->worklist.push_back(GenericInstantiation{ templateName, mangled, std::move(args),
+                                                   candidateIndex,
                                                    /*ownerClass=*/"", /*bareMethodName=*/"" });
 }
 
@@ -736,12 +769,176 @@ std::string Parser::genericArgBaseName(const Token& t) {
     return s;
 }
 
+// ---- Free-function template overload-set candidate selection ----
+//
+// A bare name may have MULTIPLE free-function templates (an overload set) — e.g. two
+// `fn print<...Ts>` declarations sharing the name `print` but differing in their fixed (non-pack)
+// parameter list. Disambiguation happens in four stages, applied by selectTemplateCandidate:
+//   1. arityCompatible      — arity / pack-shape gate (cheap, always applicable).
+//   2. fixed-param type filter (inline below) — for each candidate's FIXED param position, does the
+//      call argument's syntactically-deduced type match the param's declared concrete type? Lenient
+//      whenever either side can't be determined at parse time.
+//   3. non-empty-pack preference (inline below) — among stage-2 survivors, discard a candidate
+//      whose PACK would be reduced to zero elements when another survivor's pack would not be —
+//      a no-op for non-pack candidates (there, args.size() == fixedCount always). Only applies when
+//      survivors genuinely disagree; otherwise falls through unchanged.
+//   4. largest-fixedCount tie-break among the remaining survivors (most specific wins, mirroring
+//      C++ preferring a non-template overload); a genuine remaining tie is a hard parser error.
+// The overwhelmingly common case — a name with exactly one candidate — never reaches this pipeline;
+// every call site below fast-paths that case directly, so behavior/output is byte-identical to
+// before this feature existed.
+
+Parser::ParamShape Parser::classifyTemplateParamAt(const GenericTemplate& tmpl, size_t pos) const {
+    ParamShape shape;
+    std::unordered_set<std::string> tparams(tmpl.typeParams.begin(), tmpl.typeParams.end());
+    const std::vector<Token>& toks = tmpl.tokens;
+    size_t lp = 0;
+    while (lp < toks.size() && toks[lp].type != TokenType::LEFT_PAREN) ++lp;
+    if (lp == toks.size()) return shape;
+
+    auto classifyGroup = [&](size_t s, size_t e) {
+        if (s >= e) return;
+        size_t j = s;
+        if (toks[j].lexeme == "mut") ++j;                      // optional `mut`
+        if (j >= e) return;
+        bool isIdent = toks[j].type == TokenType::IDENTIFIER;
+        bool isPrim  = isTypeKeyword(toks[j].type);
+        if (!isIdent && !isPrim) return;   // too complex a type spelling — stay lenient (both empty)
+        const std::string head = toks[j].lexeme;
+        bool isTypeParam = isIdent && tparams.count(head);
+        ++j;
+        while (j < e && (toks[j].type == TokenType::AMPERSAND || toks[j].type == TokenType::STAR
+                         || toks[j].type == TokenType::QUESTION)) ++j;   // trailing sigils
+        if (j < e && toks[j].type == TokenType::IDENTIFIER) {   // then the param name → a real match
+            if (isTypeParam) shape.typeParamName = head;
+            else             shape.concreteBase  = head;
+        }
+    };
+
+    size_t depth = 1, i = lp + 1, paramPos = 0, groupStart = i;
+    for (; i < toks.size() && depth > 0; ++i) {
+        TokenType tt = toks[i].type;
+        if (tt == TokenType::LEFT_PAREN || tt == TokenType::LESS) ++depth;
+        else if (tt == TokenType::GREATER) { if (depth > 1) --depth; }
+        else if (tt == TokenType::RIGHT_PAREN) {
+            if (--depth == 0) { if (paramPos == pos) classifyGroup(groupStart, i); break; }
+        } else if (tt == TokenType::COMMA && depth == 1) {
+            if (paramPos == pos) { classifyGroup(groupStart, i); break; }
+            groupStart = i + 1;
+            ++paramPos;
+        }
+    }
+    return shape;
+}
+
+bool Parser::arityCompatible(const GenericTemplate& tmpl, size_t argCount, bool trailingSpread,
+                             std::optional<size_t> explicitTypeArgCount) const {
+    bool isPackTmpl = !tmpl.isPack.empty() && tmpl.isPack.back();
+    if (explicitTypeArgCount) {
+        // Explicit `name<Targs>(...)`: a pack's type args are always inferred, never explicit.
+        if (isPackTmpl) return false;
+        return tmpl.typeParams.size() == *explicitTypeArgCount
+            && !trailingSpread && argCount == tmpl.fixedCount;
+    }
+    if (isPackTmpl)
+        return trailingSpread ? argCount == tmpl.fixedCount + 1 : argCount >= tmpl.fixedCount;
+    return !trailingSpread && argCount == tmpl.fixedCount;
+}
+
+Parser::CandidateOutcome Parser::selectTemplateCandidate(
+        const std::vector<GenericTemplate>& candidates, const std::vector<size_t>& eligible,
+        std::optional<size_t> explicitTypeArgCount,
+        const std::vector<std::unique_ptr<Expr>>& args, bool trailingSpread,
+        bool hasOrdinaryFallback,
+        size_t& outIndex, std::vector<size_t>* outTied) const {
+    std::vector<size_t> stage1;
+    for (size_t idx : eligible)
+        if (arityCompatible(candidates[idx], args.size(), trailingSpread, explicitTypeArgCount))
+            stage1.push_back(idx);
+    if (stage1.empty()) return CandidateOutcome::NoMatch;
+
+    std::vector<size_t> stage2;
+    for (size_t idx : stage1) {
+        const GenericTemplate& cand = candidates[idx];
+        bool ok = true;
+        for (size_t pos = 0; pos < cand.fixedCount && ok; ++pos) {
+            if (pos >= args.size() || !args[pos]) continue;   // shouldn't happen post-arity-gate
+            ParamShape shape = classifyTemplateParamAt(cand, pos);
+            if (!shape.typeParamName.empty()) continue;        // being inferred here — lenient
+            if (shape.concreteBase.empty()) continue;          // undeterminable shape — lenient
+            std::optional<Token> argType = deduceArgTypeToken(args[pos].get());
+            if (!argType) {
+                // Undeterminable argument (e.g. a member access like `obj.field` —
+                // deduceArgTypeToken has no case for that). When the bare name ALSO has a plain
+                // overload to fall back on, don't guess: reject this candidate rather than risk
+                // silently routing an incompatible argument into it (e.g. an i32 field read
+                // reaching a fixed `str*` parameter purely because arity allowed zero pack
+                // elements). With no such fallback, stay lenient — unchanged original behavior.
+                if (hasOrdinaryFallback) ok = false;
+                continue;
+            }
+            if (genericArgBaseName(*argType) != shape.concreteBase) ok = false;
+        }
+        if (ok) stage2.push_back(idx);
+    }
+    if (stage2.empty()) return CandidateOutcome::NoMatch;
+
+    // Prefer a candidate whose PACK ends up non-empty over one that would reduce it to zero
+    // elements, when stage 2 leaves a genuine mix of both. An empty pack usually means the
+    // "extra fixed parameter" candidate swallowed an argument that was actually meant for the
+    // pack — e.g. a private `f(str*, i32 cursor, Ts... args)` overload intercepting a public
+    // `f(str*, Ts... args)` call, because the literal argument happens to also fit `i32 cursor`
+    // and a 0-or-more pack is satisfied trivially by zero elements. Reducing a pack to nothing
+    // defeats the point of the callee even declaring one, so it's a weaker match than a candidate
+    // that actually consumes it — this is a stronger signal than raw fixedCount. For a non-pack
+    // candidate `args.size() == fixedCount` always (enforced by arityCompatible above), so
+    // `args.size() > fixedCount` is always false there and this is a no-op outside pack overload
+    // sets. If every survivor agrees (all empty or all non-empty), fall through unchanged to the
+    // largest-fixedCount tie-break below — this only breaks a genuine disagreement.
+    std::vector<size_t> nonEmptyPack;
+    for (size_t idx : stage2)
+        if (args.size() > candidates[idx].fixedCount) nonEmptyPack.push_back(idx);
+    if (!nonEmptyPack.empty() && nonEmptyPack.size() < stage2.size()) stage2 = std::move(nonEmptyPack);
+
+    size_t bestFixed = 0;
+    for (size_t idx : stage2) if (candidates[idx].fixedCount > bestFixed) bestFixed = candidates[idx].fixedCount;
+    std::vector<size_t> best;
+    for (size_t idx : stage2) if (candidates[idx].fixedCount == bestFixed) best.push_back(idx);
+
+    if (best.size() == 1) { outIndex = best.front(); return CandidateOutcome::Unique; }
+    if (outTied) *outTied = best;
+    return CandidateOutcome::Ambiguous;
+}
+
 bool Parser::inferGenericTypeArgs(const std::string& fnName,
                                   const std::vector<std::unique_ptr<Expr>>& args,
-                                  std::vector<std::vector<Token>>& out) {
+                                  std::vector<std::vector<Token>>& out,
+                                  size_t& outCandidateIndex) {
     auto it = gen_->templates.find(fnName);
-    if (it == gen_->templates.end() || it->second.typeParams.empty()) return false;
-    const GenericTemplate& tmpl = it->second;
+    if (it == gen_->templates.end() || it->second.empty()) return false;
+    const std::vector<GenericTemplate>& candidates = it->second;
+
+    size_t chosen;
+    if (candidates.size() == 1) {
+        chosen = 0;   // fast path: byte-identical to pre-overload-set behavior
+    } else {
+        std::vector<size_t> nonPack;
+        for (size_t i = 0; i < candidates.size(); ++i)
+            if (candidates[i].isPack.empty() || !candidates[i].isPack.back()) nonPack.push_back(i);
+        if (nonPack.empty()) return false;
+        size_t idx;
+        CandidateOutcome outcome = selectTemplateCandidate(candidates, nonPack, std::nullopt,
+                                                           args, /*trailingSpread=*/false,
+                                                           gen_->ordinaryFuncNames.count(fnName) > 0, idx);
+        if (outcome == CandidateOutcome::NoMatch) return false;
+        if (outcome == CandidateOutcome::Ambiguous)
+            throw error(previous(), "ambiguous call to generic function '" + fnName
+                        + "': multiple overloads match these arguments");
+        chosen = idx;
+    }
+    outCandidateIndex = chosen;
+    const GenericTemplate& tmpl = candidates[chosen];
+    if (tmpl.typeParams.empty()) return false;
     std::unordered_set<std::string> tparams(tmpl.typeParams.begin(), tmpl.typeParams.end());
 
     // 1. Scan the template's parameter list (raw tokens; params are not pre-parsed) to find, for
@@ -943,9 +1140,9 @@ std::optional<std::vector<std::vector<Token>>> Parser::deducePackTargs(
     return targs;
 }
 
-// Count the fixed (non-pack) params in a variadic template's raw param list (the last param is the
-// pack). Scans from the first `(` to its match, counting top-level commas.
-static size_t fixedParamCount(const std::vector<Token>& toks) {
+// Total top-level param count in a raw declaration's param list. Scans from the first `(` to its
+// match, counting top-level commas.
+static size_t rawParamCount(const std::vector<Token>& toks) {
     size_t lp = 0;
     while (lp < toks.size() && toks[lp].type != TokenType::LEFT_PAREN) ++lp;
     if (lp == toks.size()) return 0;
@@ -959,21 +1156,49 @@ static size_t fixedParamCount(const std::vector<Token>& toks) {
         else if (depth == 1) anyToken = true;
     }
     if (anyToken) ++paramCount;                          // the last / only param
-    return paramCount == 0 ? 0 : paramCount - 1;         // the pack is the last param
+    return paramCount;
+}
+
+// Count the fixed (non-pack) params in a variadic template's raw param list (the last param is the
+// pack).
+static size_t fixedParamCount(const std::vector<Token>& toks) {
+    size_t n = rawParamCount(toks);
+    return n == 0 ? 0 : n - 1;         // the pack is the last param
 }
 
 std::optional<std::string> Parser::deduceVariadicInstantiation(
         const std::string& fnName, std::vector<std::unique_ptr<Expr>>& args,
         const std::vector<bool>& spreads) {
     auto it = gen_->templates.find(fnName);
-    if (it == gen_->templates.end()) return std::nullopt;
-    const GenericTemplate& tmpl = it->second;
-    if (tmpl.isPack.empty() || !tmpl.isPack.back()) return std::nullopt;   // not variadic
+    if (it == gen_->templates.end() || it->second.empty()) return std::nullopt;
+    const std::vector<GenericTemplate>& candidates = it->second;
 
-    auto targs = deducePackTargs(fixedParamCount(tmpl.tokens), fnName, args, spreads);
+    std::vector<size_t> packCands;
+    for (size_t i = 0; i < candidates.size(); ++i)
+        if (!candidates[i].isPack.empty() && candidates[i].isPack.back()) packCands.push_back(i);
+    if (packCands.empty()) return std::nullopt;   // not variadic
+
+    size_t chosen;
+    bool trailingSpread = !spreads.empty() && spreads.back();
+    if (packCands.size() == 1) {
+        chosen = packCands.front();   // fast path: byte-identical to pre-overload-set behavior
+    } else {
+        size_t idx;
+        CandidateOutcome outcome = selectTemplateCandidate(candidates, packCands, std::nullopt,
+                                                           args, trailingSpread,
+                                                           gen_->ordinaryFuncNames.count(fnName) > 0, idx);
+        if (outcome == CandidateOutcome::NoMatch) return std::nullopt;
+        if (outcome == CandidateOutcome::Ambiguous)
+            throw error(previous(), "ambiguous call to generic function '" + fnName
+                        + "': multiple overloads match these arguments");
+        chosen = idx;
+    }
+    const GenericTemplate& tmpl = candidates[chosen];
+
+    auto targs = deducePackTargs(tmpl.fixedCount, fnName, args, spreads);
     if (!targs) return std::nullopt;
-    std::string mangled = mangleInstantiation(fnName, *targs);
-    recordInstantiation(fnName, mangled, std::move(*targs));
+    std::string mangled = mangleInstantiation(fnName, *targs, chosen);
+    recordInstantiation(fnName, mangled, std::move(*targs), chosen);
     return mangled;
 }
 
@@ -1192,7 +1417,17 @@ void Parser::runMonomorphization(Program& program) {
                 concreteImplKeys.insert("Call@" + im->typeName.lexeme);
         }
 
-    // Outer loop: drain the main worklist, then retry any deferred generic-method instantiations (a
+    // Outermost loop: drain the main worklist + reflection to a joint fixpoint. Compile-time
+    // reflection (`inline for`, expanded below) re-parses substituted body tokens through the
+    // ordinary statement/call parsing path — so a call inside a reflected body that targets a
+    // GENERIC function (e.g. `print(f.name)` inside `printObj<T>`'s `inline for`) can enqueue a
+    // brand-new generic instantiation that the drain loop below never saw, because reflection runs
+    // strictly after it. Without this outer loop, that queued instantiation is orphaned — the call
+    // site references a mangled name that is never actually monomorphized/emitted, and semantic
+    // analysis reports it as "undeclared function". Repeat drain+reflect until a full reflection
+    // pass adds no further generic work.
+    for (;;) {
+    // Middle loop: drain the main worklist, then retry any deferred generic-method instantiations (a
     // generic class's methods become available only after its body is re-parsed); repeat to a fixpoint.
     for (;;) {
     while (!gen_->worklist.empty()) {
@@ -1208,10 +1443,10 @@ void Parser::runMonomorphization(Program& program) {
         }
 
         auto it = gen_->templates.find(inst.templateName);
-        if (it == gen_->templates.end())
+        if (it == gen_->templates.end() || inst.candidateIndex >= it->second.size())
             throw error(tokens.empty() ? Token{TokenType::END_OF_FILE, "", 0} : tokens.back(),
                         "no generic template named '" + inst.templateName + "'");
-        const GenericTemplate& tmpl = it->second;
+        const GenericTemplate& tmpl = it->second[inst.candidateIndex];
 
         // Map each type parameter to its argument token slice (emplace = copy-construct;
         // Token is not copy-assignable due to its const members).
@@ -1238,18 +1473,25 @@ void Parser::runMonomorphization(Program& program) {
         // Substitute. Rename the declaration name and any constructor/destructor name
         // (a token == templateName that is NOT followed by '<'); self-references like
         // "Name<...>" are left for re-parse to mangle. Replace type-parameter tokens.
+        //
+        // The declaration name normally sits at index 1 (`fn NAME`), but a `private` free-function
+        // template captures a synthesized `private` token first (`fn private NAME` — see
+        // tryCaptureFunctionTemplate), pushing it to index 2. A class template's tokens always start
+        // with `class`, never `fn`, so this never fires for one — it stays at index 1 as before.
+        size_t declNameIdx = (tmpl.tokens.size() > 1 && tmpl.tokens[0].type == TokenType::FN
+                               && tmpl.tokens[1].type == TokenType::PRIVATE) ? 2 : 1;
         std::string packValueName;   // the pack VALUE parameter name (`args` in `Ts... args`)
         std::vector<Token> out;
         for (size_t idx = 0; idx < tmpl.tokens.size(); ++idx) {
             const Token& t = tmpl.tokens[idx];
             // Rename occurrences of the template name to the mangled instantiation. For a VARIADIC
-            // template, rename ONLY the declaration name (`fn NAME` — idx 1) and leave recursive
+            // template, rename ONLY the declaration name (idx == declNameIdx) and leave recursive
             // *calls* as the bare name, so `f(…, xs...)` re-deduces the SHORTER pack each level
             // (a self-recursive call over a fixed pack would otherwise loop forever). For a non-
             // variadic generic, recursive calls do share the instantiation, so all occurrences rename.
             if (t.type == TokenType::IDENTIFIER && t.lexeme == inst.templateName
                 && (idx + 1 >= tmpl.tokens.size() || tmpl.tokens[idx + 1].type != TokenType::LESS)
-                && (packName.empty() || idx == 1)) {
+                && (packName.empty() || idx == declNameIdx)) {
                 out.push_back(Token{ TokenType::IDENTIFIER, inst.mangledName, t.line });
                 continue;
             }
@@ -1287,10 +1529,19 @@ void Parser::runMonomorphization(Program& program) {
         }
         out.push_back(Token{ TokenType::END_OF_FILE, "", 0 });
 
-        // Re-parse the concrete declaration (may enqueue further instantiations).
+        // Re-parse the concrete declaration (may enqueue further instantiations). Attribute it to
+        // the TEMPLATE's own declaring file, not whichever file's call site triggered this
+        // instantiation — `filename` is otherwise a single value for the whole monomorphization
+        // pass (the entry/root file), which would make a private free-function template's
+        // cross-file warning check (and DWARF file attribution) compare against the wrong file.
+        // `tmpl.sourceFile` is empty for anything captured before this field existed (e.g. a class
+        // template — tryCaptureClassTemplate doesn't set it), so those fall back to the outer value.
+        std::string savedFilename = filename;
+        if (!tmpl.sourceFile.empty()) filename = tmpl.sourceFile;
         tokens  = std::move(out);
         current = 0;
         program.declarations.push_back(parseDeclaration());
+        filename = savedFilename;
 
         // A generic CLASS instantiation also instantiates every generic `impl … for Class<…>`
         // with the same type arguments, so e.g. `Array<i32>` gets its `Index` impl.
@@ -1344,16 +1595,34 @@ void Parser::runMonomorphization(Program& program) {
     }
     pendingMethodInsts_ = std::move(stillPending);
     if (!gmProgress && gen_->worklist.empty()) break;
-    }   // for (;;)
+    }   // for (;;)  [middle loop: main worklist + deferred generic methods]
     if (!pendingMethodInsts_.empty())
         throw error(tokens.empty() ? Token{TokenType::END_OF_FILE, "", 0} : tokens.back(),
                     "could not instantiate a generic method — its owner class was never instantiated");
+
+    // Synthesize the concrete value-object class for every tuple type recorded during parsing +
+    // monomorphization (before reflection, so a tuple's fields are visible to `@fields`, and before
+    // semantics/codegen, which then treat it as an ordinary class). Idempotent across repeated
+    // calls — see tupleClassesSynthesized_.
+    synthesizeTupleClasses(program);
+
+    // Compile-time reflection: now that every class (incl. monomorphized ones) is in the program,
+    // expand every `inline for (v in @fields(T))` into ordinary statements. This re-parses
+    // substituted body tokens through the ordinary call-parsing path, so it may itself enqueue new
+    // generic instantiations onto gen_->worklist (see the comment on the outer loop above).
+    expandReflection(program);
+
+    if (gen_->worklist.empty()) break;   // reflection added no further generic work — done
+    }   // for (;;)  [outer loop: drain + reflect to a joint fixpoint]
 
     // Surface bounded generic templates for definition-time body checking (semantic pass
     // checkGenericBodies). Re-parse each template's ORIGINAL body (no type substitution) with
     // its type-parameter names registered as types, using a throwaway parser with its OWN
     // registry so the parse cannot perturb this monomorphization or enqueue real instantiations.
-    for (const auto& [tmplName, tmpl] : gen_->templates) {
+    // Runs once, after the joint fixpoint above, so it also covers templates whose first
+    // instantiation only happened via a reflection-triggered call.
+    for (const auto& [tmplName, candidates] : gen_->templates) {
+    for (const auto& tmpl : candidates) {
         bool hasBound = false;
         for (const auto& b : tmpl.bounds) if (!b.empty()) { hasBound = true; break; }
         if (!hasBound) continue;   // only bounded templates are checked
@@ -1375,15 +1644,7 @@ void Parser::runMonomorphization(Program& program) {
             // instantiations are still analyzed normally; only a definition-time diagnostic is lost.
         }
     }
-
-    // Synthesize the concrete value-object class for every tuple type recorded during parsing +
-    // monomorphization (before reflection, so a tuple's fields are visible to `@fields`, and before
-    // semantics/codegen, which then treat it as an ordinary class).
-    synthesizeTupleClasses(program);
-
-    // Compile-time reflection: now that every class (incl. monomorphized ones) is in the program,
-    // expand every `inline for (v in @fields(T))` into ordinary statements.
-    expandReflection(program);
+    }
 }
 
 // Build a concrete `ClassDeclStmt` for each recorded tuple type and append it to the Program. The
@@ -1403,6 +1664,8 @@ void Parser::synthesizeTupleClasses(Program& program) {
     for (const auto& [tn, elems] : gen_->tupleRequests) { (void)elems; classNames.insert(tn); }
 
     for (const auto& [name, elems] : gen_->tupleRequests) {
+        if (!tupleClassesSynthesized_.insert(name).second) continue;   // already emitted — skip
+
         std::vector<Token> toks;
         toks.push_back(sym(TokenType::CLASS, "class"));
         toks.push_back(id(name));

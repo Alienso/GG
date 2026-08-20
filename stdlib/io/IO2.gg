@@ -2,35 +2,41 @@ module std.io;
 
 import std.crt;
 
-/*fn print<...Ts> (str* formatString, Ts... args) {
-    print(formatString, 0, args...);
-}*/
+import "std/io/IO.gg";
+
+fn printx<...Ts> (str* formatString, Ts... args) {
+    printf(formatString, 0, args...);
+}
 
 // TODO private
-/*fn print<...Ts> (str* formatString, i32 cursor, Ts... args) {
+fn printf<...Ts> (str* formatString, mut i32 cursor, Ts... args) {
     match args {
-            ()     -> { print(formatString, cursor); }
+            ()     -> { printInternal(formatString, cursor); }
             (x:xs) -> {
-                // while formatString[cursor] != '{' ... print;
-                // print(x);
-                // print(formatString[cursor + 1], cursor + 1, xs);
+                i32 begin = cursor;
+                while (formatString[cursor] != '{' && cursor < formatString.len) {
+                   cursor++;
+                }
+                printInternal(formatString, begin, cursor);
+                print(x);
+                printf(formatString, cursor + 2, xs...);
             }
         }
-}*/
+}
 
 // TODO private
-fn print(str s, i32 begin, i32 end){
+fn printInternal(str* s, i32 begin, i32 end){
     for (mut i32 i = begin; i < end; i++){ //bounds check?
-        putchar(s[i]);
+        putchar(s[i] as i32);
     }
 }
 
-fn print(str s, i32 begin){
+fn printInternal(str* s, i32 begin){
     for (mut i32 i = begin; i < s.len; i++){ //bounds check?
-        putchar(s[i]);
+        putchar(s[i] as i32);
     }
 }
 
-/*fn print(str s) {
+fn print(str* s) {
     fputs(s.data, gg_stdout());
-}*/
+}

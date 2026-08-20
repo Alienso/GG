@@ -1,0 +1,46 @@
+// e2e/generic_overload_test.gg — generic free-function template OVERLOAD SETS.
+// A bare name may have multiple `fn name<...>` templates; disambiguated at each call site by
+// arity/pack-shape, then a fixed-parameter type-compatibility filter, then a largest-fixedCount
+// tie-break. `tally<...Ts>` mirrors stdlib/io/IO2.gg's two `print<...Ts>` declarations — a
+// "no extra" entry point that forwards (via spread) into a "with extra" recursive one, both
+// sharing the bare name. Exit 0 = all checks held.
+
+class Box { mut i32 v; Box(i32 x) { this.v = x; } }
+class Bag { mut i32 w; Bag(i32 x) { this.w = x; } }
+
+fn tally<...Ts>(i32 base, Ts... args) -> i32 {
+    return tally(base, 0, args...);
+}
+fn tally<...Ts>(i32 base, i32 extra, Ts... args) -> i32 {
+    match args {
+        ()     -> { return base + extra; }
+        (x:xs) -> { return x + tally(base, extra, xs...); }
+    }
+}
+
+// Non-pack <T> overloaded by arity.
+fn combine<T>(T& x) -> i32 { return x.v; }
+fn combine<T>(T& x, T& y) -> i32 { return x.v + y.v; }
+
+// Same arity (both fixedCount=2) — disambiguated by the second fixed parameter's TYPE.
+fn pick<T>(T& a, i32 n) -> i32 { return n; }
+fn pick<T>(T& a, Bag& b) -> i32 { return a.v + b.w; }
+
+fn main() -> i32 {
+    // Arity-1 call forces the "no extra" overload, which forwards (spread arity) into the
+    // "with extra" one.
+    if (tally(10) != 10) { return 1; }
+    // Arity-4 call: both overloads' arity gate is satisfiable, but only the two-fixed-param one
+    // has a matching second fixed parameter (i32) — resolves directly to it.
+    if (tally(10, 1, 2, 3) != 16) { return 2; }
+
+    mut Box a = Box(3); mut Box b = Box(4);
+    if (combine(a) != 3) { return 3; }
+    if (combine(a, b) != 7) { return 4; }
+
+    mut Bag g = Bag(9);
+    if (pick(a, 5) != 5) { return 5; }
+    if (pick(a, g) != 12) { return 6; }
+
+    return 0;
+}

@@ -54,14 +54,20 @@ and each executable; sanitizer flags propagate to the executables via `gg_core`'
 
 # Trap on integer overflow + out-of-range narrowing (Rust-style, opt-in) → GG --overflow-checks
 .\compile.ps1 e2e\overflow_checks_test.gg -OverflowChecks -Run
+
+# gcc-style -o: choose the output executable path (default: build\<stem>.exe)
+.\compile.ps1 e2e\typed_pointer_test.gg -o build\bin\app.exe -Run
 ```
 
 **Pipeline**: GG.exe (`.gg` → LLVM IR `.ll`) → clang (`.ll` → native `.exe`)
-- IR files land in `build\<stem>.ll`
-- Executables land in `build\<stem>.exe`
+- IR files land in `build\<stem>.ll` (always — GG itself has no output-path flag, it only emits IR)
+- Executables land in `build\<stem>.exe` by default, or at `-o <path>` when given (parent
+  directories are created as needed). `-o` is the driver script's flag — it controls the path
+  clang links to, since GG never invokes the linker itself.
 - Clang binary: `C:\Program Files\mysys2\clang64\bin\clang.exe`
 - The GG binary must be rebuilt (`--target GG`) whenever the compiler source changes.
   compile.ps1 will abort early if `cmake-build-debug\GG.exe` is missing.
+- `compile.sh` (Linux) supports the same flag as `-o <path>` / `--output=<path>`.
 
 **Source directories:**
 - `e2e\` — end-to-end test programs (each has a `main`; expected exit code 0)
@@ -783,6 +789,22 @@ lowercased key folds the spellings into one import. Guarded by `#ifdef _WIN32` s
 case-sensitive filesystem keeps the two as distinct files. The real path (original case) is still used
 to read/lex the file; only the dedup *key* is lowercased.
 
+**Pass 2 (`processFile`) processes a file's DEPENDENCIES before parsing its OWN tokens** (fixed
+bug — it previously parsed its own tokens first, then recursed into dependencies). This ordering is
+load-bearing, not cosmetic: a generic-function call written WITHOUT explicit `<...>`
+(`deduceVariadicInstantiation`/`inferGenericTypeArgs`, `Parser_Generics.cpp`) looks up the template
+directly in the shared `GenericRegistry` **at parse time** — unlike an explicit `name<Targs>(...)`
+call, which only needs the template to exist later, once `runMonomorphization` runs (well after
+every file is parsed) — so if the importing file's own tokens were parsed before its dependency's,
+an inferred call to a template declared in that dependency found nothing and wrongly reported
+"cannot infer type argument(s)", even though the call was valid and would have resolved correctly
+once the dependency's own parse ran moments later. This never surfaced before because every prior
+generic template happened to be declared in the SAME file as its non-explicit call sites (captured
+earlier in that file's own top-to-bottom parse); it surfaces once a consumer file calls an inferred
+generic-pack function declared in a *separate* imported file (found via `stdlib/io/IO2.gg`'s
+`printf<...Ts>`, called without explicit type args from `samples/std_lib.gg`). Tests:
+`tests/import_tests.cpp` (`[import][genoverload]`).
+
 ### Module / import resolution — search roots + the `std/` anchor
 `import "path"` is resolved by `ImportResolver::resolveImportPath(importerDir, rawPath)` against a
 `ModuleSearchConfig { stdlibDir, searchRoots }` (in `ImportResolver.h`), in this order (first
@@ -924,8 +946,28 @@ resolved by the fully-qualified `geo.Point` at the use site.
   BOTH of two *different* modules' same-named functions bare would create an ambiguous import-binding
   collision (`scanModuleDirectives`'s existing ambiguity check) and must fall back to the FQN for at
   least one of them.
-- **v1 scope / limits** (all → a clean error, never a miscompile): no `import a.*;` wildcard, no
-  import aliasing, no module-private visibility (namespacing only). `import a.B;` does **not** load a
+- **Java-style wildcard import — `import a.b.*;`**: binds every top-level member (types AND free
+  functions) that module `a.b` declares, exactly as if each had its own `import a.b.Name;` line —
+  reusing the same per-name ambiguity check (`scanModuleDirectives`'s `bind` helper) a single-symbol
+  import already goes through, so a wildcard-vs-wildcard or wildcard-vs-explicit collision on the same
+  bare name is left unqualified → a clean "not a known type"/ambiguous error at use, same as today.
+  **Non-recursive, like Java**: `a.b.*` binds only `a.b`'s own members — a submodule `a.b.c` is a
+  distinct `moduleTypes`/`moduleFuncs` registry key, never merged into `a.b`'s entry, so it is never
+  pulled in by a wildcard on `a.b`. Implementation is entirely in `scanModuleDirectives`
+  (`Parser_Modules.cpp`): the existing dotted-segment reader is unchanged; after it stops, a trailing
+  `DOT STAR` (instead of assuming the last segment is always a symbol) treats **every** collected
+  segment as the module path and looks it up in `moduleTypes`/`moduleFuncs` (now passed into
+  `scanModuleDirectives` as two extra const-ref params — default-empty so any caller that doesn't care
+  about wildcards still compiles) to bind each member name in turn. **No lexer/AST change** — `*`
+  already lexes as `STAR` (used elsewhere for multiply/pointer sigils); the wildcard is recognized
+  purely by position (right after `IMPORT <dotted path> .`), and — like every dotted import — never
+  produces an `ImportStmt` AST node (`Parser::parse`'s "skip a dotted import to `;`" loop already
+  tolerates any trailing tokens, including `*`, with no change). `dependencyPaths`/`resolveModuleDir`
+  (file/directory loading) need **no change either** — they already stop their own dotted-chain read
+  at the same `DOT STAR` boundary and resolve the pre-`*` segments to the module's directory exactly
+  as a bare `import a.b;` would.
+- **v1 scope / limits** (all → a clean error, never a miscompile): no import aliasing, no
+  module-private visibility (namespacing only). `import a.B;` does **not** load a
   file — the defining file must still be `import "…"`-loaded. An ambiguous bare name errors with a
   generic message (use the FQN). A local named identically to a module name (or a module-name prefix)
   would shadow the FQN fold (module wins; don't do it).
@@ -1070,6 +1112,120 @@ capture). `inferGenericTypeArgs` (`Parser.cpp`), called from the `name(args)` pr
 - Tests: `tests/generic_infer_tests.cpp` (`[geninfer]`), `e2e/generic_infer_test.gg`;
   `e2e/annotation_test.gg` uses `valid(u)`/`sumLive(u)` (inferred) alongside `renameKeyBytes<User>()`
   (explicit — `T` only in the body).
+
+### Generic FREE-FUNCTION overload sets — `fn name<T>`/`fn name<...Ts>` declared more than once
+A bare name may have **multiple** free-function templates — an overload set, exactly like ordinary
+(non-generic) function overloading, but resolved a parser-token-level candidate selection instead of
+the semantic layer's `resolveOverload` (no `Type`s exist yet at this point in the pipeline).
+`GenericRegistry::templates` is `unordered_map<string, vector<GenericTemplate>>` (one **vector** per
+name — was a single `GenericTemplate`, silently overwritten on a second declaration before this
+feature); `tryCaptureFunctionTemplate` `push_back`s. **Class** templates (`tryCaptureClassTemplate`)
+still wholesale-replace — no overload-set behavior there, out of scope. `GenericTemplate` carries a
+`fixedCount` (pack template: # params before the pack; non-pack: total arity), cached at capture time.
+- **Selection** (`Parser::selectTemplateCandidate`, `Parser_Generics.cpp`), a 4-stage pipeline over a
+  homogeneous (all-pack or all-non-pack) candidate subset:
+  1. **Arity/pack-shape gate** (`arityCompatible`): non-pack → exact `argCount == fixedCount` (never a
+     spread); pack → `trailingSpread ? argCount == fixedCount+1 : argCount >= fixedCount` (a trailing
+     `xs...` spread can only mean "forward an existing pack tuple unchanged", so it needs the exact
+     `fixedCount+1` shape — see `deducePackTargs`'s pre-existing `spreadPack` condition). An explicit
+     `name<Targs>(...)` call additionally requires `typeParams.size() == explicitTypeArgCount` and
+     rejects any pack candidate outright (a pack's type args are always inferred).
+  2. **Fixed-parameter type-compatibility filter** (`classifyTemplateParamAt` + the existing
+     `deduceArgTypeToken`): for each candidate's FIXED (non-generic) parameter position, reject the
+     candidate on a clear mismatch between the call argument's syntactically-deduced type and the
+     parameter's declared concrete type — lenient (never rejects) when the position is the template's
+     own type parameter being inferred, or when either side can't be determined at parse time. This is
+     what resolves the case where two *different*-`fixedCount` pack candidates both satisfy stage 1's
+     `>=` check purely by having enough arguments (e.g. `print(str*, Ts...)` vs
+     `print(str*, i32, Ts...)` called with a non-`i32` second argument — arity alone can't tell them
+     apart, but the second candidate's `i32 cursor` position doesn't match the argument's type).
+  3. **Non-empty-pack preference**: among stage-2 survivors, discard any candidate whose PACK would
+     be reduced to **zero elements** if another survivor's pack would not be. Rationale: when a call's
+     literal argument type happens to ALSO match a candidate's extra fixed parameter (e.g. an i32
+     substitution value fits both "pack element" and a `i32 cursor` fixed param), stage 2 can't
+     distinguish them by type — and picking the larger-fixedCount candidate purely by the old stage-4
+     tie-break would silently swallow an argument that was meant for the pack, reducing that pack to
+     nothing (defeating the point of it being variadic at all). Only fires on a genuine disagreement
+     among survivors; if every survivor's pack is empty (or none are), falls through unchanged. A
+     no-op for non-pack candidates, where `args.size() == fixedCount` always holds by stage 1, so the
+     "empty pack" concept never applies to them. Found via a real bug: `stdlib/io/IO2.gg`'s public
+     `printf<...Ts>(str* fmt, Ts... args)` (fixedCount=1) vs its `// TODO private`
+     `printf<...Ts>(str* fmt, i32 cursor, Ts... args)` (fixedCount=2) — calling `printf(fmt, 5)` from
+     outside the file was silently hijacked by the private cursor overload (binding `5` as `cursor`
+     and leaving its pack empty) purely because the old tie-break preferred the larger `fixedCount`,
+     even though the public overload's pack would have consumed `5` correctly.
+  4. **Tie-break**: among stage-3 survivors, the **largest `fixedCount`** wins (most specific, mirrors
+     C++ preferring a non-template overload). A genuine remaining tie (equal `fixedCount`) is a clean
+     parser error ("ambiguous call to generic function …), never a silent pick.
+  A name with 0 or 1 candidates never reaches this pipeline — every call site fast-paths that case
+  identically to the pre-overload-set code (byte-identical mangled output, zero behavior change).
+  **Residual v1 limitation**: stage 3 only catches the case where a candidate's pack is reduced ALL
+  THE WAY to zero. When 2+ substitution values are passed and the FIRST one's type happens to also
+  match the extra fixed parameter (e.g. `printf(fmt, 1, 2, 3)`, all `i32`), both candidates' packs
+  end up non-empty (`[1,2,3]` vs `[2,3]`) and stage 3 can't distinguish them — the old fixedCount
+  tie-break still applies, still misrouting one argument into the fixed parameter. Fixing that
+  general case would need a real static-vs-runtime disambiguation signal this call shape doesn't
+  provide (both interpretations type-check); the practical workaround is avoiding same-typed fixed
+  parameters adjacent to a pack in an overload set, or renaming one overload.
+- **`GenericInstantiation::candidateIndex`** records which candidate a call site selected, so
+  `runMonomorphization`'s later re-lookup (`gen_->templates[inst.templateName][inst.candidateIndex]`)
+  doesn't need to re-run selection.
+- **Mangling** (`mangleInstantiation`) appends `.ov<candidateIndex>` **only when
+  `gen_->templates[base].size() > 1`** — the overwhelming common single-candidate case mangles exactly
+  as before. Without this, two overloads instantiated with identical type args (e.g. both taking
+  `T=i32`) would collide on the same mangled symbol and one body would be silently dropped via
+  `gen_->instantiated`'s dedup.
+- **Read sites updated** (all previously assumed one template per name):
+  `Parser_Expr.cpp`'s explicit `name<Targs>(args)` call, the single-`Call`-bounded-type-param lambda
+  conveniences (lambda-signature exposure + lambda-literal inference — applied only when EXACTLY ONE
+  candidate has that shape; 0 or 2+ just skip the optimization, no error), the spread-target
+  pack-ness check (defers to the pack path if ANY candidate is pack-bearing), `inferGenericTypeArgs`,
+  `deduceVariadicInstantiation`, and `runMonomorphization`'s bounded-body-check loop (nested over each
+  name's candidate list).
+- **Explicit `name<Targs>(args)` and mixed pack/non-pack sets**: a pack candidate is never eligible
+  for an explicit call (its type args are always inferred), so the candidate pool for this call form
+  is always the NON-pack subset — computed up front (`nonPackCands`). The "does not take explicit
+  type arguments; the pack is inferred" error fires only when that subset is **empty** (every
+  candidate under the name is pack-bearing) — a name that mixes pack and non-pack candidates still
+  lets an explicit call target its non-pack member(s). (Shipped-then-fixed bug: an earlier version
+  rejected the whole set the moment ANY candidate was pack-bearing, wrongly erroring on a valid call
+  like `foo<Box>(a)` when `foo` also had an unrelated `fn foo<...Ts>(Ts... args)` overload.)
+- **Named arguments in the 2+-survivors explicit-call branch are rejected** (a clean parse error, not
+  silently mis-resolved): the fixed-parameter type filter indexes `genArgs` **positionally** (it reads
+  the declared type at each fixed parameter *position*), so an out-of-order named argument could
+  misalign against the wrong position and select the wrong overload. Only fires when disambiguation
+  actually needs the argument shapes — a uniquely-matching candidate (by type-parameter count alone)
+  never reaches this branch, so named args to a non-ambiguous generic call are unaffected.
+- **Deferring to an ordinary overload on an undeterminable fixed-parameter argument**
+  (`selectTemplateCandidate`'s `hasOrdinaryFallback` param, threaded from
+  `gen_->ordinaryFuncNames.count(fnName)` at all three call sites): stage 2's leniency on an
+  undeterminable argument type (e.g. `obj.field` — a `MemberAccessExpr`, which `deduceArgTypeToken`
+  has no case for) is **conditional**, not unconditional. When the bare name ALSO has a plain
+  (non-generic) declaration to fall back on, an undeterminable fixed-parameter argument now
+  **rejects** the candidate instead of leniently passing — so the call defers to the ordinary
+  overload rather than risking a silent, wrong match. Found via a real program:
+  `stdlib/io/IO2.gg`'s two `print<...Ts>` overloads share the bare name `print` with `stdlib/io/
+  IO.gg`'s many ordinary `print(i32)`/`print(str)`/… overloads; a reflective `printObj<T>`
+  (`inline for (f in @fields(T)) { print(@field(obj, f.name)); }`) substitutes `@field(obj, f.name)`
+  to a member access whose type (e.g. `i32`) couldn't be determined at parse time — previously this
+  was leniently accepted into the `str*`-first-param pack template, producing a "no matching
+  overload" semantic error once the real (i32) type reached the fixed `str*` parameter. **Scope
+  limit**: this only protects call sites that reach `selectTemplateCandidate` — i.e. a bare name
+  with **2+** candidates of the relevant kind (pack or non-pack). A name with exactly **one**
+  candidate takes the pre-existing byte-identical fast path (`packCands.size()==1` /
+  `nonPack.size()==1`) that never calls `selectTemplateCandidate` at all, so it does NOT get this
+  protection — an undeterminable-argument call to a lone pack template still greedily claims it
+  over a same-named ordinary overload, exactly as before this fix (a deeper, pre-existing
+  characteristic of the variadic-pack feature, predating overload sets — extending the fast path
+  to defer too would need a semantic-conversion-aware fixed-parameter comparison, not just the
+  current exact-string-match `classifyTemplateParamAt` check, to avoid regressing implicit-widening
+  cases like an `i32` literal passed to a declared `f64` fixed parameter).
+- **v1 limitation**: a name with BOTH a pack and a non-pack candidate, called WITHOUT explicit `<…>`,
+  resolves via "the pack path (`deduceVariadicInstantiation`) is tried first and wins if its arity
+  gate is satisfiable at all" — not a unified cross-kind selector (pinned down by a dedicated test,
+  not left as untested prose). Generic **classes** and generic **methods** (`methodTemplates`, a
+  separate registry keyed `Owner::method`) are unaffected — no overload-set support there.
+- Tests: `tests/generic_overload_tests.cpp` (`[genoverload]`), `e2e/generic_overload_test.gg`.
 
 ### Generic methods — `fn m<T>(...)` on a class (own type parameters)
 A method with its **own** type parameters, distinct from any class type params. Like free-function
@@ -1619,6 +1775,11 @@ now parameterized by the target:
   `clang` from `PATH` or `$CLANG`). Both run the same pipeline (GG `--unsafe-ptr` → `build/<stem>.ll`
   → clang → `build/<stem>[.exe]`) and take the same options (`--show-ir`/`-ShowIR`, `--run`/`-Run`,
   `--debug`/`-DebugInfo`, `-O<level>`/`-Opt`, `--overflow-checks`/`-OverflowChecks`, plus `--target=`).
+  **`-o <path>` (gcc-style, `compile.sh` also accepts `--output=<path>`)** overrides the final
+  executable's path/name (default `build/<stem>[.exe]`), creating parent directories as needed —
+  this lives in the driver script, not GG itself: GG only ever emits `build/<stem>.ll`/`.ast` (no
+  output-path flag of its own), and it's clang's `-o` (the actual linker invocation) that the driver
+  forwards the chosen path to.
 
 ### Local type inference — `var` (const by default)
 `var name = expr;` deduces a local's type from its initializer. **Const by default** (single-
@@ -1689,6 +1850,23 @@ CTFE VM. `sizeof(T)` was the pre-existing member of this family; the rest are `@
   (member accesses, `Enum::V`, literals) → **semantic and codegen need almost no reflection logic**,
   only: scalar-query arms (`analyzeReflect`/`genReflect`) that fold each `@`-query to a constant like
   `sizeof`, plus trivial guard arms for the transient nodes. `@compileError` errors in `analyzeReflect`.
+- **`runMonomorphization` drains reflection-triggered generic work too** (fixed bug): `expandReflection`
+  re-parses a substituted `inline for` body through the ordinary statement/call-parsing path — so a
+  call inside a reflected body that targets a GENERIC function (not just an ordinary one) can enqueue
+  a brand-new instantiation onto `gen_->worklist`. Since `expandReflection` used to run strictly
+  *after* the main worklist-drain loop, with nothing draining it afterward, that queued instantiation
+  was orphaned: the call site referenced a mangled name that was never actually monomorphized/emitted,
+  and semantic analysis reported "undeclared function". Found via a reflective `printObj<T>` (`inline
+  for (f in @fields(T)) { print(f.name); … }`) whose body calls a variadic-pack `print<...Ts>` for the
+  first time. Fixed by wrapping drain-worklist → `synthesizeTupleClasses` → `expandReflection` in an
+  outer fixpoint loop that repeats whenever a reflection pass leaves `gen_->worklist` non-empty.
+  `synthesizeTupleClasses` needed a dedup guard (`tupleClassesSynthesized_`) to stay idempotent across
+  repeated calls (it previously unconditionally re-emitted every tuple class on every call — harmless
+  when called once, a duplicate-class error if called again). The bounded-generic-body-check loop
+  (`checkGenericBodies` surfacing) was moved to run once, after the whole fixpoint, so it also covers
+  templates whose first instantiation only happened via a reflection-triggered call. Tests:
+  `tests/reflect_tests.cpp` (`[reflect][genoverload]`), regression case using two `take<...Ts>`
+  overloads called from inside an `inline for` (mirrors IO2.gg's two-`print<...Ts>` shape).
 - **Scalar folds (codegen)**: `genReflect` computes each query's constant — `@typeName` a `str` view
   (`{ptr,i64}`) over a private NUL-terminated constant; counts/offsets/alignment from
   `cgClasses_`/`enumRegistry_`/`dbgSizeAlign` (the same
@@ -2021,8 +2199,7 @@ A free function may be declared `fn private name(...)` — public by default. `p
 mirroring private fields/methods. Same-file calls are silent.
 - **Parser** (`parseFnDeclaration`): an optional `private` after `fn` (before the name) sets
   `FunctionDeclStmt::isPublic=false`; `FunctionDeclStmt::sourceFile` is stamped from the parser's
-  canonical `filename`. Generic free functions (`fn name<T>`) are name-first in the capture path, so
-  `private` on a **generic** free function is not supported in v1 (non-generic only).
+  canonical `filename`.
 - **Semantic**: `FunctionOverload` carries `isPublic` + `sourceFile` (filled in `collectFunctions`).
   `currentFile_` is set to the declaring file at the top of `analyzeFunctionDecl` (save/restored) and
   is **empty inside class/enum/impl bodies**. The free-function call site in `analyzeCall` warns iff
@@ -2030,6 +2207,43 @@ mirroring private fields/methods. Same-file calls are silent.
   unknown-origin contexts (method bodies) never warn (zero false positives; conservative v1).
 - **Codegen**: unaffected — access control is purely a semantic warning (no name mangling / linkage
   change; `private` functions keep their plain `@name`). Tests: `[private]` in `tests/semantic_tests.cpp`.
+- **Generic free functions** (`fn private name<...>`/`fn private name<...Ts>`) are now supported too
+  — `tryCaptureFunctionTemplate` was name-first (assumed the name sat immediately after `fn`), so
+  `private` there used to be a hard "expected '(' after function name" parse error rather than a
+  clean rejection or a working feature; `prescanTemplateNames` already tolerated it (it registers
+  the name into `funcNames` correctly either way), which masked the gap until an actual call site
+  was exercised. Fixed with **zero new semantic-layer code** — reuses the exact mechanism above:
+  - `tryCaptureFunctionTemplate` now skips an optional `PRIVATE` token between `fn` and the name,
+    and — the key trick — **re-emits** a synthesized `private` token into the captured tokens (not
+    just a stored flag) when `!isPublic`, mirroring `captureMethodTemplate`'s existing pattern for
+    generic methods (line ~610, though that's for **class-scoped** method privacy — a different,
+    orthogonal visibility axis, not file-scoped). Since the monomorphized instantiation is re-parsed
+    through the ordinary `parseDeclaration()` → `parseFnDeclaration()` path, the concrete
+    `printf$Tuple$i32` ends up an ordinary `FunctionDeclStmt` with `isPublic=false` — indistinguishable
+    to semantics from a hand-written private function, so the existing cross-file warning check above
+    fires with no modification.
+  - `GenericTemplate` gained `isPublic` (recorded at capture time, mostly for documentation/future use
+    — the re-emitted token is what actually drives behavior) and `sourceFile` (the template's OWN
+    declaring file, captured via `this->filename` during that file's own per-file parse pass). The
+    latter is load-bearing: `runMonomorphization`'s single shared `Parser::filename` is otherwise one
+    value for the **entire** monomorphization pass (the entry/root file — see the ImportResolver
+    "single monoParser" note), so every instantiation's `FunctionDeclStmt::sourceFile` would attribute
+    to the root file regardless of which file the template came from. That happens to equal the
+    calling file in the common case (calling from the program's entry file), which would silently
+    suppress the very warning this feature exists to produce. Fixed by temporarily swapping
+    `filename = tmpl.sourceFile` around the instantiation's re-parse (restored immediately after) —
+    this also improves DWARF file attribution accuracy for generic instantiations as a side effect
+    (previously documented as "usually correct" / an approximation in the debug-info invariant).
+  - **Incidental fix required**: the free-function monomorphization loop's self-reference rename
+    hardcoded the declaration name at token index 1 (`fn NAME` → idx 1) to distinguish a variadic
+    template's *declaration* occurrence (renamed) from its *recursive call* occurrences (left bare, so
+    each level re-deduces the shrinking pack). Injecting `private` pushes the name to index 2, so this
+    is now computed per-template (`declNameIdx`) rather than hardcoded — a no-op for every
+    non-private/non-generic-class template, where it still resolves to 1.
+  - Tests: `tests/semantic_tests.cpp` (`[private][genoverload]`) — the same four-scenario shape as the
+    non-generic private-function tests (same-file silent, cross-file warns, public-generic cross-file
+    silent, used-internally-then-imported warns only at the cross-file site), each with a pack
+    template instead of a plain function.
 
 ### Static members (class-level)
 Roadmap: (1) **static fields** ✅ done, (2) **static methods** ✅ done, (3) **static local
@@ -2100,175 +2314,87 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
-**1354 test cases / 2522 assertions** (as of making **dotted imports self-load their module
-directory** (Go/Java-style): `import std.utility.Pair;` now both binds the name AND loads every
-`*.gg` in the directory that module maps to (`resolveModuleDir` + `moduleFiles`, shared across all
-four import-graph passes via a new `dependencyPaths` helper in `ImportResolver`), so a consumer needs
-just the one dotted line — every quoted `import "std/…"` / `import "crt/…"` line across `stdlib/`,
-`e2e/`, and `samples/` was dropped. Each loaded module directory is **verified** (`verifyModuleDir`):
-a file whose declared `module` mismatches its directory is reported. Quoted `import "path"` is
-unchanged and remains the escape hatch for module-less / ad-hoc files (e.g. `e2e/mods/geo.gg`, still
-loaded by a quoted import while its `import geo.Point;` only binds). `tests/import_tests.cpp`
-(`[import]`, +2: a dotted import self-loads its whole directory incl. a sibling reachable only by
-FQN; a directory/module mismatch is reported), `tests/stdlib_tests.cpp` (now configures `stdlibDir`
-so the stdlib's dotted self-imports resolve, mirroring main.cpp/compile.ps1). Prior baseline was
-**1352 test cases / 2519 assertions** (as of adding **dotted (multi-segment) module names and
-import paths** (`module std.utility;`, `import std.utility.Pair;`) — generalizing the previous
-single-segment-only grammar — and using the new capability to **namespace the entire stdlib under
-`std`** (`std`, `std.crt`, `std.io`, `std.math`, `std.math.vector`, `std.utility`). Two independent
-compiler bugs were found and fixed along the way: (1) the import-path scanner
-(`scanModuleDirectives`) previously pattern-matched exactly one dot, so `import a.b.C;` silently
-mis-scanned — registering a bogus binding for the *middle* segment (`b` → `"a.b"`) while never
-importing `C` at all — fixed by a general greedy segment split (last segment = symbol, everything
-before it = module path, unambiguous since GG top-level decls are always flat); (2) a pre-existing
-bug in the *already-shipped* single-segment qualifier: a top-level `fn`'s own declared name was
-qualified via the same bindings-first lookup as an ordinary call site, so an unrelated
-`import mod.f;` for a different module's same-named function could silently hijack a file's own
-`fn f(...)` declaration into that other module — fixed by exempting a `fn`'s own name from the
-bindings lookup entirely (it always belongs to its own declaring module), which is what let
-`stdlib/math/vector/Vector2.gg`'s `fn print(vec2&)` import `std.io.print` under the same bare name
-`print` for its internal calls without the declaration itself being renamed. Also fixed two
-unrelated, independently-discovered bugs while migrating: `Vector2.gg` imported
-`"std/io/io.gg"` (wrong case — the real file is `IO.gg`; only worked because NTFS folds case), and
-`e2e/io_print_test.gg` imported `"std/IO.gg"` (wrong path — the real file is `std/io/IO.gg`), which
-meant that e2e file wasn't actually compiling before this work at all. `tests/module_tests.cpp`
-(`[module]`, +5: dotted-module IR qualification, dotted-import binds-last-segment regression,
-inline FQN fold with no import, longest-prefix disambiguation between overlapping module names, and
-the declaration-vs-import-binding collision regression), `tests/stdlib_tests.cpp` (`String.gg`'s
-IR-content assertions updated with the `std.` prefix), `e2e/module_dotted_test.gg` +
-`e2e/mods/geo_shapes.gg` (new), all 18 existing stdlib-consuming e2e/samples files updated with the
-matching `import std.…;` lines and re-verified to still exit 0. Prior baseline was
-**1347 test cases / 2503 assertions** (as of fixing three bugs found while reviewing the new
-`stdlib/utility/List.gg` — a doubly-linked-list-style singly-linked `List<T>`/`Node<T>` with an
-`Iterator`/`Iterable` impl: (1) `List::add` never advanced `last` past the first insertion — every
-add after the first overwrote `last.next` (the first node's `.next`), silently dropping and
-releasing every "middle" node once a third element was added (`size` stayed correct while the
-actual chain lost nodes — fixed by also assigning `last = node;` in the non-empty branch); (2)
-`ListIter::hasNext` checked "does the *current* node have a next" instead of "is there a current
-node", which skipped the last element of every list (a 1-element list iterated zero times) — fixed
-to `return pos != null;`; (3) a genuine compiler gap in `genBorrowSource` (`CodeGen_Exprs.cpp`,
-documented above under the `T*` invariant) that made `ListIter::next`'s `T* val = pos!!.value;`
-fail to compile at all — a primitive borrow sourced from an explicit `obj.field`/`obj!!.field`
-member access had no codegen case and silently produced malformed IR. `tests/ref_tests.cpp`
-(`[ref]`, +2: a semantic accept for a primitive borrow from both a plain and a `!!`-unwrapped
-member access, and a codegen check that the emitted IR uses a `getelementptr`, not a malformed
-empty `store`), `e2e/list_test.gg` (runtime: empty/single/multi-element iteration order and sum,
-plus a live-object-counter check that `List<Counter&>` leaks nothing and frees nothing early).
-Prior baseline was
-**1345 test cases / 2498 assertions** (as of fixing the **reversed nullable-sigil order** —
-`Class?&`/`i32?*` written instead of the correct `Class&?`/`i32*?`): the
-type-suffix grammar (`consumeType`/`consumeTypeCore`, `Parser.cpp`) only ever accepts `&`/`*` BEFORE
-`?`, never after — there is only one nullability axis for a reference (a valid, non-null handle
-always points at a fully-formed object; there's no separate "valid handle to an absent object"
-state), so the reversed order could never be semantically distinct even if parsed. Previously the
-reversed order failed with a confusing, unrelated `"expected expression"` — `typeSpanAt`
-(`Parser_Generics.cpp`, the look-ahead `parseExpression`'s var-decl branch uses to decide "is this a
-type") didn't recognize the trailing sigil as part of the span either, so the declaration-detection
-branch never fired at all and `Class?& a = null;` got misparsed as a ternary (`Class` as the
-scrutinee, `?` starting it, then the dangling `&` failing inside the "then" branch). Fixed at both
-sites: `typeSpanAt` now also consumes a `&`/`*` immediately after a lone `?` as part of the span (so
-the var-decl branch still fires), and `consumeType` then throws a precise diagnostic ("'&' must come
-before '?', not after; write 'C&?' instead of 'C?&'") instead of silently mis-tokenizing. Found while
-reviewing `stdlib/utility/List.gg`'s new `Node<T>`/`List<T>` — which also had an unrelated, real bug
-in the same file: `Node<T>.next` was declared `mut T&? next;` (a nullable reference to a bare `T`)
-instead of `mut Node<T>&? next;` (a nullable reference to the *next node*), which failed to compile
-for any non-class `T` (e.g. `List<i32>`) with `"'&' reference type is only allowed on class types,
-not 'i32'"`; fixed alongside. `tests/nullable_tests.cpp` (`[nullable]`, +2: `C?&` and `i32?*` both
-now give the precise reversed-order error instead of a confusing parse failure). Prior baseline was
-**1343 test cases / 2496 assertions** (as of an edge-case pass over the **type-parameter sigil
-substitution** fix below: confirmed the strip rule also fires correctly in PARAMETER position (not
-just returns), that `T*`/`T&` coexist correctly when both occur in the same instantiation, and that
-`T` bound to a *nested* generic-class reference (`Container<i32>&`, a 2-token span exactly like
-`Point&`) strips identically. Confirmed `-> T?` (nullable) is correctly left untouched by the strip —
-`?` is deliberately not treated as a sigil, so `T = Point&` still yields the pre-existing `Point&?`
-nullable-owning-reference form rather than being over-stripped to `Point?`. Also found, empirically,
-that `argIsSigiled`'s `STAR` branch in `spliceTypeArg` is currently **dead code** for real
-instantiations: `parseOneTypeArg` (the type-argument parser) only ever consumes a trailing `&` for an
-argument, never a `*` — `Pair<Point*, Point*>` fails at "expected '>' to close type arguments" before
-`spliceTypeArg` is ever reached, and no other call-site construction path produces an
-argument span ending in `STAR` either. Harmless (defensive, forward-compatible) but worth being
-honest that it's unexercised by any real code path today — a pre-existing, unrelated gap (borrow-typed
-generic arguments were never supported), not something this fix introduced or needs to close.
-`tests/generic_method_tests.cpp` (+4: parameter-position, `T*`+`T&` coexistence, nested-generic-arg,
-and `T?`-is-unaffected). Prior baseline was
-**1339 test cases / 2491 assertions** (as of fixing **type-parameter sigil substitution**
-(`spliceTypeArg`, `Parser_Generics.cpp`) — a generic class/method/impl whose type parameter `T` is
-bound to an already-sigiled argument (an owning reference `Point&`) used to hard-crash the PARSER
-(not even a clean semantic error) the moment the template site also wrote its own `T*`/`T&` suffix,
-because splicing produced two sigil tokens back to back (`Point & *`) that `consumeType` cannot
-decode. Found via `stdlib/utility/Pair.gg`'s `getFirst()`/`getSecond()`, whose `-> T&` return broke
-for every non-class `T` (including the already-shipped `Pair<i32,i32>`/`Pair<str,str>` — the bug was
-latent all along, since an unused generic method's body is never type-checked until something
-actually instantiates the surrounding class). Fixed with an explicit "author's sigil wins" rule
-(a strip, not a C++-style merge — GG's `&`/`*` carry different ownership semantics, so a
-merge-and-pick-a-winner rule risks silently returning the wrong ownership kind): when splicing `T`'s
-own argument tokens, if the argument itself ends in a sigil AND the template site's very next token
-is also a sigil, drop the argument's trailing sigil and let the template's own sigil (already
-present, un-modified) apply — validated by the same, unchanged cast rules every other return/field
-assignment already goes through. Applied identically at all three token-splice sites that share this
-pattern (class/free-function templates, generic methods, generic impls); the pack-substitution branch
-was untouched (it always emits a fixed `*` of its own, unrelated to this bug). Zero runtime cost
-(pure parse-time token surgery) and strictly additive — the doubled-sigil case was a hard parser
-failure in every prior version, so nothing that used to compile is affected.
-Also fixed an unrelated, adjacent bug found while chasing this down: `setupReturnAliasLocal`
-(the primitive/value return-slot zero-init) always emitted the scalar literal `store <ty> 0` — invalid
-LLVM for an aggregate return type (`str`'s `{ptr,i64}`, a nullable primitive's `{i1,iN}`) or a raw
-`ptr`, which need `zeroinitializer`/`null` respectively. Surfaced by a generic `-> T out` value-return
-getter instantiated with `T = str` (`Pair<str,str>`), which had compiled to malformed IR before this
-fix. `tests/generic_method_tests.cpp` (`[genericmethod]`, +7: three class-template getter cases
-(`T*`/`T&`/a same-name non-sigiled primitive+value control), one generic-method case, one
-generic-impl case, and two "still a clean error" negatives for `T&` with a primitive/value `T`
-unchanged from before). Prior baseline was
-**1332 test cases / 2482 assertions** (as of extending **`addressOf`** to accept a `ptr`/`ptr<T>`-typed
-local, returning `ptr<ptr>` — the missing piece for binding a C API whose out-param is itself a
-pointer (`strtoll`'s `char **endptr`), motivated by fixing the `parseInt2` draft in
-`stdlib/Number.gg`. The inner element always collapses to a generic `ptr` regardless of the source
-`ptr<T>`'s `T` (a representation limit of `Type::elementKind` being a flat field, not a nested
-`Type` — harmless, since every pointer is opaque `ptr` at the IR level anyway). `parseInt2` now
-correctly: takes `end`'s address via `addressOf`, detects a no-digits-consumed failure via
-`end == s.data` (pointer identity, riding the earlier `emitEquality` fix), and range-checks the
-result against `i32` bounds before returning — using `strtoll` (`long long`, 64-bit on every
-mainstream target), NOT the pre-existing `strtol` declaration, which returns C's `long` — 32-bit on
-Windows (LLP64) but 64-bit on Linux (LP64), so an `i64`-declared `strtol` silently mis-widens/
-truncates depending on target and defeats an overflow check (flagged in a comment in
-`crt/util.gg`, left in place since nothing else used it). Also fixed a real, unrelated bug found
-while verifying it end-to-end: `Number.gg` imported its CRT siblings via the `"std/…"` prefix
-(meant for external callers) instead of the file-relative form every other stdlib file uses
-(`"crt/…"`) — harmless through the real compiler (stdlib dir is always configured there), but a
-landmine for anything resolving the file without that config. Fixed by switching to relative
-imports, matching convention. `tests/address_of_tests.cpp` (+2: `ptr` and `ptr<T>` locals now
-accept; the old "rejects a raw-ptr local" case is gone, superseded) — no stdlib-file-specific unit
-tests added yet (not needed for this fix; verified instead via a throwaway e2e probe, run and then
-discarded). Prior baseline was
-**1331 test cases / 2482 assertions** (as of adding the **`addressOf(local)` intrinsic** — a raw,
-typed `ptr<T>` address of a local variable's/parameter's own storage slot, for binding to C APIs
-that need an out-parameter address (`T*` borrows only ever produced a GG reference, never a raw
-`ptr`). v1 scope: locals/parameters only; element type mirrors the slot (`ptr<i32>` for a primitive,
-`ptr<Point>` for a value object, `ptr<Point&>` — one level of indirection above the object — for an
-owning reference, per explicit design decision). Alongside it, fixed two small pre-existing gaps the
-feature exposed: (1) `emitEquality` had no `ptr`/`ptr<T>` case, so comparing two raw-pointer values
-mis-widened through the numeric path and emitted a malformed `icmp ne i32` (now a plain `icmp eq/ne
-ptr`, extending the existing reference/enum identity branch); (2) explicit `as` casting between
-`ptr`/`ptr<T>` was never wired up even though implicit binding already allowed it (documented, not
-fixed — a narrow, easily-worked-around gap, out of scope here). `tests/address_of_tests.cpp`
-(`[addressof]`, 22 cases — accept: primitive/value-object/owning-ref/parameter/bool/char/`var`-infer
-+ the extern-`ptr` C-call flow; reject: no-`--unsafe-ptr`, non-identifier, field, borrow `T*`,
-nullable, enum, `str`, raw-`ptr` local, array, `this`, undeclared; codegen: alloca address,
-write-through, raw-ptr identity compare), `e2e/address_of_test.gg` (runtime: all three element kinds,
-the C out-param write-back via `memcpy`, and a live-object counter proving the reference-slot alias
-is refcount-balanced — no leak, no double-free). Prior baseline was
-**1309 test cases / 2449 assertions** (as of promoting the **missing-return check to a hard error**
-for a non-void function/method with **no** named return slot that can fall off the end without
-returning — previously only a `warn()`, so such code compiled and returned garbage at runtime. Gated
-identically to the pre-existing check (`currentReturnSlotName_.empty() && kind != Void &&
-!alwaysReturns(body)`, all four sites: free function, class method, impl method, enum method) — a
-function/method **with** an arrow-form return slot (`-> T v`) is unaffected (see the "Return aliases"
-invariant: the slot is always a valid fall-through result, so no check applies there at all). Purely a
-`warn`→`error` flip, no new logic. Verified no regression by compiling every file under `e2e/` and
-`samples/` — none relied on the old warning-only behavior. Two `tests/semantic_tests.cpp` cases
-flipped from asserting a captured "Warning" to asserting `result.hadError` (net −2 assertions, same
-test count). (Older baseline entries are pruned — this section keeps only the last 3; full history
-is in git.)
+**1384 test cases / 2578 assertions** (as of adding Java-style wildcard imports, `import a.b.*;` —
+binds every top-level member (type or free function) that module `a.b` declares, non-recursively
+(a submodule `a.b.c` is a distinct registry key, never pulled in). Implemented entirely in
+`scanModuleDirectives` (`Parser_Modules.cpp`): the existing dotted-segment reader is unchanged, but
+a trailing `DOT STAR` now treats every collected segment as the module path and expands to one
+binding per name found in `moduleTypes`/`moduleFuncs` for that module, reusing the same per-name
+ambiguity-merge logic (`bind` helper) a single-symbol `import a.B;` already used — so a wildcard
+colliding with another import on the same bare name is left unqualified and errors at use exactly
+like today's explicit-import collisions. `scanModuleDirectives` gained two new (default-empty)
+const-ref params (`types`, `funcs`) so it can look up a module's members; all four callers
+(`Parser::parse`, and `ImportResolver`'s `verifyModuleDir`/`qualifyFileTokens`/`scanModules`) were
+updated to pass `moduleTypes`/`moduleFuncs`. No lexer/AST change (`*` already lexes as `STAR`); no
+change needed in `dependencyPaths`/`resolveModuleDir` (directory loading) since they already stop
+their own dotted-chain read at the same `DOT STAR` boundary and resolve the pre-`*` segments to the
+module's directory exactly as a bare `import a.b;` would. See the "Module namespacing" invariant
+above. `samples/std_lib.gg` was updated to use `import std.io.*;` in place of 4 separate
+single-symbol imports, as a real-world smoke test. 3 new `tests/module_tests.cpp` cases
+(`[module]`): a wildcard binding every module member (type + free function), a non-recursion guard
+(a submodule's member is NOT pulled in), and a wildcard-vs-explicit-import ambiguity case. Prior
+baseline was
+**1381 test cases / 2573 assertions** (as of adding `private` support for generic free functions —
+a gap surfaced by the same dogfooding session below: the user asked whether `private` was supported
+at all, and marking `stdlib/io/IO2.gg`'s internal `printf<...Ts>(str* fmt, i32 cursor, Ts... args)`
+`private` to guard against the residual overload-ambiguity limitation noted below hit a hard
+"expected '(' after function name" parse error — `tryCaptureFunctionTemplate` was name-first and
+never anticipated a `private` token before the name, even though `prescanTemplateNames` already
+tolerated it (masking the gap until an actual declaration was written). Fixed with **zero new
+semantic-layer code**: the capture now skips `private`, re-emits it into the captured tokens so the
+monomorphized instantiation is an ordinary `isPublic=false` `FunctionDeclStmt` (reusing the existing
+cross-file warning check verbatim), and `GenericTemplate` gained a `sourceFile` (the template's own
+declaring file) that `runMonomorphization` temporarily swaps `filename` to during the instantiation's
+re-parse — otherwise every instantiation would attribute to the single entry/root file the whole
+monomorphization pass runs under, silently suppressing the warning whenever that happens to equal the
+calling file (the common case). See the "`private` on free functions" invariant above. 9 new
+`tests/semantic_tests.cpp` cases (`[private][genoverload]`) — the original 4 (same-file silent,
+cross-file warns, public-generic cross-file silent, used-internally-then-imported warns only at the
+cross-file site, all with a pack template) plus 5 found reviewing for missed edge cases: a
+**non-variadic** `<T>` template (the original 4 only covered `<...Ts>`, the one shape where the
+`declNameIdx` token-index fix actually mattered — a plain `<T>`'s rename logic isn't index-sensitive
+at all, so it didn't exercise that fix, but needed its own check since capture/`sourceFile` threading
+aren't variadic-specific); the same non-variadic template's same-file case; an **explicit**
+`unwrap<Box>(b)` call (a different parser code path — `Parser_Expr.cpp`'s explicit `name<Targs>`
+branch — than the inferred-call tests, which reach `inferGenericTypeArgs` instead); and an **overload
+set** with one public and one private candidate (the actual motivating shape,
+`stdlib/io/IO2.gg`'s `printf` pair, which none of the first 4 tests exercised at all) — one case
+confirming an external call landing on the public candidate stays silent, another confirming an
+external call that (via the documented residual overload-selection ambiguity) lands on the private
+one warns. One authoring bug caught by these while writing them: two of the five declared `class Box`
+in BOTH the library and the importing body string, which GG's flat-Program import model correctly
+rejected as a duplicate-class error (`hadError` unexpectedly true) — GG does not scope imported
+declarations to a namespace by default, so a shared type must be declared exactly once (see the
+Module namespacing invariant); fixed by declaring `Box` only in the library half of each test. Also
+surfaced, but explicitly OUT OF SCOPE and left unfixed (a pre-existing bug, reproducible with no
+`private` involved at all): `inferGenericTypeArgs` (`Parser_Generics.cpp`, the non-pack "infer
+`<T>` from a call without explicit type args" path) hardcodes `TokenType::IDENTIFIER` for the
+deduced type argument regardless of whether the deduced type is a class name or a PRIMITIVE — every
+existing test of this path only infers class types, where `IDENTIFIER` is correct, so nothing had
+ever exercised inferring a primitive; `fn f<T>(T x) {...}` called as `f(n)` for an in-scope `i32 n`
+now reproducibly errors "expected a parameter type, but 'i32' is not a known type" post-substitution,
+because the synthesized argument token should have used `primTokenFor(base)` (the same helper the
+PACK deduction path — `deducePackTargs`/`deduceArgTypeToken` — already uses correctly) instead of an
+unconditional `IDENTIFIER`. Worked around here by using class-typed arguments in the new non-pack
+tests, matching every pre-existing test of this path. Prior baseline was
+**1372 test cases / 2554 assertions** (as of fixing a fourth real bug found while dogfooding the
+feature — reported by the user testing `stdlib/io/IO2.gg`'s `printf<...Ts>` overload pair: calling
+the public `printf<...Ts>(str* fmt, Ts... args)` (fixedCount=1) from outside the file was silently
+hijacked by the `// TODO private` `printf<...Ts>(str* fmt, i32 cursor, Ts... args)` (fixedCount=2),
+because a lone i32 substitution value (`printf(fmt, 5)`) type-matches BOTH "a pack element" and the
+private overload's `i32 cursor` fixed parameter — stage 2's type filter couldn't distinguish them,
+and the old stage-3 tie-break (largest `fixedCount` wins) picked the private overload, reducing ITS
+pack to zero elements and binding `5` as `cursor` instead. Fixed by inserting a new stage 3 into
+`selectTemplateCandidate` (`Parser_Generics.cpp`) that discards a stage-2 survivor whose pack would
+be reduced to zero elements when another survivor's pack would not be — a no-op for non-pack
+candidates and for cases where every survivor agrees on emptiness, so no other test's dispatch
+changed. **Known residual limitation** (documented, not fixed): with 2+ substitution values whose
+first value's type also matches the extra fixed parameter (e.g. `printf(fmt, 1, 2, 3)`, all i32),
+BOTH candidates' packs end up non-empty and the new stage can't distinguish them either — the old
+tie-break still misroutes one argument into the fixed parameter in that case (see the "Generic
+FREE-FUNCTION overload sets" invariant above). 1 new `tests/generic_overload_tests.cpp` case
+(`[genoverload][codegen]`).
+(Older baseline entries are pruned — this section keeps only the last 3; full history is in git.)
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released

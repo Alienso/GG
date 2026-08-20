@@ -9,6 +9,7 @@
 #   .\compile.ps1 samples\hello.gg -DebugInfo       (emit DWARF for gdb/lldb)
 #   .\compile.ps1 samples\hello.gg -Opt 2           (clang -O2)
 #   .\compile.ps1 samples\hello.gg -OverflowChecks  (trap on integer overflow / narrowing)
+#   .\compile.ps1 samples\hello.gg -o bin\app.exe   (gcc-style: choose the output executable path)
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -23,7 +24,10 @@ param(
     [ValidateSet("0", "1", "2", "3", "s", "z")]
     [string] $Opt = "0",  # clang optimization level (-O<level>); default 0 (no optimization)
 
-    [switch] $OverflowChecks  # trap on integer overflow + out-of-range narrowing (GG --overflow-checks)
+    [switch] $OverflowChecks,  # trap on integer overflow + out-of-range narrowing (GG --overflow-checks)
+
+    [Alias("o")]
+    [string] $Output = ""  # gcc -o style: path of the produced executable (default: build\<stem>.exe)
 )
 
 Set-StrictMode -Version Latest
@@ -56,7 +60,12 @@ if (!$SourceResolved) {
 
 $stem   = [System.IO.Path]::GetFileNameWithoutExtension($SourceResolved)
 $llFile = "$Build\$stem.ll"
-$exeOut = "$Build\$stem.exe"
+$exeOut = if ($Output) { [System.IO.Path]::GetFullPath($Output) } else { "$Build\$stem.exe" }
+
+$exeOutDir = Split-Path -Parent $exeOut
+if ($exeOutDir -and !(Test-Path $exeOutDir)) {
+    New-Item -ItemType Directory -Force -Path $exeOutDir | Out-Null
+}
 
 # ---- Helper: run a native command, capture stdout+stderr separately --------
 # Uses System.Diagnostics.Process to avoid PowerShell 5.1's behaviour of

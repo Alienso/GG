@@ -10,6 +10,7 @@
 #   ./compile.sh samples/hello.gg -O2                # clang -O2 (default -O0)
 #   ./compile.sh samples/hello.gg --overflow-checks  # trap on integer overflow / narrowing
 #   ./compile.sh samples/hello.gg --target=<triple>  # override the target triple (default: host)
+#   ./compile.sh samples/hello.gg -o bin/app          # gcc-style: choose the output executable path
 set -u
 
 # ---- Resolve paths relative to this script (GG writes build/<stem>.ll into the cwd, so cd here) ----
@@ -21,6 +22,8 @@ BUILD="$SCRIPT_DIR/build"
 CLANG="${CLANG:-clang}"   # honour $CLANG if set, else find clang on PATH
 
 # ---- Parse arguments ----
+# A plain `for arg in "$@"` loop can't handle a flag that takes a separate value
+# token (`-o app`), so this uses an index-based loop with an explicit shift instead.
 SOURCE=""
 SHOW_IR=0
 RUN=0
@@ -28,7 +31,9 @@ DEBUG=0
 OPT="0"
 OVERFLOW=0
 TARGET=""
-for arg in "$@"; do
+OUTPUT=""
+while [ "$#" -gt 0 ]; do
+    arg="$1"
     case "$arg" in
         --show-ir)         SHOW_IR=1 ;;
         --run)             RUN=1 ;;
@@ -36,9 +41,16 @@ for arg in "$@"; do
         --overflow-checks) OVERFLOW=1 ;;
         -O*)               OPT="${arg#-O}" ;;
         --target=*)        TARGET="${arg#--target=}" ;;
+        -o)
+            shift
+            if [ "$#" -eq 0 ]; then echo "ERROR: -o requires an argument" >&2; exit 1; fi
+            OUTPUT="$1"
+            ;;
+        --output=*)        OUTPUT="${arg#--output=}" ;;
         -*)                echo "ERROR: unknown flag: $arg" >&2; exit 1 ;;
         *)                 SOURCE="$arg" ;;
     esac
+    shift
 done
 
 # ---- Validate ----
@@ -55,7 +67,13 @@ fi
 
 stem="$(basename "${SOURCE%.*}")"
 ll="$BUILD/$stem.ll"
-exe="$BUILD/$stem"
+if [ -n "$OUTPUT" ]; then
+    exe="$OUTPUT"
+    exeDir="$(dirname "$exe")"
+    mkdir -p "$exeDir"
+else
+    exe="$BUILD/$stem"
+fi
 
 # ---- Step 1: GG → LLVM IR ----
 echo

@@ -1,8 +1,6 @@
 import std.math.vector.vec2;
 import std.utility.Pair;
-import std.io.print;
-import std.io.println;
-import std.io.printObj;
+import std.io.*;
 import std.String;
 import std.utility.List;
 
@@ -72,6 +70,8 @@ fn main() -> i32 {
     for (Instance* i : list){
         printObj<Instance>(i);
     }
+
+    printx("Hello world {} world hello!", 5);
 
 
     return 0;

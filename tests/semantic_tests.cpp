@@ -746,3 +746,148 @@ TEST_CASE("Private fn - a private function used internally then imported warns o
     REQUIRE(first != std::string::npos);
     REQUIRE(out.find("is private to its source file", first + 1) == std::string::npos);
 }
+
+// ------------------------------------------------------------
+// `private` on GENERIC free functions (`fn private name<...>`)
+// ------------------------------------------------------------
+// Previously unsupported: tryCaptureFunctionTemplate assumed the name sat immediately after `fn`,
+// so `fn private name<T>(...)` failed to parse as a generic decl at all (a hard "expected '(' after
+// function name" error) even though the ordinary, non-generic `private` grammar already worked.
+// Fixed by (1) letting the capture skip an optional `private` before the name and re-emit it into
+// the captured tokens so the monomorphized instantiation is an ordinary private-flagged
+// FunctionDeclStmt (reusing the existing cross-file warning check verbatim), and (2) recording the
+// template's OWN declaring file (GenericTemplate::sourceFile) and attributing the instantiation's
+// re-parse to it — otherwise every instantiation would attribute to the single entry/root file the
+// whole monomorphization pass runs under, which happens to equal the calling file in the common
+// case and would silently suppress the warning.
+
+TEST_CASE("Private fn - a private generic function is callable within its own file", "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        fn private secret<...Ts>(Ts... args) -> i32 { return 42; }
+        fn main() -> i32 { return secret(1, 2); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - calling a private generic function cross-file warns (not errors)",
+          "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn private secret<...Ts>(Ts... args) -> i32 { return 42; }\n",
+        "fn main() -> i32 { return secret(1, 2); }\n"));
+    REQUIRE_FALSE(result.hadError);                         // warning, not error
+    REQUIRE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - a public generic function called cross-file does not warn",
+          "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn open<...Ts>(Ts... args) -> i32 { return 42; }\n",
+        "fn main() -> i32 { return open(1, 2); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - a private generic function used internally then imported warns only at "
+          "the cross-file site", "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    // The library calls its own private `secret` (same file → silent); the importer calls it
+    // directly (cross-file → one warning).
+    auto result = analyzeString(importingSource(
+        "fn private secret<...Ts>(Ts... args) -> i32 { return 42; }\n"
+        "fn helper() -> i32 { return secret(1, 2); }\n",
+        "fn main() -> i32 { return helper() + secret(3, 4); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    const std::string& out = cap.str();
+    auto first = out.find("is private to its source file");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(out.find("is private to its source file", first + 1) == std::string::npos);
+}
+
+// The four tests above all use a VARIADIC (`<...Ts>`) template — the ONLY place a real fixedCount/
+// declNameIdx shift can matter (see the invariant above: the declaration name moves from token
+// index 1 to index 2 when `private` is injected, and getting that wrong would corrupt the
+// self-rename during pack recursion). A plain `<T>` template's rename logic doesn't key off any
+// index at all (it renames every non-generic-call occurrence unconditionally), so it can't exercise
+// that specific fix — but it's the more common shape of generic function in practice, and nothing
+// upstream (capture, sourceFile threading) is variadic-specific either, so it needs its own check
+// rather than being assumed covered by the pack tests.
+TEST_CASE("Private fn - private applies to a non-variadic generic function too",
+          "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "class Box { mut i32 v; Box(i32 x) { this.v = x; } }\n"
+        "fn private unwrap<T>(T& b) -> i32 { return b.v; }\n",
+        // Box is declared in the LIBRARY only — GG flattens an imported file's declarations into
+        // the same global Program, so redeclaring it here would be a duplicate-class error.
+        "fn main() -> i32 { mut Box b = Box(7); return unwrap(b); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - a non-variadic private generic function is callable within its own file",
+          "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Box { mut i32 v; Box(i32 x) { this.v = x; } }
+        fn private unwrap<T>(T& b) -> i32 { return b.v; }
+        fn main() -> i32 { mut Box b = Box(7); return unwrap(b); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+// The inferred call above (`unwrap(b)`, no explicit `<...>`) and an EXPLICIT `unwrap<Box>(b)` call
+// reach the private-function check through genuinely different parser code paths
+// (`inferGenericTypeArgs` vs. the explicit `name<Targs>(args)` branch in Parser_Expr.cpp) — both
+// need to record `resolvedCallee`/mangle to the same instantiation for the semantic check to see a
+// `FunctionOverload` at all, so this isn't guaranteed by the inferred-call test alone.
+TEST_CASE("Private fn - an EXPLICIT <Targs> call to a private generic function warns cross-file too",
+          "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "class Box { mut i32 v; Box(i32 x) { this.v = x; } }\n"
+        "fn private unwrap<T>(T& b) -> i32 { return b.v; }\n",
+        "fn main() -> i32 { mut Box b = Box(7); return unwrap<Box>(b); }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE(cap.contains("is private to its source file"));
+}
+
+// The actual motivating real-world shape (stdlib/io/IO2.gg's printf pair): a bare name has BOTH a
+// public and a private candidate in its overload set. Which one an external call resolves to is a
+// SEPARATE concern (arity/type-driven candidate selection, see the "Generic FREE-FUNCTION overload
+// sets" invariant) — this only checks that whichever candidate a call lands on carries ITS OWN
+// correct isPublic/sourceFile, not the whole set's. Neither test above exercises an overload SET
+// (multiple GenericTemplate candidates sharing a name) at all.
+TEST_CASE("Private fn - an overload set with a public and a private candidate: an external call "
+          "resolving to the PUBLIC one does not warn", "[private][semantic][genoverload]") {
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn myprint<...Ts> (str* fmt, Ts... args) { myprint(fmt, 0, args...); }\n"
+        "fn private myprint<...Ts> (str* fmt, mut i32 cursor, Ts... args) {\n"
+        "    match args { () -> { } (x:xs) -> { myprint(fmt, cursor + 1, xs...); } }\n"
+        "}\n",
+        "fn main() -> i32 { str s = \"x\"; myprint(s, 1); return 0; }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("is private to its source file"));
+}
+
+TEST_CASE("Private fn - an overload set with a public and a private candidate: an external call "
+          "that resolves to the PRIVATE one warns", "[private][semantic][genoverload]") {
+    // Same library as above, but 3 substitution values — the documented residual overload-selection
+    // ambiguity (see the "Generic FREE-FUNCTION overload sets" invariant: 2+ substitution values
+    // whose first also matches the cursor's i32 type) still misroutes this external call into the
+    // private candidate. `private` at least now surfaces that as a warning instead of silence.
+    StderrCapture cap;
+    auto result = analyzeString(importingSource(
+        "fn myprint<...Ts> (str* fmt, Ts... args) { myprint(fmt, 0, args...); }\n"
+        "fn private myprint<...Ts> (str* fmt, mut i32 cursor, Ts... args) {\n"
+        "    match args { () -> { } (x:xs) -> { myprint(fmt, cursor + 1, xs...); } }\n"
+        "}\n",
+        "fn main() -> i32 { str s = \"x\"; myprint(s, 1, 2, 3); return 0; }\n"));
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE(cap.contains("is private to its source file"));
+}

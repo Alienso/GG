@@ -341,3 +341,90 @@ TEST_CASE("Module - a declaration's own name is never hijacked by an import of t
     REQUIRE(body.find("@a.f(") != std::string::npos);
     REQUIRE(body.find("@b.f(") == std::string::npos);
 }
+
+// ------------------------------------------------------------
+// Wildcard imports — `import a.b.*;`
+// ------------------------------------------------------------
+// Java-style: binds every top-level member (types + free functions) declared DIRECTLY in that
+// module, exactly as if each had its own `import a.b.Name;` line. Non-recursive — a submodule
+// `a.b.c` is a distinct registry key and is never pulled in by a wildcard on `a.b`.
+
+TEST_CASE("Module - a wildcard import binds every member of the module", "[module]") {
+    writeIn("gg_mod_wildcard", "lib.gg", R"(
+        module a.b;
+        fn twice(i32 n) -> i32 { return n * 2; }
+        class Widget { mut i32 x; Widget(i32 v) { this.x = v; } fn get() -> i32 { return this.x; } }
+    )");
+    std::string root = writeIn("gg_mod_wildcard", "main.gg", R"(
+        import "lib.gg";
+        import a.b.*;
+        fn main() -> i32 {
+            Widget w(4);
+            return twice(w.get()) - 8;
+        }
+    )");
+
+    ImportResolver resolver;
+    Program program = resolver.resolve(root);
+    SemanticAnalyzer analyzer;
+    SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+    REQUIRE_FALSE(sem.hadError);
+
+    CodeGen cg;
+    IRModule ir = cg.generate(program, sem, defaultTestOptions());
+    std::ostringstream out; IRPrinter{}.print(ir, out);
+    std::string s = out.str();
+    REQUIRE(s.find("@a.b.twice(")      != std::string::npos);
+    REQUIRE(s.find("%a.b.Widget = type") != std::string::npos);
+}
+
+TEST_CASE("Module - a wildcard import does not pull in a submodule's members", "[module]") {
+    // `a.b.*` must bind only a.b's OWN members, never anything declared in a.b.c — a submodule is
+    // a distinct registry key, not a nested namespace.
+    writeIn("gg_mod_wildcard_nonrecursive", "sub.gg", "module a.b.c;\nfn deep() -> i32 { return 99; }");
+    writeIn("gg_mod_wildcard_nonrecursive", "lib.gg", "module a.b;\nfn shallow() -> i32 { return 1; }");
+    std::string root = writeIn("gg_mod_wildcard_nonrecursive", "main.gg", R"(
+        import "sub.gg";
+        import "lib.gg";
+        import a.b.*;
+        fn main() -> i32 { return shallow() + deep(); }   // `deep` is not bound by `a.b.*`
+    )");
+
+    StderrCapture cap;
+    bool errored = false;
+    try {
+        ImportResolver resolver;
+        Program program = resolver.resolve(root);
+        SemanticAnalyzer analyzer;
+        SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+        errored = sem.hadError;
+    } catch (const CompileError&) {
+        errored = true;
+    }
+    REQUIRE(errored);   // `deep` is an unbound bare name — a.b.c is not pulled in by a.b.*
+}
+
+TEST_CASE("Module - a wildcard import colliding with another import's name is ambiguous", "[module][semantic]") {
+    writeIn("gg_mod_wildcard_ambig", "a.gg", "module a;\nfn f() -> i32 { return 1; }");
+    writeIn("gg_mod_wildcard_ambig", "b.gg", "module b;\nfn f() -> i32 { return 2; }");
+    std::string root = writeIn("gg_mod_wildcard_ambig", "main.gg", R"(
+        import "a.gg";
+        import "b.gg";
+        import a.*;
+        import b.f;
+        fn main() -> i32 { return f(); }   // ambiguous: a.* also bound `f`
+    )");
+
+    StderrCapture cap;
+    bool errored = false;
+    try {
+        ImportResolver resolver;
+        Program program = resolver.resolve(root);
+        SemanticAnalyzer analyzer;
+        SemanticResult sem = analyzer.analyze(program, root, defaultTestOptions());
+        errored = sem.hadError;
+    } catch (const CompileError&) {
+        errored = true;
+    }
+    REQUIRE(errored);
+}

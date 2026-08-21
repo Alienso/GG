@@ -3,6 +3,7 @@
 //
 
 #include "Parser.h"
+#include "Parser_internal.h"   // isTypeKeyword
 #include <iostream>
 
 
@@ -568,6 +569,48 @@ Expr Parser::parsePostfix() {
                     }
                 }
 
+                // Generic-method call WITHOUT explicit `<…>` (`recv.m(args)` in place of
+                // `recv.m<T>(args)`): infer the method's own type parameter(s) from the call
+                // arguments, the same way a free generic function's argument-driven inference
+                // works (inferGenericTypeArgs). Only positional calls with no spread are
+                // inference-matched (mirrors the variadic-method-call check above and the
+                // documented free-function limitation — a named/reordered arg would break the
+                // positional-index assumption the param-list scan relies on). On failure this
+                // falls through to the ordinary method call below with NO error — so a same-named
+                // ordinary method, or a call shape inference can't handle, still resolves/errors
+                // exactly as it did before this feature existed.
+                if (gen_->genericMethodNames.count(member.lexeme)) {
+                    std::string recvClass;
+                    if (const auto* id = std::get_if<IdentifierExpr>(expression.node.get())) {
+                        if (classNames.count(id->name.lexeme) || gen_->classNames.count(id->name.lexeme))
+                            recvClass = id->name.lexeme;                     // static form `Class::m(...)`
+                        else if (auto t = deduceArgTypeToken(&expression)) recvClass = genericArgBaseName(*t);
+                    } else if (auto t = deduceArgTypeToken(&expression)) {
+                        recvClass = genericArgBaseName(*t);
+                    }
+                    bool positional = true;
+                    for (const Token& an : argNames) if (!an.lexeme.empty()) { positional = false; break; }
+                    bool hasSpread = false;
+                    for (bool s : argSpreads) if (s) { hasSpread = true; break; }
+                    std::vector<std::vector<Token>> inferredArgs;
+                    // methodTemplates is keyed by the owner EXACTLY as passed to
+                    // captureMethodTemplate — unmangled for a plain class, but the MANGLED name
+                    // (e.g. "Array$i32") for a method on a generic class, since that capture only
+                    // ever runs during the class's post-monomorphization re-parse. So the lookup
+                    // must use `recvClass` (full), not a `$`-stripped base name.
+                    if (!recvClass.empty() && positional && !hasSpread
+                        && inferGenericMethodTypeArgs(recvClass, member.lexeme, args, inferredArgs)) {
+                        std::string mangledMethod = mangleInstantiation(member.lexeme, inferredArgs);
+                        recordMethodInstantiation(recvClass, member.lexeme, mangledMethod,
+                                                  std::move(inferredArgs));
+                        expression = makeExpr(MethodCallExpr{
+                            box(std::move(expression)),
+                            Token{ TokenType::IDENTIFIER, mangledMethod, member.line },
+                            std::move(args), std::move(argNames), safe });
+                        continue;
+                    }
+                }
+
                 // A non-variadic method/static call can never itself be pack-bearing (packs are
                 // free-function/variadic-method only) — unconditionally unwrap any spread.
                 for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
@@ -1017,6 +1060,34 @@ Expr Parser::parsePrimary() {
         }
         consume(TokenType::RIGHT_BRACE, "expected '}' after brace-initializer arguments");
         return makeExpr(BraceInitExpr{ std::move(args), brace });
+    }
+
+    // A primitive-type keyword immediately followed by '(' is a cast-call: `i32(x)` means `x as i32`.
+    // This is what gives the generic "construct T from its args" idiom (`T(args...)` — the flagship
+    // Array<T>::emplaceBack/emplace pattern, and the general bare-constructor-call shape used
+    // throughout this parser) a sensible meaning when T monomorphizes to a PRIMITIVE rather than a
+    // class: a class instantiates via an ordinary constructor call, but a primitive has no
+    // constructor, so casting its single argument to it is the only meaning that makes sense. Must
+    // be checked before the catch-all `isTypeName()` error below, which would otherwise reject this
+    // exact shape unconditionally (a bare type keyword was previously always a hard error in
+    // expression position — this carves out only the "keyword directly followed by '('" shape,
+    // never reached by either of that error's own documented causes, so it's purely additive).
+    if (isTypeKeyword(peek().type) && peekNext().type == TokenType::LEFT_PAREN) {
+        Token targetType = advance();   // the primitive keyword
+        advance();                       // consume '('
+        // Parse like any other call's argument list (not a hand-rolled single-expression parse) so
+        // a spread — `T(args...)`, T monomorphized to a primitive, from the pack-forwarding idiom
+        // that motivates this whole cast-call shape — unwraps exactly like it already does for an
+        // ordinary bare constructor call (a primitive cast is never itself pack-bearing).
+        std::vector<Token> castNames;
+        std::vector<bool>  castSpreads;
+        std::vector<std::unique_ptr<Expr>> castArgs =
+            parseCallArgs(castNames, TokenType::RIGHT_PAREN, /*allowNames=*/false, &castSpreads);
+        for (bool s : castSpreads) if (s) { unwrapSpreadArgs(castArgs, castNames, castSpreads); break; }
+        if (castArgs.size() != 1)
+            throw error(targetType, "'" + targetType.lexeme + "(...)' casts a single value; got "
+                        + std::to_string(castArgs.size()) + " argument(s)");
+        return makeExpr(CastExpr{ std::move(castArgs.front()), targetType });
     }
 
     // A bare type keyword (i32, f64, ptr, …) where a value is expected means a type name has

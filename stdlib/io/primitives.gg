@@ -54,7 +54,12 @@ fn print(char c) {
 
 //TODO temp
 fn print(String& s) {
-    fputs(s.cStr(), gg_stdout());
+    mut u64 i = 0;
+    u64 n = s.byteLength();
+    while (i < n) {
+        putchar(s.byteAt(i) as i32);
+        i = i + 1;
+    }
 }
 
 

@@ -908,9 +908,17 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
         return newVal;
     }
 
-    // Value-object copy assignment: deep-copy via clone (handles value = value
-    // and value = ref). clone releases the destination's old reference fields.
+    // Value-object assignment. If semantics determined this is the variable's DEFINING assignment
+    // (nothing live at `ptrName` yet — see SemanticResult::directConstructAssigns), a bare
+    // constructor-call / sret-call RHS constructs directly into the destination, no temp + clone.
+    // Otherwise (a reassignment of an already-live `mut` binding, or a copy-source RHS even on the
+    // defining assignment) falls back to the ordinary copy-assignment lowering: deep-copy via clone
+    // (handles value = value and value = ref); clone releases the destination's old reference fields
+    // first, which is a null-safe no-op on the still-zero-initialized defining-assignment case.
     if (lhsType.kind == TypeKind::Object) {
+        if (directConstructAssigns_ && directConstructAssigns_->count(&assign)
+            && emitObjectDirectInit(*assign.value, ptrName, lhsType.className))
+            return ptrName;
         std::string src = genExpr(*assign.value);   // Object→alloca; Reference→loaded heap ptr
         clonesNeeded_.insert(lhsType.className);
         emit("call void @" + lhsType.className + "_clone(ptr " + ptrName + ", ptr " + src + ")");
@@ -1213,6 +1221,29 @@ Token CodeGen::varDeclTypeToken(const VarDeclExpr& v) const {
     return v.typeName;
 }
 
+// Shared by genVarDecl's object-initializer branch and genAssign's defining-assignment fast path.
+// An sret call result is written straight into `ptrName` (emitSlotCall); a bare constructor-call
+// RHS is invoked directly on `ptrName` (including the "no constructor exists" no-op case for a
+// ctor-less class — the storage is already zero-initialized by the caller). Both are "handled":
+// return true. Any other initializer shape (an existing value/reference to copy) is left entirely
+// unemitted — return false — so the caller falls back to genExpr + @Class_clone.
+bool CodeGen::emitObjectDirectInit(const Expr& init, const std::string& ptrName,
+                                   const std::string& className) {
+    if (emitSlotCall(init, ptrName)) return true;
+    if (const auto* ctorCall = std::get_if<CallExpr>(init.node.get())) {
+        std::string mangledCtor = calleeName(ctorCall, className + "_" + className);
+        auto funcIt = funcParamTypes.find(mangledCtor);
+        if (funcIt != funcParamTypes.end()) {
+            std::string argStr = buildArgString(ctorCall->args, &funcIt->second,
+                                                defaultsFor(mangledCtor), orderFor(ctorCall));
+            emit("call void @" + mangledCtor + "(ptr " + ptrName
+                 + (argStr.empty() ? "" : ", " + argStr) + ")");
+        }
+        return true;
+    }
+    return false;
+}
+
 std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
     const Token typeTok = varDeclTypeToken(varDecl);
     // ---- C-style static local (persistent global) ----
@@ -1416,25 +1447,27 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         // Initializer: a return-slot call (written in place, no copy), a constructor call,
         // or a copy from a value/reference.
         if (varDecl.initializer) {
-            if (emitSlotCall(*varDecl.initializer, ptrName)) {
-                // Result written directly into this variable's storage — nothing to copy.
-            } else if (std::holds_alternative<CallExpr>(*varDecl.initializer->node)) {
-                const auto& ctorCall = std::get<CallExpr>(*varDecl.initializer->node);
-                std::string mangledCtor = calleeName(&ctorCall, className + "_" + className);
-                auto funcIt = funcParamTypes.find(mangledCtor);
-                // No constructor exists (e.g. `C c{}` / `C c()` on a class with no ctor): the
-                // storage is already zero-initialized above, so default-construction is a no-op.
-                if (funcIt != funcParamTypes.end()) {
-                    std::string argStr = buildArgString(ctorCall.args, &funcIt->second,
-                                                        defaultsFor(mangledCtor), orderFor(&ctorCall));
-                    emit("call void @" + mangledCtor + "(ptr " + ptrName
-                         + (argStr.empty() ? "" : ", " + argStr) + ")");
-                }
-            } else {
+            if (!emitObjectDirectInit(*varDecl.initializer, ptrName, className)) {
                 // Copy initialisation: Point p = <value/ref of same class> — deep copy.
                 std::string src = genExpr(*varDecl.initializer);
                 clonesNeeded_.insert(className);
                 emit("call void @" + className + "_clone(ptr " + ptrName + ", ptr " + src + ")");
+            }
+        } else if (resolvedCallee_) {
+            // Bare `ClassName name;`: if the class has a (possibly all-defaulted) zero-arg-callable
+            // constructor, semantics recorded its emitted name under this VarDeclExpr's own address
+            // (see analyzeVarDecl) — auto-invoke it so the class's own invariant-establishing logic
+            // actually runs, instead of leaving the struct merely zero-initialized. Absent ⇒ either
+            // a genuinely ctor-less class (zero-init is already its complete state) or a class with
+            // only non-zero-arg constructors (deferred-init — see genAssign's direct-construct path).
+            auto it = resolvedCallee_->find(&varDecl);
+            if (it != resolvedCallee_->end()) {
+                auto funcIt = funcParamTypes.find(it->second);
+                if (funcIt != funcParamTypes.end()) {
+                    std::string argStr = buildArgString({}, &funcIt->second, defaultsFor(it->second), nullptr);
+                    emit("call void @" + it->second + "(ptr " + ptrName
+                         + (argStr.empty() ? "" : ", " + argStr) + ")");
+                }
             }
         }
 

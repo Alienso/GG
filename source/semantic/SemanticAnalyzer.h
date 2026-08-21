@@ -149,6 +149,13 @@ struct SemanticResult {
     // `@Class_clone(slot, recv)` (sret-shaped), reusing the generated memberwise clone or a user
     // `impl Clone` transparently. Result is a fresh value object.
     std::unordered_map<const void*, std::string> builtinCloneCalls;
+    // Object-typed local variable ASSIGNMENTS (not declarations) that are the variable's single
+    // DEFINING assignment — the binding had no live value at that point (a `mut`/const Object local
+    // declared with no initializer, whose class has a constructor, is no longer definitely-
+    // initialized at declaration; see analyzeVarDecl). Codegen may construct the RHS directly into
+    // the destination storage (skip the temp + memberwise-clone path), exactly like a var-decl
+    // initializer already does — there is no live value there yet to protect.
+    std::unordered_set<const void*> directConstructAssigns;
 };
 
 class SemanticAnalyzer {
@@ -207,6 +214,8 @@ private:
     std::unordered_map<const void*, Token> inferredVarType_;
     // Built-in `obj.clone()` nodes → receiver class name (copied to SemanticResult).
     std::unordered_map<const void*, std::string> builtinCloneCalls_;
+    // Object-local defining-assignment nodes eligible for direct construction (copied to SemanticResult).
+    std::unordered_set<const void*> directConstructAssigns_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;

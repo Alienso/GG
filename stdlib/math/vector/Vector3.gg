@@ -1,5 +1,6 @@
 module std.math.vector;
 
+import std.math.vector.vec2;
 import std.math.Math;
 
 class vec3 {

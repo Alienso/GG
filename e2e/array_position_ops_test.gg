@@ -1,0 +1,87 @@
+// e2e/array_position_ops_test.gg — Array<T>'s position-based operations: push(pos, value) /
+// emplace(pos, args...) (insert, shifting the tail right) and pop(pos) / delete(pos) (remove,
+// shifting the tail left), plus contains(value). Exercised against both a primitive element type
+// (only reachable at all once the primitive cast-call parser fix landed — Array<i32>::emplaceBack
+// previously failed to compile) and a resource-owning element type (a raw ptr<i32> field + a
+// destructor + a Clone impl), to prove the clone-forward-then-destroy shift idiom never leaks or
+// double-frees. Exit 0 = all checks held.
+
+import std.Array;
+
+class Tracked {
+    mut i32 v;
+    mut ptr<i32> buf;
+    static mut i32 liveCount = 0;
+    Tracked(i32 x) {
+        v = x;
+        buf = malloc(sizeof(i32));
+        buf[0] = x;
+        liveCount = liveCount + 1;
+    }
+    ~Tracked() {
+        free(buf);
+        liveCount = liveCount - 1;
+    }
+}
+
+impl Clone for Tracked {
+    fn clone(Tracked& src) mut {
+        free(buf);
+        v = src.v;
+        buf = malloc(sizeof(i32));
+        buf[0] = src.v;
+        liveCount = liveCount + 1;
+    }
+}
+
+fn main() -> i32 {
+    // ---- primitive T ----
+    mut Array<i32> a;
+    a.pushBack(1);
+    a.pushBack(2);
+    a.pushBack(3);          // [1,2,3]
+    a.push(1, 99);          // [1,99,2,3]
+    if (a.size() != 4) { return 1; }
+    if (a.get(0) != 1 || a.get(1) != 99 || a.get(2) != 2 || a.get(3) != 3) { return 2; }
+
+    a.emplace(0, 42);        // [42,1,99,2,3]
+    if (a.size() != 5 || a.get(0) != 42) { return 3; }
+
+    i32 removed = a.pop(2);  // remove 99 -> [42,1,2,3]
+    if (removed != 99 || a.size() != 4) { return 4; }
+    if (a.get(1) != 1 || a.get(2) != 2) { return 5; }
+
+    a.delete(0);             // remove 42 -> [1,2,3]
+    if (a.size() != 3 || a.get(0) != 1) { return 6; }
+
+    if (!a.contains(2)) { return 7; }
+    if (a.contains(999)) { return 8; }
+
+    a.push(3, 7);             // insert at pos == count -> [1,2,3,7]
+    if (a.size() != 4 || a.get(3) != 7) { return 9; }
+    i32 first = a.pop(0);     // pop the very first element -> [2,3,7]
+    if (first != 1 || a.size() != 3) { return 10; }
+
+    // ---- resource-owning T: same operations must not leak / double-free ----
+    {
+        mut Array<Tracked> t;
+        t.emplaceBack(1);
+        t.emplaceBack(2);
+        t.emplaceBack(3);      // [1,2,3], liveCount == 3
+        t.emplace(1, 100);     // [1,100,2,3], liveCount == 4
+        if (Tracked::liveCount != 4) { return 20; }
+
+        Tracked out = t.pop(0);  // removes "1" -> [100,2,3]; out holds an independent copy
+        if (Tracked::liveCount != 4) { return 21; }
+        if (out.v != 1) { return 22; }
+
+        t.delete(0);            // removes "100" -> [2,3], liveCount == 3
+        if (Tracked::liveCount != 3) { return 23; }
+        if (t.size() != 2) { return 24; }
+        if (t.get(0).v != 2 || t.get(1).v != 3) { return 25; }
+    }
+    // `t` and `out` went out of scope — every live Tracked must have been destroyed.
+    if (Tracked::liveCount != 0) { return 30; }
+
+    return 0;
+}

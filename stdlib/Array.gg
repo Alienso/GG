@@ -1,25 +1,9 @@
-// stdlib/Array.gg — a growable array (like C++'s std::vector), generic over the
-// element type T.
-//
-// Storage is a single heap buffer of `T` values that grows geometrically (doubling)
-// as elements are pushed. `[]` reads/writes elements in place via the `Index` trait;
-// `get(i)` hands back a `T*` borrow, so element access is zero-copy.
-//
-// Elements are stored BY VALUE and deep-copied into the buffer (clone) on push/set, and
-// destroyed exactly once on pop/clear/scope-exit. Works for primitives (`Array<i32>`) and for
-// value objects whose fields are primitive / `Class&` / enum / embedded value objects
-// (`Array<Point>`). A value object that owns a raw buffer (e.g. `String`, or a nested `Array`)
-// is rejected — memberwise clone is shallow over a raw pointer and would double-free.
-//
-// The buffer and its size/capacity are PRIVATE — the interface never exposes a `ptr`.
-// Requires --unsafe-ptr for the internal `ptr<T>` buffer + `destroy` (compile.ps1 passes it).
-
 module std;
 
 import std.crt;
 
 class Array<T> {
-    private mut ptr<T> data;   // owned buffer of `cap` slots
+    private mut ptr<T> data;
     private mut u64    count;  // number of elements in use
     private mut u64    cap;    // number of slots allocated
 
@@ -49,10 +33,20 @@ class Array<T> {
         return count == 0;
     }
 
-    // ---- mutators ----
+    // Whether any element equals `value`. Comparison is plain `==`, so it follows T's own equality
+    // rules: an `Eq` impl if T has one, else address identity for a class without one, else the
+    // built-in numeric/enum-identity rules for a primitive/enum T.
+    fn contains(T* value) -> bool {
+        mut u64 i = 0;
+        while (i < count) {
+            if (data[i] == value) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
 
-    // Append a copy of `value` to the end (deep-cloned for objects), growing if full.
-    fn push(T* value) mut {
+    // Append a copy of `value` to the end
+    fn pushBack(T* value) mut {
         if (count == cap) {
             grow();
         }
@@ -60,6 +54,7 @@ class Array<T> {
         count = count + 1;
     }
 
+    // Append a new value to the end (constructed in place)
     fn emplaceBack<...Ts> (Ts... args) mut {
         if (count == cap) {
             grow();
@@ -68,14 +63,84 @@ class Array<T> {
         count++;
     }
 
-    // Remove and return the last element. The caller must ensure the array is not empty (there is
-    // no exception mechanism to signal underflow). The element is cloned out to the caller and the
-    // buffer copy destroyed — ownership transfer, refcount preserved.
-    fn pop() mut -> T out {
+    // Add a copy of `value` at position pos, shifting elements [pos, count) one slot to the right.
+    fn push(i32 pos, T* value) mut {
+        if (pos < 0 || (pos as u64) > count) { abort(); }
+        if (count == cap) {
+            grow();
+        }
+        mut u64 target = pos as u64;
+        mut u64 i = count;
+        // Shift the tail right one slot at a time: clone the element forward into the freshly
+        // grown/still-unused slot, then destroy the now-duplicated source so its old slot is
+        // "empty" again for the next iteration (mirrors popBack's clone-out-then-destroy transfer).
+        while (i > target) {
+            data[i] = data[i - 1];
+            destroy(data[i - 1]);
+            i = i - 1;
+        }
+        data[pos] = value;
+        count = count + 1;
+    }
+
+    fn pushAll<U: Iterable>(U collection) mut {
+        for (T* elem : collection) { pushBack(elem); }
+    }
+
+    // Add a new value to position pos (constructed in place), shifting elements [pos, count) right.
+    fn emplace<...Ts> (i32 pos, Ts... args) mut {
+        if (pos < 0 || (pos as u64) > count) { abort(); }
+        if (count == cap) {
+            grow();
+        }
+        mut u64 target = pos as u64;
+        mut u64 i = count;
+        while (i > target) {
+            data[i] = data[i - 1];
+            destroy(data[i - 1]);
+            i = i - 1;
+        }
+        data[pos] = T(args...);
+        count++;
+    }
+
+    // Remove and return the last element.
+    fn popBack() mut -> T out {
+        if (count == 0){
+            abort();
+        }
         count = count - 1;
         out = data[count];
         destroy(data[count]);
-        return out;
+    }
+
+    // Remove and return the element at position pos, shifting elements (pos, count) one slot left.
+    fn pop(i32 pos) mut -> T out {
+        if (pos < 0 || (pos as u64) >= count) { abort(); }
+        mut u64 target = pos as u64;
+        out = data[target];        // clone the removed value out into the return slot
+        destroy(data[target]);     // release the original now that `out` holds an independent copy
+        mut u64 i = target;
+        while (i + 1 < count) {
+            data[i] = data[i + 1];
+            destroy(data[i + 1]);
+            i = i + 1;
+        }
+        count = count - 1;
+    }
+
+    // Remove the element at position pos (destroyed, not returned), shifting the tail left.
+    fn delete(i32 pos) mut {
+        if (pos < 0 || (pos as u64) >= count) { abort(); }
+        mut u64 target = pos as u64;
+        destroy(data[target]);
+        mut u64 i = target;
+        while (i + 1 < count) {
+            data[i] = data[i + 1];
+            destroy(data[i + 1]);
+            i = i + 1;
+        }
+        count = count - 1;
     }
 
     // Destroy all elements (retains the allocated capacity).
@@ -85,7 +150,7 @@ class Array<T> {
         count = 0;
     }
 
-    // Ensure the buffer can hold at least `minCap` elements without reallocating.
+    // Reserve memory for minCap elements
     fn reserve(u64 minCap) mut {
         if (minCap > cap) {
             cap  = minCap;
@@ -93,8 +158,7 @@ class Array<T> {
         }
     }
 
-    // Double the capacity (used when a push overflows the buffer). A byte-move `realloc` is safe:
-    // GG value objects are trivially relocatable (no interior self-pointers).
+    // Double the capacity (used when a push overflows the buffer).
     fn private grow() mut {
         cap  = cap * 2;
         data = realloc(data, cap * sizeof(T));
@@ -102,63 +166,40 @@ class Array<T> {
 }
 
 
-// A forward cursor holding a NON-OWNING BORROW of the Array plus an index. It reads the Array's length
-// and elements LIVE through the borrow (`arr.size()` / `arr.get(pos)`), never a snapshot of the buffer
-// pointer — so a `push`/`grow()` that reallocates the buffer DURING iteration is harmless: `next()`
-// always goes through the collection's current buffer. (With a snapshotted `ptr<T>`, a mid-iteration
-// realloc would free the old buffer and leave the cursor dangling.)
-//
-// The borrow field requires --unsafe-ptr (a borrow's lifetime is the programmer's responsibility, like
-// any raw `ptr`). It is safe here because a `for`-loop cursor never outlives the collection it views.
-// A borrow is non-owning, so the cursor needs no destructor and does no refcount traffic. The field is
-// package-visible so `iter()` can populate a fresh cursor in place (no heap allocation per loop).
+
 class ArrayIter<T> {
-    mut Array<T>* arr;   // non-owning borrow of the collection (read live — realloc-safe)
-    mut u64       pos;   // cursor
+    mut Array<T>* arr;
+    mut i32       pos;
 }
 
-// The Iterator contract for the cursor: `hasNext()` + `next() -> T*` (a zero-copy borrow of the
-// current element). Reads go through the live Array, so the buffer may move between steps.
 impl <T> Iterator for ArrayIter<T> {
     fn hasNext() -> bool { return pos < arr.size(); }
     fn next() mut -> T* {
-        T* e = arr.get(pos as i32);
+        T* e = arr.get(pos);
         pos = pos + 1;
         return e;
     }
 }
 
-// `Array<T>` is iterable: `iter()` produces a fresh forward cursor borrowing `this`. This is what makes
-// `for (T* x : arr)` legal — the range loop requires the collection to implement `Iterable`. Each call
-// returns an independent cursor (so loops are re-runnable and nestable), built IN PLACE in the return
-// slot — a stack value object, no heap allocation per loop.
 impl <T> Iterable for Array<T> {
     fn iter() -> ArrayIter<T> it {
         it.arr = this;
         it.pos = 0;
-        return it;
     }
 }
 
 
-// `arr[i]` (read) → get; `arr[i] = v` (write) → set. No bounds check, like
-// std::vector::operator[].
 impl <T> Index for Array<T> {
     fn get(i32 i) -> T* {
+        if (i < 0 || i > count) abort();
         return data[i];
     }
-    // Overwrite a LIVE element: destroy the old one, then construct the new one in place.
     fn set(i32 i, T* value) mut {
         destroy(data[i]);
         data[i] = value;
     }
 }
 
-// Deep copy — replaces the (unsafe, shallow) generated clone that would alias the buffer. `this` is
-// the destination; release its current contents first (a no-op on a freshly zeroed slot where
-// count=0/data=null), then own a fresh buffer holding a clone of every element. Each element write
-// routes through `T`'s own clone, so it is recursive — `Array<String>`, `Array<Array<Point>>`, … all
-// deep-copy correctly. Enables safe value copies and nesting.
 impl <T> Clone for Array<T> {
     fn clone(Array<T>& src) mut {
         mut u64 i = 0;

@@ -102,6 +102,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     resolvedCallee.clear();
     callArgOrder_.clear();
     inferredVarType_.clear();
+    directConstructAssigns_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
     stdlibDir_        = options.stdlibDir;
@@ -133,7 +134,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
                           std::move(structuralValueCmp_), std::move(eqImpls),
                           std::move(callableCalls_), std::move(braceInitClass_),
                           std::move(callArgOrder_), std::move(inferredVarType_),
-                          std::move(builtinCloneCalls_) };
+                          std::move(builtinCloneCalls_), std::move(directConstructAssigns_) };
 }
 
 // ============================================================

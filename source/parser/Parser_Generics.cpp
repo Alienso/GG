@@ -915,34 +915,9 @@ Parser::CandidateOutcome Parser::selectTemplateCandidate(
     return CandidateOutcome::Ambiguous;
 }
 
-bool Parser::inferGenericTypeArgs(const std::string& fnName,
-                                  const std::vector<std::unique_ptr<Expr>>& args,
-                                  std::vector<std::vector<Token>>& out,
-                                  size_t& outCandidateIndex) {
-    auto it = gen_->templates.find(fnName);
-    if (it == gen_->templates.end() || it->second.empty()) return false;
-    const std::vector<GenericTemplate>& candidates = it->second;
-
-    size_t chosen;
-    if (candidates.size() == 1) {
-        chosen = 0;   // fast path: byte-identical to pre-overload-set behavior
-    } else {
-        std::vector<size_t> nonPack;
-        for (size_t i = 0; i < candidates.size(); ++i)
-            if (candidates[i].isPack.empty() || !candidates[i].isPack.back()) nonPack.push_back(i);
-        if (nonPack.empty()) return false;
-        size_t idx;
-        CandidateOutcome outcome = selectTemplateCandidate(candidates, nonPack, std::nullopt,
-                                                           args, /*trailingSpread=*/false,
-                                                           gen_->ordinaryFuncNames.count(fnName) > 0, idx);
-        if (outcome == CandidateOutcome::NoMatch) return false;
-        if (outcome == CandidateOutcome::Ambiguous)
-            throw error(previous(), "ambiguous call to generic function '" + fnName
-                        + "': multiple overloads match these arguments");
-        chosen = idx;
-    }
-    outCandidateIndex = chosen;
-    const GenericTemplate& tmpl = candidates[chosen];
+bool Parser::inferTypeArgsFromParamList(const GenericTemplate& tmpl,
+                                        const std::vector<std::unique_ptr<Expr>>& args,
+                                        std::vector<std::vector<Token>>& out) const {
     if (tmpl.typeParams.empty()) return false;
     std::unordered_set<std::string> tparams(tmpl.typeParams.begin(), tmpl.typeParams.end());
 
@@ -1017,6 +992,51 @@ bool Parser::inferGenericTypeArgs(const std::string& fnName,
         out.push_back(std::vector<Token>{ Token{ TokenType::IDENTIFIER, base, 0 } });
     }
     return true;
+}
+
+bool Parser::inferGenericTypeArgs(const std::string& fnName,
+                                  const std::vector<std::unique_ptr<Expr>>& args,
+                                  std::vector<std::vector<Token>>& out,
+                                  size_t& outCandidateIndex) {
+    auto it = gen_->templates.find(fnName);
+    if (it == gen_->templates.end() || it->second.empty()) return false;
+    const std::vector<GenericTemplate>& candidates = it->second;
+
+    size_t chosen;
+    if (candidates.size() == 1) {
+        chosen = 0;   // fast path: byte-identical to pre-overload-set behavior
+    } else {
+        std::vector<size_t> nonPack;
+        for (size_t i = 0; i < candidates.size(); ++i)
+            if (candidates[i].isPack.empty() || !candidates[i].isPack.back()) nonPack.push_back(i);
+        if (nonPack.empty()) return false;
+        size_t idx;
+        CandidateOutcome outcome = selectTemplateCandidate(candidates, nonPack, std::nullopt,
+                                                           args, /*trailingSpread=*/false,
+                                                           gen_->ordinaryFuncNames.count(fnName) > 0, idx);
+        if (outcome == CandidateOutcome::NoMatch) return false;
+        if (outcome == CandidateOutcome::Ambiguous)
+            throw error(previous(), "ambiguous call to generic function '" + fnName
+                        + "': multiple overloads match these arguments");
+        chosen = idx;
+    }
+    outCandidateIndex = chosen;
+    return inferTypeArgsFromParamList(candidates[chosen], args, out);
+}
+
+// Generic-METHOD counterpart of inferGenericTypeArgs. Methods have no overload-set/candidate-
+// selection step to run first (one template per Owner::method key — see
+// GenericRegistry::methodTemplates), so this is just a lookup followed by the shared param-list scan.
+bool Parser::inferGenericMethodTypeArgs(const std::string& ownerClassBase, const std::string& methodName,
+                                        const std::vector<std::unique_ptr<Expr>>& args,
+                                        std::vector<std::vector<Token>>& out) const {
+    auto it = gen_->methodTemplates.find(ownerClassBase + "::" + methodName);
+    if (it == gen_->methodTemplates.end()) return false;
+    const GenericTemplate& tmpl = it->second;
+    // A variadic (pack) method is inferred through its own dedicated call-site path
+    // (deduceVariadicMethodInstantiation, which also handles a trailing spread) — never here.
+    if (!tmpl.isPack.empty() && tmpl.isPack.back()) return false;
+    return inferTypeArgsFromParamList(tmpl, args, out);
 }
 
 // ---- Variadic packs ----

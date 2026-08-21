@@ -820,3 +820,152 @@ TEST_CASE("Const - single defining assignment lowers to a store", "[mut][const][
     )");
     REQUIRE(ir.find("store i32 7") != std::string::npos);
 }
+
+// ============================================================
+// Definite initialization for Object (class) locals — a bare `ClassName name;` used to be
+// unconditionally treated as definitely-initialized the moment its struct was zero-initialized,
+// regardless of whether the class even has a constructor. That let a method call run on an object
+// whose constructor never executed (e.g. Array<T>'s ctor, which sets up cap/data) — a real
+// heap-corruption bug. Now: a class with NO constructor, or one with a constructor callable with
+// zero arguments, is unaffected (auto-invoked at declaration — see the codegen tests below); a
+// class whose constructor(s) all require at least one argument is treated like a primitive —
+// deferred init, single defining assignment required before any use, which incidentally also
+// enables picking a different constructor per branch with no default-construction overhead.
+// ============================================================
+
+TEST_CASE("Const - a ctor-less class's bare declaration is unaffected", "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; mut i32 y; }
+        fn main() -> i32 {
+            mut Point p;
+            p.x = 5;
+            return p.x;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Const - a class with a zero-arg constructor is usable immediately after a bare declaration",
+          "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget() { v = 7; } }
+        fn main() -> i32 { Widget w; return w.v; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Const - a class with ONLY parameterized constructors requires assignment before use",
+          "[mut][const][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget(i32 x) { v = x; } }
+        fn main() -> i32 { Widget w; return w.v; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
+}
+
+TEST_CASE("Const - a constructor with an all-defaulted param list counts as zero-arg-callable",
+          "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget(i32 x = 3) { v = x; } }
+        fn main() -> i32 { Widget w; return w.v; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Const - deferred object init allows picking a different constructor per branch",
+          "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget {
+            mut i32 v;
+            Widget(i32 x) { v = x; }
+            Widget(char c) { v = c as i32; }
+        }
+        fn pick(i32 cond) -> i32 {
+            mut Widget w;
+            if (cond > 0) { w = Widget(1); } else { w = Widget('a'); }
+            return w.v;
+        }
+        fn main() -> i32 { return pick(1); }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Const - a genuine copy on an object's defining assignment is still a clean Clone error",
+          "[mut][const][semantic]") {
+    // Even though `b`'s defining assignment has no OLD value to leak, copying FROM an existing
+    // raw-ptr-owning object still aliases the two independently-destroyed buffers.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        extern malloc(u64 size) -> ptr;
+        extern free(ptr p);
+        class Buf {
+            mut ptr<i32> data;
+            Buf(i32 s) { data = malloc(16); }
+            ~Buf() { free(data); }
+        }
+        fn main() -> i32 {
+            mut Buf a(1);
+            mut Buf b;
+            b = a;
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("impl Clone for Buf"));
+}
+
+TEST_CASE("Const - a bare declaration for a zero-arg-ctor class auto-invokes it", "[mut][const][codegen]") {
+    std::string ir = codegenString(R"(
+        class Widget { mut i32 v; Widget() { v = 7; } }
+        fn main() -> i32 { Widget w; return w.v; }
+    )");
+    REQUIRE(ir.find("call void @Widget_Widget(ptr ") != std::string::npos);
+}
+
+TEST_CASE("Const - a ctor-less class's bare declaration emits no constructor call",
+          "[mut][const][codegen]") {
+    std::string ir = codegenString(R"(
+        class Point { mut i32 x; }
+        fn main() -> i32 { mut Point p; p.x = 5; return p.x; }
+    )");
+    REQUIRE(ir.find("call void @Point_Point(") == std::string::npos);
+}
+
+TEST_CASE("Const - the defining assignment of a deferred-init object constructs directly, no clone",
+          "[mut][const][codegen]") {
+    std::string ir = codegenString(R"(
+        class Widget {
+            mut i32 v;
+            Widget(i32 x) { v = x; }
+            Widget(char c) { v = c as i32; }
+        }
+        fn pick(i32 cond) -> i32 {
+            mut Widget w;
+            if (cond > 0) { w = Widget(1); } else { w = Widget('a'); }
+            return w.v;
+        }
+        fn main() -> i32 { return pick(1); }
+    )");
+    REQUIRE(ir.find("call void @Widget_Widget$i32$ret$void(ptr ") != std::string::npos);
+    REQUIRE(ir.find("call void @Widget_Widget$char$ret$void(ptr ") != std::string::npos);
+    REQUIRE(ir.find("@Widget_clone") == std::string::npos);
+}
+
+TEST_CASE("Const - a reassignment of an already-initialized deferred-init object still clones",
+          "[mut][const][codegen]") {
+    // Only the DEFINING (first) assignment gets the direct-construct fast path; a subsequent
+    // reassignment of the same mut binding must go through the ordinary clone lowering (there is a
+    // live value there that a direct construct would silently leak).
+    std::string ir = codegenString(R"(
+        class Widget { mut i32 v; Widget(i32 x) { v = x; } }
+        fn main() -> i32 {
+            mut Widget w;
+            w = Widget(1);
+            w = Widget(2);
+            return w.v;
+        }
+    )");
+    REQUIRE(ir.find("@Widget_clone") != std::string::npos);
+}

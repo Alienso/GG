@@ -1,0 +1,35 @@
+// e2e/generic_method_infer_test.gg — argument-driven type-argument DEDUCTION for a generic-METHOD
+// call written WITHOUT explicit `<T>` (`recv.m(args)` in place of `recv.m<T>(args)`), the method
+// counterpart of the free-function inference in e2e/generic_infer_test.gg. Exercises: instance form,
+// static form, dedup against an equivalent explicit-`<T>` call, and a `this`-receiver inferred call.
+// Exit 0 = all checks held.
+
+class Box {
+    mut i32 v;
+    Box(i32 x) { v = x; }
+    fn identity<T>(T& b) -> i32 { return b.v; }            // instance generic method, T inferred
+    fn static of<T>(T& b) -> i32 { return b.v + 1000; }    // static generic method, T inferred
+    fn viaThis(i32 n) -> i32 {
+        Box tmp(n);
+        return this.identity(tmp);                          // this-receiver, inferred
+    }
+}
+
+fn main() -> i32 {
+    Box a(1);
+    Box other(9);
+
+    i32 x = a.identity(other);          // inferred T=Box, no explicit <Box> -> 9
+    if (x != 9) { return 11; }
+
+    i32 y = a.identity<Box>(other);     // explicit form, same instantiation -> 9
+    if (y != 9) { return 12; }
+
+    i32 s = Box::of(other);             // static form, inferred -> 1009
+    if (s != 1009) { return 13; }
+
+    i32 t = a.viaThis(4);               // this-receiver, inferred -> 4
+    if (t != 4) { return 14; }
+
+    return 0;
+}

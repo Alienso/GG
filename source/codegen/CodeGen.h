@@ -115,6 +115,8 @@ private:
     const std::unordered_map<const void*, std::string>* braceInitClass_ = nullptr;
     // Built-in `obj.clone()` nodes → receiver class name; lowers to `@Class_clone(slot, recv)`.
     const std::unordered_map<const void*, std::string>* builtinCloneCalls_ = nullptr;
+    // Object-local defining-assignment nodes eligible for direct construction (no temp + clone).
+    const std::unordered_set<const void*>* directConstructAssigns_ = nullptr;
     // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
     const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
     // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
@@ -324,6 +326,14 @@ private:
     // If `init` is a call to a return-slot (sret) function/method, emit it writing the result
     // directly into `slotPtr` (no copy) and return true; otherwise return false (no emission).
     bool emitSlotCall(const Expr& init, const std::string& slotPtr);
+    // Shared by genVarDecl's object-initializer branch and genAssign's defining-assignment fast
+    // path: try to construct `init` directly into `ptrName` (of class `className`) with no
+    // temporary + clone. Handles an sret call result (emitSlotCall) and a bare constructor-call
+    // RHS (invoked directly on `ptrName`, including the "no constructor exists" no-op case for a
+    // ctor-less class). Returns false (nothing emitted) for any other initializer shape — a copy
+    // from an existing value/reference — so the caller falls back to genExpr + @Class_clone.
+    bool emitObjectDirectInit(const Expr& init, const std::string& ptrName,
+                              const std::string& className);
     // Emit `call void @fn(ptr slot[, ptr recv], args...)`. `recvPtr` empty ⇒ no receiver.
     void emitSretCall(const std::string& fn, const std::vector<std::unique_ptr<Expr>>& args,
                       const std::string& slotPtr, const std::string& recvPtr,

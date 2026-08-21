@@ -1405,6 +1405,13 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
         return sym->type;
     }
 
+    // Captured BEFORE the const-single-assignment check below (which doesn't mutate it) — records
+    // whether this occurrence is the variable's DEFINING assignment (nothing live there yet). Used
+    // below to let codegen construct an Object RHS directly into the destination, and — for a
+    // ctor-having class's bare `ClassName name;` (no longer definitely-initialized at declaration,
+    // see analyzeVarDecl) — is exactly the assignment that first establishes the object.
+    bool wasUninitialized = !sym->isInitialized;
+
     // Const bindings permit exactly one defining assignment: allowed only while the
     // variable is not yet initialized. `mut` bindings may be reassigned freely.
     if (!sym->isMutable && sym->isInitialized) {
@@ -1417,12 +1424,42 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
     Type lhsType = sym->type;
     Type rhsType = analyzeWithExpected(*assign.value, lhsType);
     checkCast(rhsType, lhsType, assign.name, "assignment");
-    // Value-object assignment deep-copies (clone) into the storage, so a raw-ptr owner WHOSE DTOR
-    // frees that buffer would alias + double-free without a `Clone` impl. Reject it. (A raw-ptr view
-    // with no destructor — e.g. an iterator — never frees the buffer, so its shallow copy is safe and
-    // rejectUncloneablePtrOwner lets it through.)
-    if (lhsType.kind == TypeKind::Object)
-        rejectUncloneablePtrOwner(lhsType, assign.name);
+    if (lhsType.kind == TypeKind::Object) {
+        // Value-object assignment deep-copies (clone) into the storage, so a raw-ptr owner WHOSE
+        // DTOR frees that buffer would alias/leak without a `Clone` impl. Two INDEPENDENT risks,
+        // either one alone is enough to reject:
+        //   (1) the destination already holds a live value (this is a REASSIGNMENT, not the
+        //       defining assignment) — the generated memberwise clone never releases a raw-ptr
+        //       field (raw ptrs aren't refcounted), so the destination's OLD buffer leaks and its
+        //       new `data` ends up aliasing the RHS's, regardless of whether the RHS itself is a
+        //       fresh construct or a copy;
+        //   (2) the RHS is a genuine COPY SOURCE (an existing object/reference place, still live
+        //       after this assignment) — even on the variable's very first (defining) assignment,
+        //       shallow-copying its raw-ptr field aliases two independently-destroyed owners.
+        // Only when NEITHER applies — the defining assignment AND a fresh constructor-call RHS,
+        // e.g. `mut Buf b; b = Buf(2);` where `Buf` has no zero-arg ctor — is it genuinely safe,
+        // which is exactly the shape the direct-construct optimization below targets.
+        const auto& n = *assign.value->node;
+        bool copySource = std::holds_alternative<IdentifierExpr>(n)
+                       || std::holds_alternative<MemberAccessExpr>(n)
+                       || std::holds_alternative<IndexExpr>(n)
+                       || std::holds_alternative<ThisExpr>(n)
+                       || std::holds_alternative<NewExpr>(n);
+        if (!wasUninitialized || copySource) rejectUncloneablePtrOwner(lhsType, assign.name);
+        // The variable had no live value here yet — codegen may construct the RHS directly into
+        // its storage (skip the temp + memberwise-clone path) instead of the ordinary copy-
+        // assignment lowering below. See CodeGen::emitObjectDirectInit.
+        //
+        // Gated on `loopDepth == 0`: this AST node is visited (and `wasUninitialized` computed)
+        // exactly ONCE by the static analysis pass, but if the assignment sits inside a loop that
+        // runs more than once, the SAME emitted instruction executes repeatedly at runtime — on
+        // iteration 2+ the destination already holds a live value the direct-construct path would
+        // never destroy (a leak on every iteration after the first). Outside any loop, "visited
+        // with wasUninitialized == true" and "executes at most once ever" coincide exactly, so the
+        // optimization is sound. Inside a loop it just conservatively falls back to the always-
+        // correct clone path (a missed optimization, not a correctness gap).
+        if (wasUninitialized && loopDepth == 0) directConstructAssigns_.insert(&assign);
+    }
     // Rebinding a `mut` reference from a read-only reference is a const→mut coercion.
     if (sym->isMutable)
         warnConstToMut(assign.name, *assign.value, lhsType);
@@ -1875,13 +1912,67 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
             warnConstToMut(varDecl.name, *varDecl.initializer, declaredType);
     }
 
+    // A bare `ClassName name;` (no initializer) for an Object type: does the class have a
+    // constructor callable with ZERO arguments (no constructor at all, or an overload every one of
+    // whose params has a default)? If so, record it (`resolvedCallee[&varDecl]`, reusing the exact
+    // same node→mangled-name handoff a real call/new node gets — a VarDeclExpr address never
+    // collides with those) so codegen auto-invokes it, exactly as if the author had written
+    // `ClassName name();` — the class's own invariant-establishing logic (e.g. `Array`'s ctor
+    // setting up cap/data) then actually runs, instead of the bare declaration silently leaving the
+    // struct merely zero-initialized. A genuinely ctor-less class needs no entry (zero-init IS its
+    // complete valid state; emitObjectDirectInit's "no constructor" no-op path already covers a
+    // literal `ClassName()`/`ClassName{}`, and this needs no auto-invocation to match). Two
+    // zero-arg-callable overloads at once is treated the same as "no default" (ambiguous — bail)
+    // rather than guessing.
+    bool objectHasAnyCtor    = false;
+    bool objectHasZeroArgCtor = false;
+    if (elementType.kind == TypeKind::Object && !varDecl.initializer) {
+        auto clsIt = classRegistry.find(elementType.className);
+        if (clsIt != classRegistry.end()) {
+            auto ctorIt = clsIt->second.methods.find(elementType.className);
+            if (ctorIt != clsIt->second.methods.end() && !ctorIt->second.empty()) {
+                objectHasAnyCtor = true;
+                const std::vector<ClassInfo::Method>& set = ctorIt->second;
+                const ClassInfo::Method* zeroArgCtor = nullptr;
+                for (const auto& m : set) {
+                    if (m.numDefaults >= m.paramTypes.size()) {
+                        if (zeroArgCtor) { zeroArgCtor = nullptr; break; }   // ambiguous — bail
+                        zeroArgCtor = &m;
+                    }
+                }
+                if (zeroArgCtor) {
+                    objectHasZeroArgCtor = true;
+                    std::string base = elementType.className + "_" + elementType.className;
+                    resolvedCallee[&varDecl] = set.size() > 1
+                        ? mangleOverload(base, zeroArgCtor->paramTypes, zeroArgCtor->returnType)
+                        : base;
+                }
+            }
+        }
+    }
+
     // Decide whether the variable starts as definitely initialized:
-    //   - explicit initializer present                → yes
-    //   - Object (class value): zero-initialized struct → yes
-    //   - Array: zero-initialized by the runtime       → yes
-    //   - Everything else (primitives, references)     → no (must be assigned before use)
+    //   - explicit initializer present                              → yes
+    //   - Object (class value), no ctor OR a zero-arg-callable one   → yes (zero-init is complete,
+    //                                                                    or codegen auto-invokes it)
+    //   - Object (class value), ctor(s) exist but NONE is zero-arg-  → no — there is no default
+    //     callable                                                     construction available; the
+    //                                                                   bare declaration must be
+    //                                                                   treated like a primitive
+    //                                                                   (assign before use), which
+    //                                                                   in turn lets the FIRST
+    //                                                                   assignment on any reachable
+    //                                                                   path pick whichever
+    //                                                                   constructor fits and
+    //                                                                   construct directly with no
+    //                                                                   overhead — see
+    //                                                                   analyzeAssign's
+    //                                                                   directConstructAssigns_.
+    //   - Array: zero-initialized by the runtime                     → yes
+    //   - Everything else (primitives, references)                   → no (must be assigned before use)
+    bool objectNeedsDeferredInit = objectHasAnyCtor && !objectHasZeroArgCtor;
     bool isInit = varDecl.initializer != nullptr
-               || elementType.kind == TypeKind::Object
+               || (elementType.kind == TypeKind::Object && !objectNeedsDeferredInit)
                || varDecl.arraySize > 0
                || varDecl.isStatic;   // static locals are zero-initialised storage
 

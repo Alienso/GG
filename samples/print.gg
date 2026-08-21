@@ -1,0 +1,79 @@
+import std.math.vector.vec2;
+import std.utility.Pair;
+import std.io.*;
+import std.String;
+import std.utility.List;
+import std.parseI32;
+
+class Instance{
+    i32 x;
+    i32 y;
+
+    static mut i32 nextId = 0;
+    i32 id;
+
+    Instance(i32 x, i32 y){
+        this.x = x;
+        this.y = y;
+
+        this.id = Instance::nextId;
+        nextId++;
+        //print("Instance #"); print(id); println(" created!");
+    }
+
+    ~Instance(){
+        //print("Instance #"); print(id); println(" destroyed!");
+    }
+}
+
+fn main() -> i32 {
+
+    vec2 v1{1, 5.0};
+    vec2 v2{2, 3};
+
+    i32? t = parseI32("56");
+    if (t != null){
+        println(t);
+    }
+
+    Pair<i32, i32> pair1 = {1, 2};
+    print(pair1.first);
+    print(",");
+    println(pair1.second);
+
+    Pair<str, str> pair2 = {"Hello", " World"};
+    print(pair2.first);
+    print(",");
+    println(pair2.second);
+
+    String s1 = {"Hello"};
+    String s2 = {" World"};
+    Pair<String, String> pair3 = {s1, s2};
+    print(pair3.first);
+    print(",");
+    println(pair3.second);
+
+    Instance i1 = {1 , 2};
+    Instance i2 = {3, 4};
+    Pair<Instance, Instance> pair4 = {i1, i2};
+
+    Instance& i3 = new Instance{1,2};
+    Instance& i4 = new Instance{3,4};
+    Pair<Instance&, Instance&> pair5 = {i3, i4};
+
+    printObj<Instance&>(pair5.first);
+    printObj<Instance&>(pair5.second);
+
+    mut List<Instance> list{};
+    list.add(i1);
+    list.add(i2);
+
+    for (Instance* i : list){
+        printObj<Instance>(i);
+    }
+
+    printf("Hello world {} world hello!\n", 5);
+    printf("There are {} vectors in the function. v1.x {}, v1.y {}\n", 2, v1.x ,v1.y);
+
+    return 0;
+}

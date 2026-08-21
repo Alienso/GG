@@ -482,3 +482,121 @@ TEST_CASE("genericmethod - '-> T?' (nullable) is unaffected by the sigil-strip r
     )");
     REQUIRE(ir.find("define ptr @Box$Point.ref_maybe(") != std::string::npos);
 }
+
+// ============================================================
+// Generic-method type-argument DEDUCTION — `recv.m(args)` in place of the previously-required
+// `recv.m<T>(args)`, mirroring the free-function inference of the same shape (see
+// tests/generic_infer_tests.cpp). Reuses the exact same param-list scan (inferTypeArgsFromParamList),
+// just keyed off GenericRegistry::methodTemplates instead of ::templates. v1 limitation, pinned down
+// here rather than left as prose: this ONLY works when the owner is a plain (non-generic) class —
+// methodTemplates for a method ON a generic class (e.g. Array<T>::pushAll) is populated only once
+// that owner class itself has been monomorphized, which happens strictly after the whole program's
+// initial parse — so a same-pass call site can never see it yet. Explicit `<T>` is still required
+// there; inference silently doesn't fire (no error), falling through to the ordinary ("ambiguous"/
+// "no method") ordinary ordinary-call diagnostics, exactly as before this feature existed.
+// ============================================================
+
+TEST_CASE("geninfer - a generic-method call with no explicit <T> infers it from the argument",
+          "[genericmethod][geninfer][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            mut i32 v;
+            Box(i32 x) { v = x; }
+            fn identity<T>(T& b) -> i32 { return b.v; }
+        }
+        fn main() -> i32 {
+            Box a(1);
+            Box other(9);
+            return a.identity(other);   // no '<Box>' — inferred from `other`'s type
+        }
+    )");
+    REQUIRE(ir.find("define i32 @Box_identity$Box(ptr ") != std::string::npos);
+    REQUIRE(ir.find("call i32 @Box_identity$Box(ptr ") != std::string::npos);
+}
+
+TEST_CASE("geninfer - a STATIC generic-method call also infers its type argument",
+          "[genericmethod][geninfer][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            mut i32 v;
+            Box(i32 x) { v = x; }
+            fn static of<T>(T& b) -> i32 { return b.v; }
+        }
+        fn main() -> i32 {
+            Box other(9);
+            return Box::of(other);      // no '<Box>' — inferred, static form
+        }
+    )");
+    REQUIRE(ir.find("define i32 @Box_of$Box(") != std::string::npos);
+    REQUIRE(ir.find("call i32 @Box_of$Box(") != std::string::npos);
+}
+
+TEST_CASE("geninfer - inference deduplicates against an explicit-<T> call to the same instantiation",
+          "[genericmethod][geninfer][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box {
+            mut i32 v;
+            Box(i32 x) { v = x; }
+            fn identity<T>(T& b) -> i32 { return b.v; }
+        }
+        fn main() -> i32 {
+            Box a(1);
+            Box other(9);
+            i32 x = a.identity(other);         // inferred
+            i32 y = a.identity<Box>(other);    // explicit — same instantiation
+            return x + y;
+        }
+    )");
+    size_t first = ir.find("define i32 @Box_identity$Box(");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(ir.find("define i32 @Box_identity$Box(", first + 1) == std::string::npos);   // deduped
+}
+
+TEST_CASE("geninfer - an un-inferable argument (a literal) falls through to the ordinary call, "
+          "not a hard error", "[genericmethod][geninfer][semantic]") {
+    // `identity` has ONLY a generic overload, no ordinary one, so falling through still reports
+    // the pre-existing "no method" diagnostic — unchanged from before this feature existed.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Box { fn identity<T>(T x) -> T { return x; } }
+        fn main() -> i32 { Box b; return b.identity(5); }   // a literal — not inference-matched
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("no method"));
+}
+
+TEST_CASE("geninfer - a named argument is not inference-matched (falls through)",
+          "[genericmethod][geninfer][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Box {
+            mut i32 v;
+            Box(i32 x) { v = x; }
+            fn identity<T>(T& b) -> i32 { return b.v; }
+        }
+        fn main() -> i32 { Box a(1); Box other(9); return a.identity(b: other); }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("no method"));
+}
+
+TEST_CASE("geninfer - v1 limitation: a generic method on a GENERIC owner class still needs explicit "
+          "<T> (its methodTemplates entry doesn't exist yet at the call's parse time)",
+          "[genericmethod][geninfer][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Holder<E> {
+            mut E value;
+            Holder(E v) { value = v; }
+            fn passThrough<U>(U& y) -> i32 { return y; }
+        }
+        class Box { mut i32 v; Box(i32 x) { v = x; } }
+        fn main() -> i32 {
+            Holder<i32> h(1);
+            Box other(9);
+            return h.passThrough(other);   // no '<Box>' — inference can't see Holder$i32's template yet
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("no method"));
+}

@@ -399,6 +399,27 @@ private:
                               const std::vector<std::unique_ptr<Expr>>& args,
                               std::vector<std::vector<Token>>& out,
                               size_t& outCandidateIndex);
+    // Shared step behind inferGenericTypeArgs (called after free-function overload-candidate
+    // selection) AND inferGenericMethodTypeArgs (methods have no candidate-selection step — one
+    // template per Owner::method key). Scans `tmpl`'s raw parameter list for positions whose type
+    // is a bare type parameter (`T`/`T&`/`T*`/`T?`), then reads each type parameter's concrete type
+    // off the matching positional call argument (an in-scope identifier, a `Class(...)`/`Class{...}`
+    // constructor call, or `new Class(...)`). Fills `out` and returns true iff every type parameter
+    // of `tmpl` was deduced.
+    [[nodiscard]] bool inferTypeArgsFromParamList(const GenericTemplate& tmpl,
+                                                  const std::vector<std::unique_ptr<Expr>>& args,
+                                                  std::vector<std::vector<Token>>& out) const;
+    // Generic-METHOD counterpart of inferGenericTypeArgs: infers a generic method's own type
+    // parameter(s) from a call written WITHOUT explicit `<…>` (`recv.m(args)` in place of
+    // `recv.m<T>(args)`). `ownerClassBase` is the receiver's (unmangled) class name, resolved by the
+    // call site exactly as the explicit-`<…>` call already does. Returns false (no error — the
+    // caller falls through to an ordinary method call) when the owner has no such generic template,
+    // the template is a variadic pack (inferred through its own dedicated path instead), or not
+    // every type parameter could be deduced from the argument shapes.
+    [[nodiscard]] bool inferGenericMethodTypeArgs(const std::string& ownerClassBase,
+                                                  const std::string& methodName,
+                                                  const std::vector<std::unique_ptr<Expr>>& args,
+                                                  std::vector<std::vector<Token>>& out) const;
     // ---- Variadic packs ----
     // Best-effort deduce a call argument's TYPE token (proper token kind so it re-parses/mangles
     // correctly): a literal by its default type (int→i32, decimal→f64, string→str, bool, char), an

@@ -41,8 +41,8 @@ fn private printStr(str* s, i32 begin, i32 end){
     if (begin < 0 || begin > end ) { return; }   // empty range (e.g. more args than placeholders) — nothing to print
     u64 base = (s.data as u64) + (begin as u64);
     if (end > (s.len as i32) )
-        fwrite(base as ptr, 1, (s.len - begin) as u64, gg_stdout());
-    else fwrite(base as ptr, 1, (end - begin + 1) as u64, gg_stdout());
+        fwrite(base as ptr, 1 as u64, (s.len - begin) as u64, gg_stdout());
+    else fwrite(base as ptr, 1 as u64, (end - begin + 1) as u64, gg_stdout());
 }
 
 // inclusive [begin, len]

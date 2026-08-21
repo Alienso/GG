@@ -31,6 +31,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->callableCalls_ = &semanticResult.callableCalls;
     this->braceInitClass_ = &semanticResult.braceInitClass;
     this->builtinCloneCalls_ = &semanticResult.builtinCloneCalls;
+    this->directConstructAssigns_ = &semanticResult.directConstructAssigns;
     this->callArgOrder_ = &semanticResult.callArgOrder;
     this->inferredVarType_ = &semanticResult.inferredVarType;
     this->enumRegistry_ = &semanticResult.enumRegistry;

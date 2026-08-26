@@ -48,7 +48,7 @@ fn main() -> i32 {
     if (c9b != 105)                   { return 11; }
 
     // 10. implicit-this named method call inside a method.
-    mut Counter k;
+    mut Counter k();
     k.bump();                          // reset(step:2, base:100) → 102
     if (k.value() != 102)              { return 12; }
 

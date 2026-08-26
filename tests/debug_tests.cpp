@@ -146,9 +146,14 @@ TEST_CASE("Debug - a reference variable is a pointer type", "[debug][codegen]") 
 TEST_CASE("Debug - an imported function is attributed to its own source file", "[debug][codegen]") {
     namespace fs = std::filesystem;
     fs::path dir = fs::temp_directory_path();
-    std::string helperName = "dbg_helper_" + std::to_string(_getpid()) + ".gg";
+#ifdef _WIN32
+    long pid = _getpid();
+#else
+    long pid = getpid();
+#endif
+    std::string helperName = "dbg_helper_" + std::to_string(pid) + ".gg";
     fs::path helperPath = dir / helperName;
-    fs::path mainPath   = dir / ("dbg_main_" + std::to_string(_getpid()) + ".gg");
+    fs::path mainPath   = dir / ("dbg_main_" + std::to_string(pid) + ".gg");
 
     {
         std::ofstream h(helperPath);

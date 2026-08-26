@@ -69,7 +69,7 @@ fn main() -> i32 {
     if (!hello.contains(lo))   { return 29; }
     if (hello.contains(zz))    { return 30; }
     if (hello.indexOf(ld) != 6)  { return 31; }   // "world" starts at codepoint 6
-    if (hello.indexOf(zz) != -1) { return 32; }
+    if (hello.indexOf(zz) != null) { return 32; }
 
     return 0;
 }

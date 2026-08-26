@@ -640,14 +640,16 @@ TEST_CASE("Overflow - unsigned + emits uadd.with.overflow", "[overflow][codegen]
 }
 
 TEST_CASE("Overflow - the trap prints a diagnostic before aborting", "[overflow][codegen]") {
-    // The trap block writes "GG runtime error: integer overflow …" to stderr (fputs + __acrt_iob_func)
-    // before abort, so a panic explains itself instead of dying silently.
+    // The trap block writes "GG runtime error: integer overflow …" to stderr (fputs + gg_stderr())
+    // before abort, so a panic explains itself instead of dying silently. Which platform-specific
+    // accessor backs gg_stderr() (__acrt_iob_func vs the glibc/musl @stderr global) is covered
+    // separately by the "Target - …" tests above, which pin an explicit triple.
     auto ir = codegenString(R"(
         fn add(i32 a, i32 b) -> i32 { return a + b; }
         fn main() -> i32 { return add(1, 2); }
     )", checkedOpts());
     REQUIRE(ir.find("GG runtime error: integer overflow") != std::string::npos);
-    REQUIRE(ir.find("@__acrt_iob_func(i32 2)") != std::string::npos);   // stderr
+    REQUIRE(ir.find("call ptr @gg_stderr()")   != std::string::npos);   // stderr
     REQUIRE(ir.find("@fputs(ptr")              != std::string::npos);
     REQUIRE(ir.find("call void @abort()")      != std::string::npos);   // still aborts after
 }

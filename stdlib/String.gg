@@ -173,7 +173,7 @@ class String {
     // Byte offset of the first occurrence of `needle`
     fn private byteIndexOf(String& needle) -> i64? {
         if (needle.size == 0) { return 0; }
-        if (needle.size > this.size) { return -1; }
+        if (needle.size > this.size) { return null; }
         ptr<u8> h = this.data;
         ptr<u8> n = needle.data;
         u64 last = this.size - needle.size;

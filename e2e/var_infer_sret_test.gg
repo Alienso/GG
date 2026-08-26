@@ -12,7 +12,7 @@ class Vec {
 }
 
 fn main() -> i32 {
-    mut Vec v;
+    mut Vec v();
     mut var e = v.empty();       // infer Vec from an sret method call
     if (e.x != 42) { return 1; }
 

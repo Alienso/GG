@@ -33,10 +33,10 @@ class Counter {
 // Reference-field writes through implicit `this` (retain/release path).
 class Node {
     i32       val;
-    mut Node& next;
+    mut Node&? next;                           // nullable — starts absent
     Node(i32 x) { val = x; }
     fn link(mut Node& n) mut { next = n; }     // bare reference-field write
-    fn nextVal() -> i32             { return next.val; } // bare ref-field read + member access
+    fn nextVal() -> i32             { return next!!.val; } // bare ref-field read + member access
 }
 
 fn main() -> i32 {

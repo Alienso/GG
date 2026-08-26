@@ -12,7 +12,7 @@
 
 class Node {
     mut i32   val;
-    mut Node& next;                 // self-referential reference field
+    mut Node&? next;                // self-referential reference field — nullable (starts absent)
     Node(i32 v) { this.val = v; }
 }
 
@@ -21,20 +21,23 @@ fn main() -> i32 {
     // ---- build a 3-element chain -------------------------------------
     mut Node& a = new Node(1);
     a.next = new Node(2);
-    a.next.next = new Node(3);
+    mut Node& n2 = a.next!!;
+    n2.next = new Node(3);
+    Node& n3 = n2.next!!;
 
     // ---- 1-3: read values through the chain --------------------------
-    if (a.val           != 1) { return 1; }
-    if (a.next.val      != 2) { return 2; }
-    if (a.next.next.val != 3) { return 3; }
+    if (a.val  != 1) { return 1; }
+    if (n2.val != 2) { return 2; }
+    if (n3.val != 3) { return 3; }
 
     // ---- 4: mutate a value field deep in the chain -------------------
-    a.next.val = 20;
-    if (a.next.val != 20) { return 4; }
+    n2.val = 20;
+    if (n2.val != 20) { return 4; }
 
     // ---- 5: reassign a reference field (releases the old sub-chain) --
     a.next = new Node(99);             // old node(2)->node(3) chain is released here
-    if (a.next.val != 99) { return 5; }
+    Node& n2b = a.next!!;
+    if (n2b.val != 99) { return 5; }
 
     return 0;
     // scope exit: release a -> frees the remaining chain (a, node(99))

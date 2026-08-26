@@ -23,7 +23,7 @@ class Cell<T> {
 // Generic self-referential linked node.
 class Node<T> {
     T       value;
-    mut Node<T>& next;
+    mut Node<T>&? next;              // self-referential — nullable (starts absent)
     Node(T v) { this.value = v; }
 }
 
@@ -48,8 +48,10 @@ fn main() -> i32 {
     // generic self-referential linked list
     mut Node<i32>& n = new Node<i32>(1);
     n.next = new Node<i32>(2);
-    n.next.next = new Node<i32>(3);
-    if (n.value + n.next.value + n.next.next.value != 6) { return 6; }
+    mut Node<i32>& n2 = n.next!!;
+    n2.next = new Node<i32>(3);
+    Node<i32>& n3 = n2.next!!;
+    if (n.value + n2.value + n3.value != 6) { return 6; }
 
     return 0;
 }

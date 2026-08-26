@@ -8,7 +8,7 @@ import std.Array;
 
 fn main() -> i32 {
     mut Array<i32>& a = new Array<i32>();   // initial capacity 8
-    a.push(1); a.push(2); a.push(3);
+    a.pushBack(1); a.pushBack(2); a.pushBack(3);
 
     // Iterate, and on the first element push 20 more — forcing grow() 8 -> 16 -> 32, which reallocs
     // (and frees) the buffer mid-loop. The loop must not crash, and reads the live buffer throughout.
@@ -19,7 +19,7 @@ fn main() -> i32 {
         if (!grew) {
             grew = true;
             mut i32 k = 0;
-            while (k < 20) { a.push(100); k = k + 1; }
+            while (k < 20) { a.pushBack(100); k = k + 1; }
         }
     }
     // Live view: 3 original elements (1+2+3=6) + 20 pushed (20*100=2000) = 2006.

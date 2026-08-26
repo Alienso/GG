@@ -474,9 +474,18 @@ std::string CodeGen::genUnary(const UnaryExpr& unary, const Type& resolvedType) 
                 emit("%" + tempName + " = fneg " + irType + " " + value);
                 return "%" + tempName;
             }
+            // A negated integer LITERAL (`-128`, …) is a single compile-time constant, not a
+            // runtime computation — never route it through the checked-negation trap. Semantic
+            // analysis already validated/warned about its fit; a signed boundary literal like i8's
+            // -128 masks to the bit pattern 0x80, and re-deriving it via a runtime "0 - 0x80" would
+            // spuriously look like a *separate* overflowing computation (0 - (-128) == 128, out of
+            // i8 range) to the overflow-checked intrinsic, even though no actual overflow occurred.
+            bool operandIsIntLiteral = false;
+            if (const auto* lit = std::get_if<LiteralExpr>(unary.operand->node.get()))
+                operandIsIntLiteral = lit->token.type == TokenType::NUMBER;
             // Checked signed negation catches -INT_MIN (0 - INT_MIN overflows). Unsigned unary
             // minus is left as a plain wrapping `sub` (negating an unsigned is a degenerate op).
-            if (overflowChecks_ && isSignedInt(operandType.kind))
+            if (overflowChecks_ && isSignedInt(operandType.kind) && !operandIsIntLiteral)
                 return emitCheckedArith(TokenType::MINUS, operandType, "0", value);
             std::string tempName = freshTemp();
             emit("%" + tempName + " = sub " + irType + " 0, " + value);

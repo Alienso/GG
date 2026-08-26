@@ -92,7 +92,7 @@ TEST_CASE("ImplicitThis - bare field ops lower correctly (runs to 0)", "[implici
             fn get() -> i32 { return n; }
         }
         fn main() -> i32 {
-            mut Counter c;
+            mut Counter c();
             c.inc(); c.add(5); c.bump();
             return c.get();
         }
@@ -241,7 +241,7 @@ TEST_CASE("ImplicitThis - a bare reference-field write works in a mut method", "
         class Node {
             i32 v;
             mut Node& next;
-            Node(i32 x) { v = x; }
+            Node(i32 x) { v = x; next = new Node(x); }
             fn link(mut Node& n) mut { next = n; }   // bare ref-field write
             fn peek() -> i32 { return next.v; }               // bare ref-field read + access
         }

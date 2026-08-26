@@ -369,7 +369,7 @@ TEST_CASE("var - infers from a method returning its OWN class by value (sret)", 
             fn empty() -> Vec e { e.x = 42; return e; }
         }
         fn main() -> i32 {
-            mut Vec v;
+            mut Vec v();
             var e = v.empty();
             return e.x;
         }
@@ -385,7 +385,7 @@ TEST_CASE("var - inferring from an sret method call yields the correct object ty
             fn empty() -> Vec e { e.x = 42; return e; }
         }
         fn main() -> i32 {
-            mut Vec v;
+            mut Vec v();
             var e = v.empty();
             return e.x;
         }

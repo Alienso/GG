@@ -3,15 +3,12 @@ module std;
 import std.crt;
 
 class String {
-    private mut ptr data;   // owned, null-terminated UTF-8 byte buffer //TODO make this str
-    private mut u64 size;   // byte length (excluding the null terminator)
+    private mut ptr data;
+    private mut u64 size;
 
-    // Construct from a `str` literal, copying its bytes into an owned buffer. The byte length is
-    // known from the view (`literal.len`), so no strlen scan is needed; `literal.data` is the
-    // NUL-terminated source pointer.
     String(str literal) {
         this.size = literal.len;
-        u64 allocSize = this.size + 1;          // +1 for the null terminator
+        u64 allocSize = this.size + 1;
         this.data = malloc(allocSize);
         memcpy(this.data, literal.data, allocSize);
     }
@@ -22,9 +19,7 @@ class String {
 
     // ---- size / emptiness ----
 
-    // Number of Unicode codepoints (Java's `length()` counts UTF-16 units; here it is
-    // codepoints). Every byte that is not a UTF-8 continuation byte (10xxxxxx) starts a
-    // new codepoint. O(n).
+    // Number of Unicode codepoints
     fn length() -> u64 {
         ptr<u8> bytes = this.data;
         mut u64 count = 0;
@@ -39,7 +34,6 @@ class String {
         return count;
     }
 
-    // Number of bytes (NOT characters). O(1).
     fn byteLength() -> u64 {
         return this.size;
     }
@@ -48,7 +42,7 @@ class String {
         return this.size == 0;
     }
 
-    // True if the string is empty or contains only ASCII whitespace (Java 11 `isBlank`).
+    // True if the string is empty or contains only ASCII whitespace
     fn isBlank() -> bool {
         ptr<u8> bytes = this.data;
         mut u64 i = 0;
@@ -65,8 +59,6 @@ class String {
 
     // ---- element access ----
 
-    // The Unicode codepoint at codepoint-index `index` (0-based). Returns 0 if past the
-    // end (Java throws; GG returns 0). O(n).
     fn charAt(u64 index) -> char {
         ptr<u8> bytes = this.data;
         mut u64 cpIndex = 0;
@@ -74,7 +66,6 @@ class String {
         while (i < this.size) {
             u8 lead = bytes[i];
 
-            // Sequence length from the lead byte's high bits.
             mut u64 len = 1;
             if ((lead & 128) == 0)        { len = 1; }   // 0xxxxxxx
             else if ((lead & 224) == 192) { len = 2; }   // 110xxxxx
@@ -110,7 +101,9 @@ class String {
             cpIndex = cpIndex + 1;
             i = i + len;
         }
-        return 0 as char;
+        return -1;
+        //abort(); TODO when using this compiler throws an error:
+        // method 'charAt' does not always return a value
     }
 
     // The raw byte at position `i` (byte index, not codepoint). No bounds check.
@@ -152,13 +145,13 @@ class String {
     }
 
     fn contains(String& needle) -> bool {
-        return this.byteIndexOf(needle) >= 0;
+        return this.byteIndexOf(needle) != null;
     }
 
-    // Codepoint index of the first occurrence of `needle`, or -1 if absent.
-    fn indexOf(String& needle) -> i64 {
-        i64 byteOff = this.byteIndexOf(needle);
-        if (byteOff < 0) { return -1; }
+    // Codepoint index of the first occurrence of `needle`
+    fn indexOf(String& needle) -> i64? {
+        i64? byteOff = this.byteIndexOf(needle);
+        if (byteOff == null) { return null; }
         ptr<u8> bytes = this.data;
         u64 limit = byteOff as u64;
         mut u64 count = 0;
@@ -168,13 +161,17 @@ class String {
             if ((b & 192) != 128) { count = count + 1; }
             i = i + 1;
         }
-        return count as i64;
+        return count as i64?;
+    }
+
+    fn lastIndexOf(String& needle) -> i64? {
+    return null;
     }
 
     // ---- private internals (touch `ptr`; not part of the public interface) ----
 
-    // Byte offset of the first occurrence of `needle`, or -1. O(n*m) naive search.
-    fn private byteIndexOf(String& needle) -> i64 {
+    // Byte offset of the first occurrence of `needle`
+    fn private byteIndexOf(String& needle) -> i64? {
         if (needle.size == 0) { return 0; }
         if (needle.size > this.size) { return -1; }
         ptr<u8> h = this.data;
@@ -191,17 +188,42 @@ class String {
             if (matched) { return i as i64; }
             i = i + 1;
         }
-        return -1;
+        return null;
     }
 
-    // The underlying null-terminated buffer (e.g. for an IO routine to print). Private:
-    // the public interface never hands out a `ptr`.
-    fn private cStr() -> ptr {
+    // The underlying null-terminated buffer
+    fn cStr() -> ptr {
         return this.data;
     }
+
+
+    /*fn subString() -> String s {
+
+    }
+
+    fn split() -> Array<String> strings {
+
+    }
+
+
+    fn isAlpha() -> bool {
+
+    }
+
+    fn isNumeric() -> bool {
+
+    }
+
+    fn isAlphaNumeric() -> bool {
+
+    }
+
+    fn compareIgnoreCase() -> i32 {
+
+    }*/
 }
 
-// Value equality / ordering — enable `==`, `!=`, `<`, `<=`, `>`, `>=` on Strings.
+
 impl Eq for String {
     fn eq(String& other) -> bool { return this.equals(other); }
 }
@@ -209,9 +231,6 @@ impl Ord for String {
     fn cmp(String& other) -> i32 { return this.compareTo(other); }
 }
 
-// Deep copy — replaces the (unsafe, shallow) generated clone. `this` is the destination; free its old
-// buffer first (a no-op null-free when `this` is a freshly zeroed slot), then own a fresh copy of
-// `src`'s bytes. Enables safe value copies and `Array<String>`.
 impl Clone for String {
     fn clone(String& src) mut {
         free(this.data);

@@ -722,7 +722,7 @@ TEST_CASE("Mut - calling a mut method on a const object is an error", "[mut][con
             fn inc() mut { this.n = this.n + 1; }
         }
         fn main() -> i32 {
-            Counter c;
+            Counter c();
             c.inc();
             return 0;
         }
@@ -739,7 +739,7 @@ TEST_CASE("Mut - calling a mut method on a mut object is allowed", "[mut][semant
             fn inc() mut { this.n = this.n + 1; }
         }
         fn main() -> i32 {
-            mut Counter c;
+            mut Counter c();
             c.inc();
             return 0;
         }
@@ -756,7 +756,7 @@ TEST_CASE("Const - calling a non-mut method on a const object is allowed", "[mut
             fn get() -> i32 { return this.n; }
         }
         fn main() -> i32 {
-            Counter c;
+            Counter c();
             return c.get();
         }
     )");
@@ -826,10 +826,13 @@ TEST_CASE("Const - single defining assignment lowers to a store", "[mut][const][
 // unconditionally treated as definitely-initialized the moment its struct was zero-initialized,
 // regardless of whether the class even has a constructor. That let a method call run on an object
 // whose constructor never executed (e.g. Array<T>'s ctor, which sets up cap/data) — a real
-// heap-corruption bug. Now: a class with NO constructor, or one with a constructor callable with
-// zero arguments, is unaffected (auto-invoked at declaration — see the codegen tests below); a
-// class whose constructor(s) all require at least one argument is treated like a primitive —
-// deferred init, single defining assignment required before any use, which incidentally also
+// heap-corruption bug. Now: a class with NO constructor at all is unaffected (zero-init is its
+// complete valid state); a class with ANY constructor — including a zero-arg-callable one — is
+// ALWAYS deferred: a bare declaration never implicitly calls anything, whether the class happens to
+// have a zero-arg overload or not. This is a deliberate no-magic rule (whether a bare declaration is
+// safe to use immediately must never depend on the invisible detail of the class's constructor
+// shape) — an explicit `ClassName name();`/`ClassName name{}` (an ordinary initializer, unaffected
+// by this rule) or a later assignment on every reachable path is required, which incidentally also
 // enables picking a different constructor per branch with no default-construction overhead.
 // ============================================================
 
@@ -845,11 +848,22 @@ TEST_CASE("Const - a ctor-less class's bare declaration is unaffected", "[mut][c
     REQUIRE_FALSE(result.hadError);
 }
 
-TEST_CASE("Const - a class with a zero-arg constructor is usable immediately after a bare declaration",
+TEST_CASE("Const - a bare declaration never implicitly calls a zero-arg constructor",
           "[mut][const][semantic]") {
+    StderrCapture cap;
     auto result = analyzeString(R"(
         class Widget { mut i32 v; Widget() { v = 7; } }
         fn main() -> i32 { Widget w; return w.v; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
+}
+
+TEST_CASE("Const - an explicit empty-arg call to a zero-arg constructor is usable immediately",
+          "[mut][const][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget() { v = 7; } }
+        fn main() -> i32 { Widget w(); return w.v; }
     )");
     REQUIRE_FALSE(result.hadError);
 }
@@ -865,13 +879,69 @@ TEST_CASE("Const - a class with ONLY parameterized constructors requires assignm
     REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
 }
 
-TEST_CASE("Const - a constructor with an all-defaulted param list counts as zero-arg-callable",
+TEST_CASE("Const - an all-defaulted constructor is still deferred on a bare declaration",
           "[mut][const][semantic]") {
+    // An all-defaulted ctor is callable with zero arguments (`Widget()` would work), but that does
+    // NOT make a BARE declaration special-cased anymore — only an explicit call does.
+    StderrCapture cap;
     auto result = analyzeString(R"(
         class Widget { mut i32 v; Widget(i32 x = 3) { v = x; } }
         fn main() -> i32 { Widget w; return w.v; }
     )");
-    REQUIRE_FALSE(result.hadError);
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
+}
+
+TEST_CASE("Const - a MIXED ctor set (zero-arg overload alongside parameterized ones) is still deferred",
+          "[mut][const][semantic]") {
+    // A zero-arg-callable overload coexisting with other overloads must not special-case the bare
+    // declaration either — every existing test used a PURE zero-arg or PURE parameterized ctor set;
+    // this pins down the mixed-overload-set shape specifically.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget {
+            mut i32 v;
+            Widget() { v = 0; }
+            Widget(i32 x) { v = x; }
+        }
+        fn main() -> i32 { mut Widget w; w.v = 1; return w.v; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
+}
+
+TEST_CASE("Const - passing a deferred-init object as a call argument before assignment is an error",
+          "[mut][const][semantic]") {
+    // Every other deferred-init test reads the variable via a field access or method call; this
+    // pins down the argument-passing path specifically (goes through the same identifier-use check).
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget() { v = 0; } }
+        fn take(Widget& w) -> i32 { return w.v; }
+        fn main() -> i32 { mut Widget w; return take(w); }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'w' is used before it has been assigned a value"));
+}
+
+TEST_CASE("Const - the direct-construct fast path works when a branch picks the zero-arg overload "
+          "of a mixed ctor set", "[mut][const][codegen]") {
+    std::string ir = codegenString(R"(
+        class Widget {
+            mut i32 v;
+            Widget() { v = 0; }
+            Widget(i32 x) { v = x; }
+        }
+        fn pick(bool useDefault) -> i32 {
+            mut Widget w;
+            if (useDefault) { w = Widget(); } else { w = Widget(9); }
+            return w.v;
+        }
+        fn main() -> i32 { return pick(true); }
+    )");
+    REQUIRE(ir.find("call void @Widget_Widget$ret$void(ptr ") != std::string::npos);
+    REQUIRE(ir.find("call void @Widget_Widget$i32$ret$void(ptr ") != std::string::npos);
+    REQUIRE(ir.find("@Widget_clone") == std::string::npos);
 }
 
 TEST_CASE("Const - deferred object init allows picking a different constructor per branch",
@@ -916,10 +986,13 @@ TEST_CASE("Const - a genuine copy on an object's defining assignment is still a 
     REQUIRE(cap.contains("impl Clone for Buf"));
 }
 
-TEST_CASE("Const - a bare declaration for a zero-arg-ctor class auto-invokes it", "[mut][const][codegen]") {
+TEST_CASE("Const - an explicit empty-arg constructor call invokes the zero-arg constructor",
+          "[mut][const][codegen]") {
+    // A bare `Widget w;` no longer calls anything (see the semantic tests above) — only an explicit
+    // `Widget w();` (an ordinary initializer, unaffected by the deferred-init rule) does.
     std::string ir = codegenString(R"(
         class Widget { mut i32 v; Widget() { v = 7; } }
-        fn main() -> i32 { Widget w; return w.v; }
+        fn main() -> i32 { Widget w(); return w.v; }
     )");
     REQUIRE(ir.find("call void @Widget_Widget(ptr ") != std::string::npos);
 }
@@ -968,4 +1041,302 @@ TEST_CASE("Const - a reassignment of an already-initialized deferred-init object
         }
     )");
     REQUIRE(ir.find("@Widget_clone") != std::string::npos);
+}
+
+// ============================================================
+// Field default initializers (`= expr` / `{args}`) + constructor field-initialization enforcement.
+// Every instance field must be definitely assigned in a constructor, unless it has a default
+// initializer, is nullable, or embeds a ctor-less class — see the CLAUDE.md invariant of the
+// same name.
+// ============================================================
+
+TEST_CASE("FieldInit - a primitive '=' default initializer is accepted", "[fieldinit][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; mut i32 count = 0; Widget(i32 x) { v = x; } }
+        fn main() -> i32 { Widget w(5); return w.count; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a '{args}' default initializer brace-constructs an object field",
+          "[fieldinit][semantic]") {
+    auto result = analyzeString(R"(
+        class Slot { mut i32 v; Slot(i32 x) { v = x; } }
+        class Bag { mut Slot s{7}; Bag() { } }
+        fn main() -> i32 { Bag b(); return b.s.v; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a class with ONLY field initializers gets a synthesized empty constructor",
+          "[fieldinit][semantic]") {
+    // No explicit constructor at all — the flagship shape (e.g. HashMap<K,V>).
+    auto result = analyzeString(R"(
+        class Slot { mut i32 v; Slot(i32 x) { v = x; } }
+        class Bag { mut Slot s{7}; mut i32 count = 0; }
+        fn main() -> i32 { Bag b(); return b.count + b.s.v; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - the synthesized constructor makes a bare declaration deferred-init too",
+          "[fieldinit][semantic]") {
+    // Consistent with the no-magic rule: a bare declaration never implicitly calls ANY
+    // constructor, including a synthesized one.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Bag { mut i32 count = 0; }
+        fn main() -> i32 { Bag b; return b.count; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'b' is used before it has been assigned a value"));
+}
+
+TEST_CASE("FieldInit - a default initializer cannot reference another field", "[fieldinit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget { mut i32 a = 1; mut i32 b = a + 1; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("use of undeclared identifier 'a'"));
+}
+
+TEST_CASE("FieldInit - a default initializer cannot reference 'this'", "[fieldinit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget {
+            mut i32 v;
+            Widget() { v = 1; }
+            fn getV() -> i32 { return v; }
+            mut i32 cached = this.getV();
+        }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("'this' used outside of a class method"));
+}
+
+TEST_CASE("FieldInit - enum fields still reject a default initializer", "[fieldinit][semantic]") {
+    // Enums have their own, separate, already-correct model (fields set via variant ctor args) —
+    // unaffected by (excluded from) this feature entirely.
+    StderrCapture cap;
+    (void)parseString(R"(
+        enum Color { RED, GREEN; i32 code = 0; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(cap.contains("expected ';' after field declaration"));
+}
+
+TEST_CASE("FieldInit - a constructor missing a non-defaulted field is a clean error",
+          "[fieldinit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; mut i32 w; Widget(i32 x) { v = x; } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("field 'w' is not initialized in constructor 'Widget'"));
+}
+
+TEST_CASE("FieldInit - a field assigned in both if/else branches satisfies the check",
+          "[fieldinit][semantic]") {
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget(bool c) { if (c) { v = 1; } else { v = 2; } } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a field assigned in only ONE if branch is still an error",
+          "[fieldinit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; Widget(bool c) { if (c) { v = 1; } } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("field 'v' is not initialized in constructor 'Widget'"));
+}
+
+TEST_CASE("FieldInit - an early 'return;' that skips a field is caught at the return site",
+          "[fieldinit][semantic]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget {
+            mut i32 v;
+            Widget(bool skip) {
+                if (skip) { return; }
+                v = 1;
+            }
+        }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("field 'v' is not initialized in constructor 'Widget'"));
+}
+
+TEST_CASE("FieldInit - a nullable field is exempt from the must-initialize check",
+          "[fieldinit][semantic]") {
+    auto result = analyzeString(R"(
+        class N { mut i32 v; N&? next; i32? tag; N(i32 x) { v = x; } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - an embedded field whose class has no constructor is exempt",
+          "[fieldinit][semantic]") {
+    auto result = analyzeString(R"(
+        class Point { mut i32 x; mut i32 y; }
+        class Line { mut Point p; Line() { } }
+        fn main() -> i32 { Line l(); return l.p.x; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a mixed zero-arg-and-parameterized ctor set on the field's class is NOT exempt",
+          "[fieldinit][semantic]") {
+    // The field's class HAS a constructor (even if one overload is zero-arg-callable) — it is not
+    // ctor-less, so the field must still be explicitly initialized.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Slot { mut i32 v; Slot() { v = 0; } Slot(i32 x) { v = x; } }
+        class Bag { mut Slot s; Bag() { } }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("field 's' is not initialized in constructor 'Bag'"));
+}
+
+TEST_CASE("FieldInit - a '{args}' initializer direct-constructs with no temp or clone",
+          "[fieldinit][codegen]") {
+    std::string ir = codegenString(R"(
+        class Slot { mut i32 v; Slot(i32 x) { v = x; } }
+        class Bag { mut Slot s{7}; mut i32 count = 0; }
+        fn main() -> i32 { Bag b(); return b.count + b.s.v; }
+    )");
+    // The synthesized Bag() constructor GEPs to `s` and calls Slot's ctor directly into it.
+    REQUIRE(ir.find("call void @Slot_Slot(ptr ") != std::string::npos);
+    REQUIRE(ir.find("@Slot_clone") == std::string::npos);
+    REQUIRE(ir.find("define void @Bag_Bag(ptr %self)") != std::string::npos);
+}
+
+TEST_CASE("FieldInit - default initializers run before the constructor's own body",
+          "[fieldinit][codegen]") {
+    // Field defaults are stores that must appear, in order, before the body's own override.
+    std::string ir = codegenString(R"(
+        class Widget {
+            mut i32 v = 10;
+            mut i32 extra = 0;
+            Widget(i32 x) { v = x; }
+        }
+        fn main() -> i32 { Widget w(5); return w.v + w.extra; }
+    )");
+    size_t ctorStart = ir.find("define void @Widget_Widget(");
+    REQUIRE(ctorStart != std::string::npos);
+    size_t posDefaultV      = ir.find("store i32 10,", ctorStart);
+    size_t posDefaultExtra  = ir.find("store i32 0,", ctorStart);
+    size_t posLoadParam     = ir.find("load i32, ptr %x.addr", ctorStart);
+    REQUIRE(posDefaultV != std::string::npos);
+    REQUIRE(posDefaultExtra != std::string::npos);
+    REQUIRE(posLoadParam != std::string::npos);
+    // Both defaults land before the body reads/stores the constructor's own parameter.
+    REQUIRE(posDefaultV < posLoadParam);
+    REQUIRE(posDefaultExtra < posLoadParam);
+}
+
+TEST_CASE("FieldInit - each constructor overload is checked independently",
+          "[fieldinit][semantic]") {
+    // Widget(i32) sets both fields; Widget(char) leaves 'w' unset. Only the second should error —
+    // per-constructor tracking must not leak between overloads of the same class.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Widget {
+            mut i32 v;
+            mut i32 w;
+            Widget(i32 x) { v = x; w = 0; }
+            Widget(char c) { v = c as i32; }
+        }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("field 'w' is not initialized in constructor 'Widget'"));
+}
+
+TEST_CASE("FieldInit - a correctly-initializing overload does not error even when a sibling does",
+          "[fieldinit][semantic]") {
+    // Same class as above, isolated: the i32 overload alone must type-check clean.
+    auto result = analyzeString(R"(
+        class Widget { mut i32 v; mut i32 w; Widget(i32 x) { v = x; w = 0; } }
+        fn main() -> i32 { Widget wi(1); return wi.v + wi.w; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a synthesized constructor coexists with a user-written destructor",
+          "[fieldinit][codegen]") {
+    std::string ir = codegenString(R"(
+        class Tracked { mut i32 count = 0; ~Tracked() { count = -1; } }
+        fn main() -> i32 { Tracked t(); return t.count; }
+    )");
+    REQUIRE(ir.find("define void @Tracked_Tracked(ptr %self)") != std::string::npos);
+    REQUIRE(ir.find("define void @Tracked_dtor(ptr %self)") != std::string::npos);
+}
+
+TEST_CASE("FieldInit - a generic class's field default is independent per instantiation",
+          "[fieldinit][generic][codegen]") {
+    std::string ir = codegenString(R"(
+        class Box<T> { mut i32 tag = 99; }
+        fn main() -> i32 { Box<i32> a(); Box<char> b(); return a.tag + b.tag; }
+    )");
+    REQUIRE(ir.find("define void @Box$i32_Box$i32(ptr %self)") != std::string::npos);
+    REQUIRE(ir.find("define void @Box$char_Box$char(ptr %self)") != std::string::npos);
+}
+
+TEST_CASE("FieldInit - a field default may use the class's own type parameter",
+          "[fieldinit][generic][semantic]") {
+    auto result = analyzeString(R"(
+        class Box<T> { mut T val = 0; }
+        fn main() -> i32 { Box<i32> a(); return a.val; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a default initializer MAY reference the class's own static field "
+          "via an explicit qualified name", "[fieldinit][semantic]") {
+    // Static access resolves via the type name, independent of the currentClassName-clearing guard
+    // that blocks implicit this/field/param references — so this is allowed, unlike a bare name.
+    auto result = analyzeString(R"(
+        class Config { mut static i32 DEFAULT = 42; mut i32 v = Config::DEFAULT; }
+        fn main() -> i32 { Config c(); return c.v; }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("FieldInit - a bare (unqualified) reference to the class's own static field is "
+          "rejected, matching analyzeParamDefaults' identical pre-existing limitation",
+          "[fieldinit][semantic]") {
+    // Asymmetric but INTENTIONALLY consistent: analyzeParamDefaults has the exact same bare-name
+    // gap (also clears currentClassName), so a field default inherits it rather than introducing a
+    // new inconsistency. The qualified form (above) is always the working escape hatch.
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Config { mut static i32 DEFAULT = 42; mut i32 v = DEFAULT; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("use of undeclared identifier 'DEFAULT'"));
+}
+
+TEST_CASE("FieldInit - a ctor-less field class works when declared AFTER the class that embeds it",
+          "[fieldinit][semantic]") {
+    // The ctor-less exemption looks up the field's class in classRegistry — must not depend on
+    // declaration order (collectClasses populates the whole registry before any body is analyzed).
+    auto result = analyzeString(R"(
+        class Line { mut Point p; Line() { } }
+        class Point { mut i32 x; mut i32 y; }
+        fn main() -> i32 { Line l(); return l.p.x; }
+    )");
+    REQUIRE_FALSE(result.hadError);
 }

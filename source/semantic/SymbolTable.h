@@ -56,8 +56,21 @@ public:
     // Clear a binding's non-null narrowing (on reassignment). Walks innermost→outermost.
     void                       clearNarrowing(const std::string& name);
 
+    // ---- Constructor field-initialization tracking ----
+    // Whether each instance field has been definitely assigned within the constructor CURRENTLY
+    // being analyzed. Rides along inside the SAME InitSnapshot as locals (under a reserved key
+    // prefix no real identifier can spell, since '#' never lexes inside one) — every existing
+    // branch-merge call site (analyzeIf/While/For's capture/restore) picks up field tracking for
+    // free, with zero changes to those call sites: the merge loops there iterate the whole flat
+    // snapshot map generically, they don't enumerate known variable names.
+    void resetCtorFields(const std::vector<std::pair<std::string, bool>>& fieldsWithInitFlag);
+    void setFieldInitialized(const std::string& fieldName);
+    [[nodiscard]] bool isFieldInitialized(const std::string& fieldName) const;
+
 private:
     std::vector<std::unordered_map<std::string, Symbol>> scopes;
+    std::unordered_map<std::string, bool> ctorFieldInit_;   // active only during ctor analysis
+    static constexpr const char* kFieldKeyPrefix = "#field#";
 };
 
 #endif //GG_SYMBOLTABLE_H

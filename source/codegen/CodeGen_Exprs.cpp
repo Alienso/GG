@@ -1445,29 +1445,16 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         }
 
         // Initializer: a return-slot call (written in place, no copy), a constructor call,
-        // or a copy from a value/reference.
+        // or a copy from a value/reference. A bare `ClassName name;` with no initializer never
+        // implicitly calls a constructor — the struct stays zero-initialized; if the class has any
+        // constructor, semantics has marked the symbol deferred-init, so the first reachable
+        // assignment (genAssign's directConstructAssigns_ path) does the real construction.
         if (varDecl.initializer) {
             if (!emitObjectDirectInit(*varDecl.initializer, ptrName, className)) {
                 // Copy initialisation: Point p = <value/ref of same class> — deep copy.
                 std::string src = genExpr(*varDecl.initializer);
                 clonesNeeded_.insert(className);
                 emit("call void @" + className + "_clone(ptr " + ptrName + ", ptr " + src + ")");
-            }
-        } else if (resolvedCallee_) {
-            // Bare `ClassName name;`: if the class has a (possibly all-defaulted) zero-arg-callable
-            // constructor, semantics recorded its emitted name under this VarDeclExpr's own address
-            // (see analyzeVarDecl) — auto-invoke it so the class's own invariant-establishing logic
-            // actually runs, instead of leaving the struct merely zero-initialized. Absent ⇒ either
-            // a genuinely ctor-less class (zero-init is already its complete state) or a class with
-            // only non-zero-arg constructors (deferred-init — see genAssign's direct-construct path).
-            auto it = resolvedCallee_->find(&varDecl);
-            if (it != resolvedCallee_->end()) {
-                auto funcIt = funcParamTypes.find(it->second);
-                if (funcIt != funcParamTypes.end()) {
-                    std::string argStr = buildArgString({}, &funcIt->second, defaultsFor(it->second), nullptr);
-                    emit("call void @" + it->second + "(ptr " + ptrName
-                         + (argStr.empty() ? "" : ", " + argStr) + ")");
-                }
             }
         }
 

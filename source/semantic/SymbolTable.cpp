@@ -51,6 +51,8 @@ SymbolTable::InitSnapshot SymbolTable::captureInitState() const {
         for (const auto& [name, sym] : scope)
             if (sym.kind == Symbol::Kind::Variable)
                 snap[name] = sym.isInitialized;
+    for (const auto& [name, init] : ctorFieldInit_)
+        snap[kFieldKeyPrefix + name] = init;
     return snap;
 }
 
@@ -62,6 +64,26 @@ void SymbolTable::restoreInitState(const InitSnapshot& snap) {
                 if (it != snap.end())
                     sym.isInitialized = it->second;
             }
+    for (auto& [name, init] : ctorFieldInit_) {
+        auto it = snap.find(kFieldKeyPrefix + name);
+        if (it != snap.end()) init = it->second;
+    }
+}
+
+void SymbolTable::resetCtorFields(const std::vector<std::pair<std::string, bool>>& fieldsWithInitFlag) {
+    ctorFieldInit_.clear();
+    for (const auto& [name, hasInit] : fieldsWithInitFlag)
+        ctorFieldInit_[name] = hasInit;
+}
+
+void SymbolTable::setFieldInitialized(const std::string& fieldName) {
+    auto it = ctorFieldInit_.find(fieldName);
+    if (it != ctorFieldInit_.end()) it->second = true;
+}
+
+bool SymbolTable::isFieldInitialized(const std::string& fieldName) const {
+    auto it = ctorFieldInit_.find(fieldName);
+    return it == ctorFieldInit_.end() || it->second;   // unknown name ⇒ not our concern, treat as ok
 }
 
 SymbolTable::InitSnapshot SymbolTable::captureNarrowState() const {

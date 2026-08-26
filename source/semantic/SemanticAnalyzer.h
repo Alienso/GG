@@ -28,8 +28,10 @@ const Token& exprFirstToken(const Expr& expr);
 
 struct ClassInfo {
     struct Field {
-        bool  isPublic = false;
-        bool  isMut    = false; // `mut` — writable after construction; otherwise const
+        bool  isPublic       = false;
+        bool  isMut          = false; // `mut` — writable after construction; otherwise const
+        bool  hasInitializer = false; // `= expr` / `{args}` at the declaration — exempt from the
+                                       // constructor-must-initialize-every-field check
         Type  type;
         int   index    = 0;  // field index in the struct (0-based, declaration order)
         Token decl;          // the field name token, for error reporting
@@ -275,6 +277,13 @@ private:
     // (no guaranteed return), require the alias to be definitely assigned. Call after the body,
     // before exitScope.
     void checkReturnAliasAssignedAtExit(const BlockStmt& body, const Token& where);
+    // Every instance field must be definitely assigned by the time a constructor returns, unless it
+    // has a default initializer at its declaration (SymbolTable::ctorFieldInit_ tracks this,
+    // seeded from ClassInfo::Field::hasInitializer). Called at each bare `return;` inside a
+    // constructor (catches an early exit that skips a field) and once after the body if control can
+    // fall off the end (mirrors checkReturnAliasAssignedAtExit's two-point-check shape). A no-op
+    // outside a constructor.
+    void checkCtorFieldsInitialized(const Token& where);
     // Operator → (built-in trait name, method name), or nullptr if the operator isn't
     // overloadable. Also recognises the built-in operator-trait names.
     [[nodiscard]] static const std::pair<const char*, const char*>* operatorTraitFor(TokenType op);

@@ -1,13 +1,15 @@
 // e2e/definite_init_object_test.gg — definite initialization now covers Object (class) locals, not
 // just primitives/references. A bare `ClassName name;` (no initializer):
-//   - class has NO constructor            -> unaffected, zero-init is its complete valid state.
-//   - class has a (possibly all-defaulted) zero-arg-callable constructor -> auto-invoked, so the
-//     class's own invariant-establishing logic actually runs (this is what fixed a real
-//     heap-corruption bug: a generic container's ctor, e.g. Array<T>'s cap/data setup, used to be
-//     silently skipped by a bare declaration).
-//   - class has ONLY parameterized constructors -> deferred init, exactly like a primitive: any use
-//     before an explicit assignment is a compile error, and the single defining assignment (on
-//     whichever branch reaches it) constructs directly into the destination — no temp, no clone.
+//   - class has NO constructor at all -> unaffected, zero-init is its complete valid state.
+//   - class has ANY constructor (even a zero-arg-callable one) -> ALWAYS deferred, exactly like a
+//     primitive: any use before an explicit assignment/call is a compile error. A bare declaration
+//     NEVER implicitly calls a constructor — this is deliberate (whether a bare declaration is safe
+//     to use immediately must never depend on the invisible detail of the class's constructor
+//     shape). An explicit `ClassName name();`/`ClassName name{}` is an ordinary initializer and
+//     works immediately; otherwise the single defining assignment (on whichever branch reaches it)
+//     constructs directly into the destination — no temp, no clone.
+// This closes a real heap-corruption bug: a generic container's ctor (e.g. Array<T>'s cap/data
+// setup) used to be silently skipped by a bare declaration, leaving cap == 0 forever.
 // Exit 0 = all checks held.
 
 import std.Array;
@@ -32,9 +34,9 @@ fn main() -> i32 {
     p.x = 5; p.y = 7;
     if (p.x + p.y != 12) { return 1; }
 
-    // Zero-arg-ctor class (Array<T>): bare declaration now auto-invokes the constructor, so
-    // grow()/emplaceBack work correctly instead of corrupting memory.
-    mut Array<i32> a;
+    // Array<T> has a zero-arg constructor, but a bare declaration no longer auto-invokes it — an
+    // explicit empty-arg call is required so the ctor's cap/data setup actually runs.
+    mut Array<i32> a();
     mut i32 i = 0;
     while (i < 20) { a.emplaceBack(i); i = i + 1; }
     if (a.size() != 20 || a.get(19) != 19) { return 2; }

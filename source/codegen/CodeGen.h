@@ -31,6 +31,13 @@ private:
     };
     std::unordered_map<std::string, CGClassInfo>      cgClasses_;
 
+    // Per-class field default initializers (`= expr` / `{args}` at the declaration), in declaration
+    // order — non-owning pointers into the Program's own AST (outlives codegen). Emitted into every
+    // constructor's prologue (genMethod), before the user-written body runs. Enums are excluded
+    // (never populated for an enum name — see the parser/semantic gating).
+    std::unordered_map<std::string, std::vector<std::pair<std::string, const Expr*>>> classFieldInits_;
+    void genFieldInitializer(const std::string& className, const std::string& fieldName, const Expr& init);
+
     // Names of all enum types (used to detect static variant access EnumName.VARIANT
     // and enum variable declarations). Enum field/method info is stored in cgClasses_.
     std::unordered_set<std::string>                   cgEnumNames_;

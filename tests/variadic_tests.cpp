@@ -664,7 +664,7 @@ TEST_CASE("variadic-method - receiver resolves via a parameter and via a bare fi
         }
         fn viaParam(Bag* b) -> i32 { return b.count(1, 2); }
         class Holder { mut Bag bag; Holder() {} fn viaField() -> i32 { return bag.count(1, 2, 3); } }
-        fn main() -> i32 { Bag b; Holder h; return viaParam(b) + h.viaField(); }
+        fn main() -> i32 { Bag b; Holder h(); return viaParam(b) + h.viaField(); }
     )");
     REQUIRE(ir.find("@Bag_count$Tuple$i32$i32(")     != std::string::npos);   // via the param receiver
     REQUIRE(ir.find("@Bag_count$Tuple$i32$i32$i32(") != std::string::npos);   // via the field receiver

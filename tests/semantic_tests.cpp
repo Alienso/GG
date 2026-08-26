@@ -126,6 +126,80 @@ TEST_CASE("Semantic - calling function with wrong argument count is an error", "
     REQUIRE(cap.contains("expects"));
 }
 
+// A generic class TEMPLATE name used bare, with no type arguments, is not itself a type — only a
+// concrete instantiation (`Vec<i32>`) is. The parser accepts a bare template name as a type token in
+// several positions (it only checks that the name is *some* known class/template, not that it was
+// ever instantiated), so this used to silently reach resolveTypeToken's Error fallback with no
+// diagnostic at all — and codegen's Error->IR fallback renders Error as a bogus `i32`, so e.g.
+// `Vec[5] arr;` quietly became a `[5 x i32]` of zeros instead of failing to compile. See
+// resolveTypeToken's final IDENTIFIER fallback in SemanticAnalyzer.cpp.
+TEST_CASE("Semantic - a bare generic class template used as a fixed-array element type is an error",
+          "[semantic][generics]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Vec<T> {
+            mut i32 dummy;
+            Vec() { dummy = 0; }
+        }
+        fn main() -> i32 {
+            Vec[5] arr;
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("unknown type 'Vec'"));
+}
+
+TEST_CASE("Semantic - a bare generic class template used as an ordinary variable type is an error",
+          "[semantic][generics]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Vec<T> {
+            mut i32 dummy;
+            Vec() { dummy = 0; }
+        }
+        fn main() -> i32 {
+            Vec v;
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("unknown type 'Vec'"));
+}
+
+TEST_CASE("Semantic - a bare generic class template used as a parameter type is an error",
+          "[semantic][generics]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Vec<T> {
+            mut i32 dummy;
+            Vec() { dummy = 0; }
+        }
+        fn take(Vec v) -> i32 { return 0; }
+        fn main() -> i32 { return 0; }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.contains("unknown type 'Vec'"));
+}
+
+// An actual instantiation (`Vec<i32>`) must keep working — this is purely additive.
+TEST_CASE("Semantic - a properly instantiated generic class is not an unknown type",
+          "[semantic][generics]") {
+    StderrCapture cap;
+    auto result = analyzeString(R"(
+        class Vec<T> {
+            mut i32 dummy;
+            Vec() { dummy = 0; }
+        }
+        fn main() -> i32 {
+            Vec<i32> v();
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+    REQUIRE_FALSE(cap.contains("unknown type"));
+}
+
 // ============================================================
 // Warning casts (allowed but flagged)
 // ============================================================

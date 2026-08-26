@@ -114,6 +114,8 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
             }
             // TypedPtr fields decode to a plain `ptr` in the struct (no refcount).
             cgi.fields.emplace_back(fd.name.lexeme, fieldType);
+            if (fd.initializer)
+                classFieldInits_[cls.name.lexeme].emplace_back(fd.name.lexeme, fd.initializer.get());
         }
         // A class needs a destructor if it declares one or owns reference fields.
         for (const MethodDecl& md : cls.methods)

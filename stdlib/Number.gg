@@ -25,7 +25,7 @@ class Integer {
 // NOTE: for T = i64, an input that genuinely overflows i64 is silently clamped by strtoll to
 // i64::MIN/MAX (no errno check here), so it is NOT detected as out-of-range — only i8/i16/i32 get
 // a real independent overflow check, since their bounds are strictly narrower than i64's.
-fn parseInt<T>(str s, T min, T max) -> T? {
+fn private parseInt<T>(str s, T min, T max) -> T? {
     ptr end = 0 as ptr;
     i64 res = strtoll(s.data, addressOf(end), 0);
     if (end == s.data) {
@@ -42,7 +42,7 @@ fn parseInt<T>(str s, T min, T max) -> T? {
 }
 
 
-fn parseUInt<T>(str s, T max) -> T? {
+fn private parseUInt<T>(str s, T max) -> T? {
     if (s.len == 0) {
         return null;
     }

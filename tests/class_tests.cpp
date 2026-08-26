@@ -857,7 +857,7 @@ TEST_CASE("RefField - field declared as Class& parses with '&' type", "[reffield
 
 TEST_CASE("RefField - a class with a reference field type-checks", "[reffield][semantic]") {
     auto r = analyzeString(R"(
-        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } }
+        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; this.next = new Node(0); } }
     )");
     REQUIRE_FALSE(r.hadError);
 }
@@ -883,7 +883,7 @@ TEST_CASE("ValueField - a value-object field may forward-reference a later class
 TEST_CASE("ValueField - embeds contiguously as a nested struct member", "[valuefield][codegen]") {
     auto ir = codegenString(R"(
         class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { x = a; y = b; } }
-        class Line  { mut Point start; mut Point end; Line() { } }
+        class Line  { mut Point start; mut Point end; Line() { start = Point(0,0); end = Point(0,0); } }
     )");
     REQUIRE(ir.find("%Line = type { %Point, %Point }") != std::string::npos);
 }
@@ -892,8 +892,8 @@ TEST_CASE("ValueField - clone deep-copies an embedded value field", "[valuefield
     // Copying a Line must recursively clone its Point fields, not shallow-copy a pointer.
     auto ir = codegenString(R"(
         class Point { mut i32 x; Point(i32 a) { x = a; } }
-        class Line  { mut Point start; Line() { } }
-        fn main() -> i32 { mut Line a; Line b = a; return 0; }
+        class Line  { mut Point start; Line() { start = Point(0); } }
+        fn main() -> i32 { mut Line a(); Line b = a; return 0; }
     )");
     REQUIRE(ir.find("define void @Line_clone(") != std::string::npos);
     REQUIRE(ir.find("call void @Point_clone(") != std::string::npos);   // recursive
@@ -910,8 +910,8 @@ TEST_CASE("ValueField - a value cycle is rejected", "[valuefield][semantic]") {
 TEST_CASE("ValueField - a reference field breaks a would-be cycle (accepted)",
           "[valuefield][semantic]") {
     auto r = analyzeString(R"(
-        class A { mut B& b; A() { } }
-        class B { mut A& a; B() { } }
+        class A { mut B& b; A() { b = new B(); } }
+        class B { mut A& a; B() { a = new A(); } }
     )");
     REQUIRE_FALSE(r.hadError);   // references are pointers — no infinite size
 }
@@ -961,7 +961,7 @@ TEST_CASE("ValueField - a value-object field works in a generic class", "[valuef
 
 TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[reffield][codegen]") {
     auto ir = codegenString(R"(
-        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } }
+        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; this.next = new Node(0); } }
         fn main() { Node& a = new Node(1); }
     )");
     REQUIRE(ir.find("%Node = type { i32, ptr }") != std::string::npos);
@@ -969,7 +969,7 @@ TEST_CASE("RefField - reference field lowers to a ptr slot in the struct", "[ref
 
 TEST_CASE("RefField - assigning a reference field retains new and releases old", "[reffield][codegen]") {
     auto ir = codegenString(R"(
-        class Node { i32 v; mut Node& next; Node(i32 x){ this.v=x; } }
+        class Node { i32 v; mut Node& next; Node(i32 x){ this.v=x; this.next = new Node(0); } }
         fn main() {
             mut Node& a = new Node(1);
             Node& b = new Node(2);
@@ -992,7 +992,7 @@ TEST_CASE("RefField - class with a ref field but no user dtor gets a synthesized
 
 TEST_CASE("RefField - destructor releases reference fields by GEP index", "[reffield][codegen]") {
     auto ir = codegenString(R"(
-        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; } ~Node(){ } }
+        class Node { i32 v; Node& next; Node(i32 x){ this.v=x; this.next = new Node(0); } ~Node(){ } }
         fn main() { Node& a = new Node(1); }
     )");
     auto dtorPos = ir.find("define void @Node_dtor(ptr %self)");

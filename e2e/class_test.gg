@@ -154,8 +154,8 @@ fn main() -> i32 {
 
     // ==== Point ===============================================================
 
-    // 1-2: Zero-init (declared without constructor call) — fields default to 0
-    Point zero;
+    // 1-2: Explicit zero construction (Point has no zero-arg constructor)
+    Point zero(0.0, 0.0);
     if (zero.x != 0.0) { return 1; }
     if (zero.y != 0.0) { return 2; }
 
@@ -233,8 +233,8 @@ fn main() -> i32 {
     Counter neg(-3);
     if (neg.isPositive())      { return 25; }
 
-    // 26: Zero-init (no explicit constructor call) — count defaults to 0
-    Counter blank;
+    // 26: Explicit zero construction (Counter has no zero-arg constructor)
+    Counter blank(0);
     if (blank.count != 0)      { return 26; }
 
     // 27: doubled() delegates to this.get()

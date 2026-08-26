@@ -399,7 +399,7 @@ TEST_CASE("ReturnSlot - a ref-field store still escapes even alongside an object
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Point { mut i32 x; Point(i32 a) { x = a; } }
-        class Holder { mut Point& item; Holder() {}
+        class Holder { mut Point& item; Holder() { item = new Point(0); }
                        fn stash(Point& v) mut -> Point out { this.item = v; out = v; return out; } }
         fn main() -> i32 {
             mut Holder& h = new Holder(); Point s(5);

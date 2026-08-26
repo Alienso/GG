@@ -1132,7 +1132,7 @@ TEST_CASE("Generics - generic class type-checks", "[generics][semantic]") {
 
 TEST_CASE("Generics - self-referential generic linked node", "[generics][codegen]") {
     auto ir = codegenString(R"(
-        class Node<T> { T value; mut Node<T>& next; Node(T v){ this.value=v; } }
+        class Node<T> { T value; mut Node<T>& next; Node(T v){ this.value=v; this.next = new Node<T>(v); } }
         fn main() { mut Node<i32>& n = new Node<i32>(1); n.next = new Node<i32>(2); }
     )");
     REQUIRE(irContains(ir, "%Node$i32 = type { i32, ptr }"));

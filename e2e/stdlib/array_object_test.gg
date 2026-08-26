@@ -39,7 +39,7 @@ fn makeBox(i32 x) -> Box b {
 fn pushAndDrop() -> i32 {
     mut Array<Box>& v = new Array<Box>();
     mut i32 i = 0;
-    while (i < 20) { Box e = makeBox(i); v.push(e); i = i + 1; }
+    while (i < 20) { Box e = makeBox(i); v.pushBack(e); i = i + 1; }
     if (v.size() != 20) { return 91; }
     return 0;
 }
@@ -48,9 +48,9 @@ fn pushAndDrop() -> i32 {
 fn pushThenPop() -> i32 {
     mut Array<Box>& v = new Array<Box>();
     mut i32 i = 0;
-    while (i < 6) { Box e = makeBox(i * 10); v.push(e); i = i + 1; }
+    while (i < 6) { Box e = makeBox(i * 10); v.pushBack(e); i = i + 1; }
     mut i32 sum = 0;
-    while (!v.isEmpty()) { Box got = v.pop(); sum = sum + got.get(); }
+    while (!v.isEmpty()) { Box got = v.popBack(); sum = sum + got.get(); }
     if (sum != 150) { return 92; }   // 0+10+20+30+40+50
     return 0;
 }
@@ -58,8 +58,8 @@ fn pushThenPop() -> i32 {
 // (3) overwrite live elements with set(i, ...) — the old element must be destroyed once.
 fn overwrite() -> i32 {
     mut Array<Box>& v = new Array<Box>();
-    v.push(makeBox(1));
-    v.push(makeBox(2));
+    v.pushBack(makeBox(1));
+    v.pushBack(makeBox(2));
     v.set(0, makeBox(100));   // destroys the old element 0, stores a new one
     if (v.get(0).get() != 100) { return 93; }
     return 0;
@@ -68,11 +68,11 @@ fn overwrite() -> i32 {
 // (4) clear() destroys all elements; reusing (push again) then dropping must also balance.
 fn clearAndReuse() -> i32 {
     mut Array<Box>& v = new Array<Box>();
-    v.push(makeBox(1));
-    v.push(makeBox(2));
+    v.pushBack(makeBox(1));
+    v.pushBack(makeBox(2));
     v.clear();
     if (!v.isEmpty()) { return 94; }
-    v.push(makeBox(3));   // re-push into a vacated (stale) slot — must re-construct cleanly
+    v.pushBack(makeBox(3));   // re-push into a vacated (stale) slot — must re-construct cleanly
     if (v.get(0).get() != 3) { return 95; }
     return 0;
 }
@@ -81,7 +81,7 @@ fn clearAndReuse() -> i32 {
 fn primitives() -> i32 {
     mut Array<i32>& a = new Array<i32>();
     mut i32 i = 0;
-    while (i < 10) { a.push(i * i); i = i + 1; }   // literal/temporary via temp-materialization
+    while (i < 10) { a.pushBack(i * i); i = i + 1; }   // literal/temporary via temp-materialization
     if (a.size() != 10) { return 96; }
     if (a.get(9) != 81) { return 97; }
     return 0;

@@ -15,8 +15,8 @@ TEST_CASE("Escape - storing a borrowed value object into a reference field is re
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn keep(Point& q) mut { p = q; } }
-        fn main() -> i32 { Point v(3); mut Box b; b.keep(v); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn keep(Point& q) mut { p = q; } }
+        fn main() -> i32 { Point v(3); mut Box b(); b.keep(v); return 0; }
     )");
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("escapes"));
@@ -26,8 +26,8 @@ TEST_CASE("Escape - `this.field = q` (explicit) is also rejected", "[escape][sem
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn keep(Point& q) mut { this.p = q; } }
-        fn main() -> i32 { Point v(3); mut Box b; b.keep(v); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn keep(Point& q) mut { this.p = q; } }
+        fn main() -> i32 { Point v(3); mut Box b(); b.keep(v); return 0; }
     )");
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("escapes"));
@@ -64,8 +64,8 @@ TEST_CASE("Escape - passing a heap reference to a storing parameter is allowed",
     // A real reference co-owns its target, so escaping is fine — the check is gated on value objects.
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn keep(Point& q) mut { p = q; } }
-        fn main() -> i32 { Point& r = new Point(3); mut Box b; b.keep(r); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn keep(Point& q) mut { p = q; } }
+        fn main() -> i32 { Point& r = new Point(3); mut Box b(); b.keep(r); return 0; }
     )");
     REQUIRE_FALSE(r.hadError);
 }
@@ -128,8 +128,8 @@ TEST_CASE("Escape - a store nested inside control flow still escapes", "[escape]
     StderrCapture cap;
     auto r = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn keep(Point& q, bool c) mut { if (c) { p = q; } } }
-        fn main() -> i32 { Point v(3); mut Box b; b.keep(v, true); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn keep(Point& q, bool c) mut { if (c) { p = q; } } }
+        fn main() -> i32 { Point v(3); mut Box b(); b.keep(v, true); return 0; }
     )");
     REQUIRE(r.hadError);
     REQUIRE(cap.contains("escapes"));
@@ -140,16 +140,16 @@ TEST_CASE("Escape - only the escaping parameter is rejected (per-parameter)", "[
     StderrCapture cap;
     auto bad = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn set2(Point& a, Point& b) mut { p = a; } }
-        fn main() -> i32 { Point v(3); Point& r = new Point(9); mut Box b; b.set2(v, r); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn set2(Point& a, Point& b) mut { p = a; } }
+        fn main() -> i32 { Point v(3); Point& r = new Point(9); mut Box b(); b.set2(v, r); return 0; }
     )");
     REQUIRE(bad.hadError);
     REQUIRE(cap.contains("escapes"));
 
     auto ok = analyzeString(R"(
         class Point { mut i32 x; Point(i32 v) { x = v; } }
-        class Box { mut Point& p; Box() { } fn set2(Point& a, Point& b) mut { p = a; } }
-        fn main() -> i32 { Point v(3); Point& r = new Point(9); mut Box b; b.set2(r, v); return 0; }
+        class Box { mut Point& p; Box() { p = new Point(0); } fn set2(Point& a, Point& b) mut { p = a; } }
+        fn main() -> i32 { Point v(3); Point& r = new Point(9); mut Box b(); b.set2(r, v); return 0; }
     )");
     REQUIRE_FALSE(ok.hadError);
 }
@@ -160,10 +160,10 @@ TEST_CASE("Escape - a local shadowing a reference field is a rebind, not a field
         class Point { mut i32 x; Point(i32 v) { x = v; } }
         class Box {
             mut Point& p;
-            Box() { }
+            Box() { p = new Point(0); }
             fn use(Point& q) mut { mut Point& p = new Point(0); p = q; }
         }
-        fn main() -> i32 { Point v(3); mut Box b; b.use(v); return 0; }
+        fn main() -> i32 { Point v(3); mut Box b(); b.use(v); return 0; }
     )");
     REQUIRE_FALSE(r.hadError);
 }

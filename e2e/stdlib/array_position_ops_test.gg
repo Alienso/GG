@@ -36,7 +36,7 @@ impl Clone for Tracked {
 
 fn main() -> i32 {
     // ---- primitive T ----
-    mut Array<i32> a;
+    mut Array<i32> a();
     a.pushBack(1);
     a.pushBack(2);
     a.pushBack(3);          // [1,2,3]
@@ -64,7 +64,7 @@ fn main() -> i32 {
 
     // ---- resource-owning T: same operations must not leak / double-free ----
     {
-        mut Array<Tracked> t;
+        mut Array<Tracked> t();
         t.emplaceBack(1);
         t.emplaceBack(2);
         t.emplaceBack(3);      // [1,2,3], liveCount == 3

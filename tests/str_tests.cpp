@@ -181,9 +181,10 @@ TEST_CASE("str - is usable as a value-object field", "[str]") {
 TEST_CASE("str - String(str) constructs from a literal without strlen", "[str][stdlib]") {
     // The stdlib String ctor takes a `str`; it uses `.len` (no strlen call needed).
     auto ir = codegenString(R"(
+        extern malloc(u64 size) -> ptr;
         class String {
             private ptr data; private u64 size;
-            String(str literal) { this.size = literal.len; }
+            String(str literal) { this.size = literal.len; this.data = malloc(1); }
             fn size2() -> u64 { return this.size; }
         }
         fn main() -> i32 { String s("hello"); return 0; }

@@ -11,7 +11,7 @@ fn main() -> i32 {
     // Push past the initial capacity (8) to force at least one growth.
     mut i32 i = 0;
     while (i < 20) {
-        a.push(i * i);
+        a.pushBack(i * i);
         i = i + 1;
     }
     if (a.size() != 20)      { return 3; }
@@ -32,7 +32,7 @@ fn main() -> i32 {
     if (a[0] != 7)    { return 10; }
 
     // pop returns the last element and shrinks the size.
-    i32 last = a.pop();
+    i32 last = a.popBack();
     if (last != 361)  { return 11; }
     if (a.size() != 19) { return 12; }
 

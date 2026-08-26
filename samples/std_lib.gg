@@ -2,10 +2,18 @@ import std.math.vector.vec2;
 import std.io.*;
 import std.String;
 import std.Array;
+import std.utility.HashMap;
 
 fn main() -> i32 {
-    mut Array<i32> arr;
+    mut Array<i32> arr();
     arr.pushBack(1);
     print(arr[0]);
-    return arr.get(0);
+
+    i32[5] array;
+
+    HashMap<i32, String> stringMap{};
+
+
+
+    return 0;
 }

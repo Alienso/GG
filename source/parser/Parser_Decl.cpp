@@ -142,6 +142,29 @@ Stmt Parser::parseClassDecl() {
     std::deque<MethodDecl> methods;
     parseMemberList(name, fields, methods, /*allowDestructor=*/true, /*isEnum=*/false);
 
+    // A class with field default initializers (`= expr` / `{args}`) but NO user-written constructor
+    // needs a real constructor to host them — synthesize an empty `ClassName() { }`, exactly as if
+    // the author had written it themselves. This is what makes a field-initializer-only class (the
+    // flagship case: every field defaulted, no explicit ctor at all) work at all — without a real
+    // MethodDecl there is nothing for codegen's constructor-prologue field-init injection to attach
+    // to, and nothing for the class-with-a-constructor deferred-init rule to see either. A class
+    // with a user ctor is unaffected (the user's own ctor already hosts the prologue injection).
+    bool hasOwnCtor = false;
+    for (const MethodDecl& md : methods)
+        if (md.isConstructor) { hasOwnCtor = true; break; }
+    bool hasFieldInit = false;
+    for (const FieldDecl& fd : fields)
+        if (!fd.isStatic && fd.initializer) { hasFieldInit = true; break; }
+    if (!hasOwnCtor && hasFieldInit) {
+        methods.push_back(MethodDecl{
+            /*isPublic=*/true, /*isConstructor=*/true, /*isDestructor=*/false, /*isStatic=*/false,
+            /*isMut=*/false, /*hasBody=*/true,
+            name,   // returnType token = class name token (no actual return type)
+            name,   // name token
+            /*params=*/{}, BlockStmt{}
+        });
+    }
+
     consume(TokenType::RIGHT_BRACE, "expected '}' after class body");
     Stmt s = makeStmt(ClassDeclStmt{ name, std::move(fields), std::move(methods) });
     std::get<ClassDeclStmt>(*s.node).sourceFile = filename;   // for cross-import error attribution
@@ -436,7 +459,7 @@ void Parser::parseMemberList(const Token& name,
             continue;
         }
 
-        // Field: `[modifiers] Type[&] name [= const];`. A '(' here means a method was
+        // Field: `[modifiers] Type[&] name [= expr | {args}];`. A '(' here means a method was
         // written without the required `fn` keyword.
         if (!isTypeName()) throw error(peek(), "expected 'fn', a field, or a constructor");
         Token memberType = consumeType();
@@ -446,10 +469,27 @@ void Parser::parseMemberList(const Token& name,
             throw error(memberName, "methods must be declared with 'fn' (e.g. 'fn "
                         + memberType.lexeme + " " + memberName.lexeme + "(...)')");
 
-        // Field — a static field may carry a constant initializer.
+        // Field initializer — `= expr` (any field: static or instance) or `{args}` (brace-construct
+        // an object-typed field, mirroring the local var-decl `Type name{args}` sugar — `consumeType`
+        // already synthesized `memberType` to the mangled instantiation and registered it in
+        // `classNames`, exactly as a local's type token does, so the same class-name gate applies).
+        // Semantics enforces the self-contained-only rule for INSTANCE fields (no `this`/params/other
+        // fields) — statics were already self-contained (they run with no enclosing `this`).
+        // Enums are EXCLUDED from the new instance-field-initializer forms (they have their own,
+        // separate, already-correct model: fields are set via variant constructor args, immutable
+        // thereafter) — only the pre-existing static-field `=` form is preserved for enums, matching
+        // prior behavior exactly (a static-on-enum is already a distinct semantic error either way).
         std::unique_ptr<Expr> initializer;
-        if (isStatic && match({ TokenType::EQUAL })) {
+        if ((isStatic || !isEnum) && match({ TokenType::EQUAL })) {
             initializer = box(parseExpression());
+        } else if (!isEnum && check(TokenType::LEFT_BRACE) && classNames.count(memberType.lexeme) > 0) {
+            advance();  // consume '{'
+            std::vector<Token> argNames;
+            std::vector<bool>  argSpreads;
+            std::vector<std::unique_ptr<Expr>> args =
+                parseCallArgs(argNames, TokenType::RIGHT_BRACE, /*allowNames=*/false, &argSpreads);
+            for (bool s : argSpreads) if (s) { unwrapSpreadArgs(args, argNames, argSpreads); break; }
+            initializer = box(makeExpr(CallExpr{ memberType, std::move(args), std::move(argNames) }));
         }
         consume(TokenType::SEMICOLON, "expected ';' after field declaration");
         // Make instance fields capturable by a lambda in a later method body.

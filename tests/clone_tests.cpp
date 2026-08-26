@@ -66,7 +66,7 @@ TEST_CASE("Clone - an owning-ptr value object WITHOUT a Clone impl is still reje
             Vec() { count = 0; data = malloc(64 * sizeof(T)); }
             fn push(T* value) mut { data[count] = value; count = count + 1; }
         }
-        fn main() -> i32 { mut Vec<Buf>& v = new Vec<Buf>(); Buf b; v.push(b); return 0; }
+        fn main() -> i32 { mut Vec<Buf>& v = new Vec<Buf>(); Buf b(); v.push(b); return 0; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("impl Clone"));
@@ -87,7 +87,7 @@ TEST_CASE("Clone - an embedded Clone field routes the generated memberwise clone
     // embedded `Bytes b` field, must call @Bytes_clone (the user's deep copy). Recursion composes
     // through plain embedding, not just Array elements.
     std::string ir = codegenString(std::string(BYTES_CLONE) + R"(
-        class Wrap { mut Bytes b; Wrap(u64 n) { } }
+        class Wrap { mut Bytes b; Wrap(u64 n) { b = Bytes(n); } }
         fn main() -> i32 { Wrap x(2); Wrap y = x; return 0; }   // value copy → Wrap_clone → Bytes_clone
     )");
     // Wrap's clone is generated (memberwise); Bytes's is the user impl. Both exist.
@@ -184,8 +184,8 @@ TEST_CASE("Clone - copying a class embedding a Clone field is allowed (recursion
     // `Wrap` doesn't impl Clone, but its only raw ptr is inside an embedded `Bytes` field that DOES —
     // the generated memberwise clone recurses through @Bytes_clone (deep). So a copy is safe.
     auto result = analyzeString(std::string(BYTES_CLONE) + R"(
-        class Wrap { mut Bytes b; Wrap() { } }
-        fn main() -> i32 { mut Wrap x; Wrap y = x; return 0; }
+        class Wrap { mut Bytes b; Wrap() { b = Bytes(0); } }
+        fn main() -> i32 { mut Wrap x(); Wrap y = x; return 0; }
     )");
     REQUIRE_FALSE(result.hadError);
 }

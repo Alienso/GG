@@ -125,7 +125,7 @@ TEST_CASE("genericmethod - calling a mut generic method through an immutable bin
     StderrCapture cap;
     auto result = analyzeString(R"(
         class Box { mut i32 v; Box() { v = 0; } fn set<T>(T x) mut { v = 1; } }
-        fn main() -> i32 { Box b; b.set<i32>(5); return 0; }   // b is immutable
+        fn main() -> i32 { Box b(); b.set<i32>(5); return 0; }   // b is immutable
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("immutable binding"));
@@ -148,7 +148,7 @@ TEST_CASE("genericmethod - a bounded generic method enforces its trait bound", "
         class Widget { mut i32 v; Widget() { v = 7; } }
         impl Show for Widget { fn show() -> i32 { return 7; } }
         class Runner { fn run<T: Show>(T* w) -> i32 { return w.show(); } }
-        fn main() -> i32 { Runner r; Widget wi; return r.run<Widget>(wi); }
+        fn main() -> i32 { Runner r; Widget wi(); return r.run<Widget>(wi); }
     )");
     REQUIRE_FALSE(ok.hadError);
 
@@ -158,7 +158,7 @@ TEST_CASE("genericmethod - a bounded generic method enforces its trait bound", "
         trait Show { fn show() -> i32; }
         class Plain { mut i32 v; Plain() { v = 0; } }
         class Runner { fn run<T: Show>(T* w) -> i32 { return 0; } }
-        fn main() -> i32 { Runner r; Plain p; return r.run<Plain>(p); }
+        fn main() -> i32 { Runner r; Plain p(); return r.run<Plain>(p); }
     )");
     REQUIRE(bad.hadError);
     REQUIRE(cap.contains("does not satisfy bound 'Show'"));
@@ -270,7 +270,7 @@ TEST_CASE("genericmethod - a `<` comparison of a member named like a generic met
     std::string ir = codegenString(R"(
         class Other { fn count<T>(T x) -> T { return x; } }
         class Box { mut i32 count; Box() { count = 3; } fn c() -> i32 { return count; } }
-        fn main() -> i32 { Box b; i32 n = 5; if (b.c() < n) { return 1; } return 0; }
+        fn main() -> i32 { Box b(); i32 n = 5; if (b.c() < n) { return 1; } return 0; }
     )");
     REQUIRE(ir.find("icmp slt") != std::string::npos);   // the comparison survived
 }
@@ -415,7 +415,7 @@ TEST_CASE("genericmethod - sigil strip applies in PARAMETER position, not just r
         }
         fn main() -> i32 {
             Point& b = new Point(7);
-            mut Reader<Point&> r;
+            mut Reader<Point&> r();
             r.readStar(b);
             return r.lastSeen;
         }

@@ -112,8 +112,8 @@ TEST_CASE("Refcount - an embedded value field that owns a reference is cloned + 
     std::string ir = codegenString(R"(
         class Node   { mut i32 v; Node(i32 x) { v = x; } ~Node() { } }
         class Holder { mut Node& n; Holder(Node& x) { n = x; } }
-        class Wrap   { mut Holder h; Wrap() { } }
-        fn main() -> i32 { mut Wrap a; Wrap b = a; return 0; }
+        class Wrap   { mut Holder h; Wrap() { h = Holder(new Node(0)); } }
+        fn main() -> i32 { mut Wrap a(); Wrap b = a; return 0; }
     )");
     // Recursion in both directions.
     REQUIRE(functionBody(ir, "define void @Wrap_clone(").find("call void @Holder_clone(")

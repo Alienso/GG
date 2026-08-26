@@ -1358,6 +1358,13 @@ Type SemanticAnalyzer::analyzeAssign(const AssignExpr& assign) {
             }
             Type rhs = analyzeWithExpected(*assign.value, f->type);
             checkCast(rhs, f->type, assign.name, "field assignment");
+            // A bare `field = value` write (implicit `this`) inside the class's own constructor
+            // marks the field as definitely assigned — mirrors the explicit `this.field = ` hook in
+            // analyzeMemberAssign. (Reached here only when inConstructor, since a non-ctor method
+            // writing a non-mut field already errored above and returned; a mut field is reachable
+            // from any mut method too, but setFieldInitialized is a no-op outside a constructor —
+            // resetCtorFields is only ever seeded when analyzing a constructor.)
+            symbolTable.setFieldInitialized(assign.name.lexeme);
             return f->type;
         }
         if (const ClassInfo::StaticField* sf = currentStaticField(assign.name.lexeme)) {
@@ -1912,65 +1919,35 @@ Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
             warnConstToMut(varDecl.name, *varDecl.initializer, declaredType);
     }
 
-    // A bare `ClassName name;` (no initializer) for an Object type: does the class have a
-    // constructor callable with ZERO arguments (no constructor at all, or an overload every one of
-    // whose params has a default)? If so, record it (`resolvedCallee[&varDecl]`, reusing the exact
-    // same node→mangled-name handoff a real call/new node gets — a VarDeclExpr address never
-    // collides with those) so codegen auto-invokes it, exactly as if the author had written
-    // `ClassName name();` — the class's own invariant-establishing logic (e.g. `Array`'s ctor
-    // setting up cap/data) then actually runs, instead of the bare declaration silently leaving the
-    // struct merely zero-initialized. A genuinely ctor-less class needs no entry (zero-init IS its
-    // complete valid state; emitObjectDirectInit's "no constructor" no-op path already covers a
-    // literal `ClassName()`/`ClassName{}`, and this needs no auto-invocation to match). Two
-    // zero-arg-callable overloads at once is treated the same as "no default" (ambiguous — bail)
-    // rather than guessing.
-    bool objectHasAnyCtor    = false;
-    bool objectHasZeroArgCtor = false;
+    // A bare `ClassName name;` (no initializer) for an Object type NEVER implicitly calls a
+    // constructor — not even a zero-arg-callable one. A class with ANY user constructor requires an
+    // EXPLICIT call to be considered initialized: either `ClassName name();`/`ClassName name{}`
+    // (parses as an ordinary initializer — the ordinary "explicit initializer present" branch above,
+    // unaffected by this) or a later assignment `name = ClassName(...);` on every reachable path
+    // before first use (deferred init, exactly like an uninitialized primitive — see analyzeAssign's
+    // directConstructAssigns_, which then constructs directly into the destination with no temp/
+    // clone). This is a deliberate no-magic rule: whether a bare declaration is safe to use
+    // immediately must never depend on the invisible detail of whether the class happens to also
+    // have a zero-arg overload. A genuinely ctor-less class is unaffected — zero-init IS its
+    // complete, valid state, since there is no constructor logic to skip.
+    bool objectHasAnyCtor = false;
     if (elementType.kind == TypeKind::Object && !varDecl.initializer) {
         auto clsIt = classRegistry.find(elementType.className);
         if (clsIt != classRegistry.end()) {
             auto ctorIt = clsIt->second.methods.find(elementType.className);
-            if (ctorIt != clsIt->second.methods.end() && !ctorIt->second.empty()) {
-                objectHasAnyCtor = true;
-                const std::vector<ClassInfo::Method>& set = ctorIt->second;
-                const ClassInfo::Method* zeroArgCtor = nullptr;
-                for (const auto& m : set) {
-                    if (m.numDefaults >= m.paramTypes.size()) {
-                        if (zeroArgCtor) { zeroArgCtor = nullptr; break; }   // ambiguous — bail
-                        zeroArgCtor = &m;
-                    }
-                }
-                if (zeroArgCtor) {
-                    objectHasZeroArgCtor = true;
-                    std::string base = elementType.className + "_" + elementType.className;
-                    resolvedCallee[&varDecl] = set.size() > 1
-                        ? mangleOverload(base, zeroArgCtor->paramTypes, zeroArgCtor->returnType)
-                        : base;
-                }
-            }
+            objectHasAnyCtor = ctorIt != clsIt->second.methods.end() && !ctorIt->second.empty();
         }
     }
 
     // Decide whether the variable starts as definitely initialized:
-    //   - explicit initializer present                              → yes
-    //   - Object (class value), no ctor OR a zero-arg-callable one   → yes (zero-init is complete,
-    //                                                                    or codegen auto-invokes it)
-    //   - Object (class value), ctor(s) exist but NONE is zero-arg-  → no — there is no default
-    //     callable                                                     construction available; the
-    //                                                                   bare declaration must be
-    //                                                                   treated like a primitive
-    //                                                                   (assign before use), which
-    //                                                                   in turn lets the FIRST
-    //                                                                   assignment on any reachable
-    //                                                                   path pick whichever
-    //                                                                   constructor fits and
-    //                                                                   construct directly with no
-    //                                                                   overhead — see
-    //                                                                   analyzeAssign's
-    //                                                                   directConstructAssigns_.
-    //   - Array: zero-initialized by the runtime                     → yes
-    //   - Everything else (primitives, references)                   → no (must be assigned before use)
-    bool objectNeedsDeferredInit = objectHasAnyCtor && !objectHasZeroArgCtor;
+    //   - explicit initializer present               → yes
+    //   - Object (class value), no constructor at all → yes (zero-init is its complete valid state)
+    //   - Object (class value), any constructor exists → no — always deferred; the FIRST assignment
+    //     on any reachable path picks whichever constructor fits and constructs directly with no
+    //     overhead (see analyzeAssign's directConstructAssigns_).
+    //   - Array: zero-initialized by the runtime      → yes
+    //   - Everything else (primitives, references)     → no (must be assigned before use)
+    bool objectNeedsDeferredInit = objectHasAnyCtor;
     bool isInit = varDecl.initializer != nullptr
                || (elementType.kind == TypeKind::Object && !objectNeedsDeferredInit)
                || varDecl.arraySize > 0
@@ -2452,6 +2429,10 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
 
     Type valueType = analyzeWithExpected(*memberAssign.value, field.type);
     checkCast(valueType, field.type, memberAssign.field, "field assignment");
+    // A `this.field = value` write inside the class's own constructor marks the field as
+    // definitely assigned for the constructor-must-initialize-every-field check.
+    if (inConstructor && std::holds_alternative<ThisExpr>(*memberAssign.object->node))
+        symbolTable.setFieldInitialized(memberAssign.field.lexeme);
     return field.type;
 }
 

@@ -1,0 +1,10 @@
+module std.utility;
+
+import std.Array;
+import std.utility.List;
+
+class HashMap<K,V> {
+
+    Array<List<V>> values{};
+
+}

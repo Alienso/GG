@@ -140,7 +140,7 @@ add_executable(GG_tests
         tests/semantic_tests.cpp
         tests/codegen_tests.cpp
         tests/import_tests.cpp
-        tests/stdlib_tests.cpp
+        tests/stdlib/stdlib_tests.cpp
         tests/array_tests.cpp
         tests/array_object_tests.cpp
         tests/clone_tests.cpp

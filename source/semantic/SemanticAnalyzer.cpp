@@ -237,7 +237,8 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         info.fieldOrder.push_back(fd.name.lexeme);
         // emplace constructs in-place, avoiding copy/move-assignment of Token
         info.fields.emplace(fd.name.lexeme,
-            ClassInfo::Field{fd.isPublic, fd.isMut, fieldType, fieldIndex++, fd.name});
+            ClassInfo::Field{fd.isPublic, fd.isMut, fd.initializer != nullptr, fieldType,
+                             fieldIndex++, fd.name});
     }
     // REFERENCE field names — escape analysis treats `field = param` as an escape only for these
     // (storing into a value-object field is a deep copy, not a reference escape).
@@ -925,6 +926,18 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) {
         return makeEnumType(typeToken.lexeme);
     if (typeToken.type == TokenType::IDENTIFIER && declaredClassNames_.count(typeToken.lexeme))
         return makeObjectType(typeToken.lexeme);
+    // Any other identifier is an unresolvable type name — most commonly a generic class template
+    // used bare, with no type arguments (`Array` instead of `Array<i32>`; the parser accepts a bare
+    // template name as a type token in some positions, e.g. the fixed-size-array declaration grammar
+    // `Type[N] name;`, since it only checks that the name is *some* known class/template, not that it
+    // was actually instantiated). Previously this fell straight through to typeFromToken's Error
+    // fallback with no diagnostic at all — every caller assumes an Error result already had `error()`
+    // called on it, so the type silently propagated (codegen's Error→IR fallback renders it as a bogus
+    // `i32`, e.g. `Array[5] arr;` quietly became a `[5 x i32]` of zeros instead of failing to compile).
+    if (typeToken.type == TokenType::IDENTIFIER) {
+        error(typeToken, "unknown type '" + typeToken.lexeme + "'");
+        return Type{TypeKind::Error};
+    }
     return typeFromToken(typeToken.type);
 }
 

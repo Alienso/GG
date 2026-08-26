@@ -10,7 +10,8 @@ class Array<T> {
     Array() {
         count = 0;
         cap   = 8;
-        data  = malloc(cap * sizeof(T));
+        data  = calloc(cap, sizeof(T));
+        //for (mut i32 i = 0; i < )
     }
 
     ~Array() {
@@ -39,7 +40,7 @@ class Array<T> {
     fn contains(T* value) -> bool {
         mut u64 i = 0;
         while (i < count) {
-            if (data[i] == value) { return true; }
+            if (value == data[i]) { return true; }
             i = i + 1;
         }
         return false;
@@ -71,9 +72,6 @@ class Array<T> {
         }
         mut u64 target = pos as u64;
         mut u64 i = count;
-        // Shift the tail right one slot at a time: clone the element forward into the freshly
-        // grown/still-unused slot, then destroy the now-duplicated source so its old slot is
-        // "empty" again for the next iteration (mirrors popBack's clone-out-then-destroy transfer).
         while (i > target) {
             data[i] = data[i - 1];
             destroy(data[i - 1]);
@@ -118,8 +116,8 @@ class Array<T> {
     fn pop(i32 pos) mut -> T out {
         if (pos < 0 || (pos as u64) >= count) { abort(); }
         mut u64 target = pos as u64;
-        out = data[target];        // clone the removed value out into the return slot
-        destroy(data[target]);     // release the original now that `out` holds an independent copy
+        out = data[target];
+        destroy(data[target]);
         mut u64 i = target;
         while (i + 1 < count) {
             data[i] = data[i + 1];

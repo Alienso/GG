@@ -523,7 +523,8 @@ TEST_CASE("Trait - a < b lowers to cmp call plus icmp against zero", "[trait][op
 
 TEST_CASE("Generic impl - monomorphizes alongside the class instantiation", "[trait][generic][impl]") {
     std::string ir = codegenString(R"(
-        class Box<T> { ptr<T> data; Box() { } }
+        extern malloc(u64 size) -> ptr;
+        class Box<T> { ptr<T> data; Box() { data = malloc(8); } }
         impl<T> Index for Box<T> {
             fn get(i32 i) -> T { return data[i]; }
         }
@@ -535,7 +536,8 @@ TEST_CASE("Generic impl - monomorphizes alongside the class instantiation", "[tr
 
 TEST_CASE("Generic impl - obj[i] dispatches to the generic Index impl", "[trait][generic][impl]") {
     std::string ir = codegenString(R"(
-        class Box<T> { ptr<T> data; Box() { } }
+        extern malloc(u64 size) -> ptr;
+        class Box<T> { ptr<T> data; Box() { data = malloc(8); } }
         impl<T> Index for Box<T> {
             fn get(i32 i) -> T { return data[i]; }
             fn set(i32 i, T v) -> void { data[i] = v; }
@@ -552,7 +554,8 @@ TEST_CASE("Generic impl - obj[i] dispatches to the generic Index impl", "[trait]
 
 TEST_CASE("Generic impl - two distinct instantiations each get their own impl", "[trait][generic][impl]") {
     std::string ir = codegenString(R"(
-        class Box<T> { ptr<T> data; Box() { } }
+        extern malloc(u64 size) -> ptr;
+        class Box<T> { ptr<T> data; Box() { data = malloc(8); } }
         impl<T> Index for Box<T> { fn get(i32 i) -> T { return data[i]; } }
         fn main() -> i32 {
             Box<i32>& a = new Box<i32>();
@@ -608,7 +611,8 @@ TEST_CASE("Generic impl - reordered type parameters in the target", "[trait][gen
 TEST_CASE("Generic impl - a user (non-operator) trait method is callable", "[trait][generic][impl]") {
     std::string ir = codegenString(R"(
         trait Show { fn show() -> i32; }
-        class Box<T> { ptr<T> data; Box() { } }
+        extern malloc(u64 size) -> ptr;
+        class Box<T> { ptr<T> data; Box() { data = malloc(8); } }
         impl<T> Show for Box<T> { fn show() -> i32 { return 42; } }
         fn main() -> i32 { Box<i32>& b = new Box<i32>(); return b.show(); }
     )");
@@ -618,7 +622,8 @@ TEST_CASE("Generic impl - a user (non-operator) trait method is callable", "[tra
 TEST_CASE("Generic impl - Self resolves to the concrete instantiation", "[trait][generic][impl]") {
     auto r = analyzeString(R"(
         trait Combine { fn merge(Self& o) -> Self&; }
-        class Box<T> { ptr<T> data; Box() { } }
+        extern malloc(u64 size) -> ptr;
+        class Box<T> { ptr<T> data; Box() { data = malloc(8); } }
         impl<T> Combine for Box<T> { fn merge(Self& o) -> Self& { return o; } }
         fn main() -> i32 {
             Box<i32>& a = new Box<i32>();

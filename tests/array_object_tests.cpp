@@ -101,7 +101,7 @@ TEST_CASE("ArrayObj - a value object owning a raw ptr is rejected as a ptr<T> el
             Vec() { count = 0; data = malloc(64 * sizeof(T)); }
             fn push(T* value) mut { data[count] = value; count = count + 1; }
         }
-        fn main() -> i32 { mut Vec<Buf>& v = new Vec<Buf>(); Buf b; v.push(b); return 0; }
+        fn main() -> i32 { mut Vec<Buf>& v = new Vec<Buf>(); Buf b(); v.push(b); return 0; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("owns a raw buffer"));
@@ -157,7 +157,7 @@ TEST_CASE("ArrayObj - a mut T* param still rejects a temporary", "[array-object]
     StderrCapture cap;
     auto result = analyzeString(R"(
         class C { mut i32 v; C() { v = 0; } fn take(mut i32* r) mut { r = 9; } }
-        fn main() -> i32 { mut C c; c.take(5); return 0; }
+        fn main() -> i32 { mut C c(); c.take(5); return 0; }
     )");
     REQUIRE(result.hadError);
     REQUIRE(cap.contains("write through it would be lost"));

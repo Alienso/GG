@@ -344,6 +344,10 @@ void SemanticAnalyzer::analyzeReturn(const ReturnStmt& returnStmt) {
             error(returnStmt.keyword, "return with no value in function returning "
                   + typeName(*currentReturnType));
         }
+        // An early `return;` inside a constructor must not skip a field that has no default
+        // initializer — check the CURRENT (live, at-this-point) state, catching exactly the paths
+        // the after-the-body check (checkCtorFieldsInitialized called post-loop) cannot see.
+        checkCtorFieldsInitialized(returnStmt.keyword);
         return;
     }
 
@@ -382,6 +386,18 @@ void SemanticAnalyzer::checkReturnAliasAssignedAtExit(const BlockStmt& body, con
     if (aliasSym && !aliasSym->isInitialized)
         error(where, "return alias '" + currentReturnSlotName_
               + "' may be unassigned when the function returns");
+}
+
+void SemanticAnalyzer::checkCtorFieldsInitialized(const Token& where) {
+    if (!inConstructor || currentClassName.empty()) return;
+    auto clsIt = classRegistry.find(currentClassName);
+    if (clsIt == classRegistry.end()) return;
+    for (const std::string& fieldName : clsIt->second.fieldOrder) {
+        if (!symbolTable.isFieldInitialized(fieldName))
+            error(where, "field '" + fieldName + "' is not initialized in constructor '"
+                  + currentClassName + "'; assign it, or give it a default value at its declaration "
+                  "(e.g. '" + fieldName + " = ...;')");
+    }
 }
 
 void SemanticAnalyzer::analyzeParamDefaults(const std::vector<ParamDecl>& params) {
@@ -490,8 +506,8 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
     std::string savedFilename  = filename;   // report errors against the class's declaring file
     if (!classDecl.sourceFile.empty()) filename = classDecl.sourceFile;
 
-    // Gate raw pointer field types behind --unsafe-ptr, and type-check the constant
-    // initializer of each static field against its declared type.
+    // Gate raw pointer field types behind --unsafe-ptr, and type-check the initializer of each
+    // field (static or instance) against its declared type.
     for (const FieldDecl& fd : classDecl.fields) {
         checkRawPtrAllowed(fd.typeName, fd.name);
         if (fd.isStatic && fd.initializer) {
@@ -501,6 +517,18 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
             // i64, not the wrapping i32 default). Mirrors the local-var-decl path (analyzeVarDecl).
             Type initType  = analyzeWithExpected(*fd.initializer, fieldType);
             checkCast(initType, fieldType, fd.name, "static field initializer");
+        } else if (!fd.isStatic && fd.initializer) {
+            // Instance field default initializer (`= expr` or `{args}`) — v1 is SELF-CONTAINED
+            // ONLY: no `this`, no other fields, no constructor params. Clear currentClassName for
+            // the duration (mirrors analyzeParamDefaults' identical guard for the same reason) so a
+            // bare name can't resolve via the implicit-field fallback, and `this` is a clean "used
+            // outside of a class method" error rather than silently resolving to this class.
+            Type fieldType = resolveTypeToken(fd.typeName);
+            std::string savedClassNameForInit = currentClassName;
+            currentClassName = "";
+            Type initType = analyzeWithExpected(*fd.initializer, fieldType);
+            currentClassName = savedClassNameForInit;
+            checkCast(initType, fieldType, fd.name, "field initializer");
         }
     }
 
@@ -530,6 +558,40 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
             checkRawPtrAllowed(param.typeName, param.name);
 
         enterScope();  // method scope
+
+        // Seed constructor field-initialization tracking: each instance field starts "initialized"
+        // iff any of —
+        //   - it has a default initializer at its declaration (ClassInfo::Field::hasInitializer);
+        //   - its type is NULLABLE — a nullable field's zero-initialized state (null / an empty tag)
+        //     is already a meaningful, deliberate value (the field is "absent");
+        //   - it is an embedded value-object field whose class has NO constructor at all — zero
+        //     bytes genuinely IS that class's complete, valid state (mirrors the identical
+        //     ctor-less-class exemption for locals in analyzeVarDecl).
+        // Otherwise the constructor must definitely assign the field somewhere in its own body.
+        if (md.isConstructor) {
+            auto clsIt = classRegistry.find(className);
+            if (clsIt != classRegistry.end()) {
+                std::vector<std::pair<std::string, bool>> seed;
+                for (const std::string& fieldName : clsIt->second.fieldOrder) {
+                    auto fit = clsIt->second.fields.find(fieldName);
+                    bool alreadyInit = false;
+                    if (fit != clsIt->second.fields.end()) {
+                        const ClassInfo::Field& f = fit->second;
+                        alreadyInit = f.hasInitializer || f.type.isNullable;
+                        if (!alreadyInit && f.type.kind == TypeKind::Object) {
+                            auto fieldClsIt = classRegistry.find(f.type.className);
+                            if (fieldClsIt != classRegistry.end()) {
+                                auto ctorIt = fieldClsIt->second.methods.find(f.type.className);
+                                alreadyInit = ctorIt == fieldClsIt->second.methods.end()
+                                           || ctorIt->second.empty();
+                            }
+                        }
+                    }
+                    seed.emplace_back(fieldName, alreadyInit);
+                }
+                symbolTable.resetCtorFields(seed);
+            }
+        }
 
         // Inject 'this' as a variable with type Object{className}. Static methods
         // are class-level: they have no receiver, so no 'this' is in scope.
@@ -583,6 +645,11 @@ void SemanticAnalyzer::analyzeClassDecl(const ClassDeclStmt& classDecl) {
         }
         if (!md.isConstructor && !md.isDestructor)
             checkReturnAliasAssignedAtExit(md.body, md.name);
+        // Every field must be definitely assigned by the time the constructor returns. Each early
+        // `return;` was already checked live (analyzeReturn); this catches the fall-through path —
+        // skipped when the body always returns (every path already went through that live check).
+        if (md.isConstructor && !alwaysReturns(md.body))
+            checkCtorFieldsInitialized(md.name);
 
         exitScope();
 

@@ -344,7 +344,7 @@ TEST_CASE("Ref - a primitive borrow works for f64 and bool", "[ref][semantic]") 
         class C { mut f64 x; mut bool b; C() { x = 1.5; b = false; }
                   fn fx() -> f64* { return x; } fn fb() -> bool* { return b; } }
         fn main() -> i32 {
-            mut C c;
+            mut C c();
             mut f64* rx = c.fx(); rx = 3.5;
             mut bool* rb = c.fb(); rb = true;
             return 0;

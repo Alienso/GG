@@ -1,0 +1,76 @@
+module std.utility;
+
+import std.String;
+
+class StringBuilder{
+
+    private mut ptr data;
+    private mut u64 size;
+
+    StringBuilder(String* s){
+        this.size = s.size;
+        u64 allocSize = this.size + 1;
+        this.data = malloc(allocSize);
+        memcpy(this.data, s.data, allocSize);
+    }
+
+    StringBuilder(str* s){
+        this.size = s.len;
+        u64 allocSize = this.size + 1;
+        this.data = malloc(allocSize);
+        memcpy(this.data, s.data, allocSize);
+    }
+
+    ~StringBuilder() {
+        free(this.data);
+    }
+
+    /*fn build -> String s {
+
+    }
+
+    fn concat() mut {
+
+    }
+
+    fn reverse() mut {
+
+    }
+
+    fn replace() mut {
+
+    }
+
+    fn toUpperCase() mut {
+
+    }
+
+    fn toLowerCase() mut {
+
+    }
+
+    fn swapCase() mut {
+
+    }
+
+    fn join() mut {
+
+    }
+
+    fn trim() mut {
+
+    }*/
+
+}
+
+
+
+impl Clone for StringBuilder {
+    fn clone(StringBuilder& src) mut {
+        free(this.data);
+        this.size = src.size;
+        u64 allocSize = this.size + 1;
+        this.data = malloc(allocSize);
+        memcpy(this.data, src.data, allocSize);
+    }
+}

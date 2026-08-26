@@ -425,6 +425,17 @@ void CodeGen::genMethod(const std::string& className, const MethodDecl& method,
         }
     }
     if (localAlias) setupReturnAliasLocal(method.returnSlotName, logicalRet);
+
+    // Field default initializers run before the constructor's own body — C++ member-init-list
+    // semantics. `classFieldInits_` is only ever populated for classes (never enums — see the
+    // parser/semantic gating), so this is a no-op for an enum's "constructor".
+    if (method.isConstructor) {
+        auto initIt = classFieldInits_.find(className);
+        if (initIt != classFieldInits_.end())
+            for (const auto& [fieldName, initExpr] : initIt->second)
+                genFieldInitializer(className, fieldName, *initExpr);
+    }
+
     emitFunctionBody(method.body, returnIrType);
 
     if (debug_) dbgEndFunction();

@@ -71,9 +71,16 @@ and each executable; sanitizer flags propagate to the executables via `gg_core`'
 
 **Source directories:**
 - `e2e\` — end-to-end test programs (each has a `main`; expected exit code 0)
+  - `e2e\stdlib\` — e2e programs whose subject is a specific stdlib class (`Array`, `String`,
+    `List`, `Pair`, `IO.print`, …), as opposed to a language/compiler feature
 - `samples\` — standalone example programs (`hello_factoriel.gg`, `extern_crt.gg`, etc.)
 - `stdlib\` — standard library sources (`vec.gg`, `string_class.gg`, etc.) — no `main`,
   intended to be imported; will fail to link standalone (expected)
+- `tests\stdlib\` — unit tests (`.cpp`) that compile/analyze actual `stdlib\*.gg` files directly
+  (via `codegenFile`/`ImportResolver`), as opposed to `tests\*.cpp`'s synthetic inline-string
+  programs. Currently just `stdlib_tests.cpp` (CRT/IO/math bindings); its `#include` of
+  `helpers.h` is `"../helpers.h"` since it lives one directory below `tests\`. Registered in
+  `CMakeLists.txt` as `tests/stdlib/stdlib_tests.cpp`.
 
 ## Key invariants
 
@@ -136,6 +143,76 @@ unchanged**. `mut` token mirrors `static`. Flags: `VarDeclExpr::isMut`, `ParamDe
 - **Locals**: const = *single assignment* (deferred init OK). `analyzeAssign` permits a write
   only when `isMutable` **or** not-yet-`isInitialized` (the one defining assignment);
   `analyzeCompoundAssign` and `analyzeUnary`/`analyzePostfix` (`++`/`--`) require `isMutable`.
+- **Object (class-value) locals — definite-init now covers them too, with a deliberate no-magic
+  rule**: a bare `ClassName name;` (no initializer) used to be **unconditionally** marked
+  `isInitialized = true` in `analyzeVarDecl` the moment its struct was zero-initialized —
+  regardless of whether the class even had a constructor. That let a method call run on an object
+  whose constructor never executed (found via a real crash: a generic container's zero-arg ctor,
+  e.g. `Array<T>`'s, sets up `cap`/`data`; skipping it left `cap == 0` forever, and every element
+  write went into an effectively zero-sized `malloc` — silent heap corruption that only became
+  visible once enough writes landed). Decided per-class in `analyzeVarDecl` from whether the class
+  has a constructor at all — **not** from its arity:
+  - **No constructor at all** → unaffected: `isInitialized = true` — zero bytes genuinely **is**
+    the class's complete, valid state; there is no ctor logic being skipped.
+  - **Any constructor exists at all** (including a zero-arg-callable one) → `isInitialized =
+    false`, always — a bare declaration **never** implicitly calls a constructor. The class is
+    treated exactly like an uninitialized primitive: any use before an explicit
+    assignment/construction is the ordinary "used before it has been assigned a value" error, and
+    the **single defining assignment** (on whichever branch reaches it — the existing
+    branch-merge/definite-assignment machinery, already proven for primitives, applies unchanged)
+    is where construction actually happens. An explicit `ClassName name();` / `ClassName name{}`
+    (an empty-but-explicit call) is an ordinary initializer — parsed as a real constructor call —
+    and is **unaffected** by this rule; it constructs immediately, same as any other initializer.
+  - **Earlier design, tried and reverted**: a first version special-cased "a zero-arg-callable
+    constructor exists" to auto-invoke it on a bare declaration (so `Array<T> a;` silently ran
+    `Array()`), to avoid disrupting the huge amount of existing code relying on that pattern
+    (confirmed empirically: removing the Object exemption outright broke ~27 pre-existing tests).
+    This was deliberately reverted in favor of the simpler, uniform rule above: whether a bare
+    declaration is safe to use immediately must never depend on the invisible detail of whether the
+    class happens to also have a zero-arg overload — that's spooky action at a distance. The
+    migration cost (updating every bare `ClassName x;` for a ctor-bearing class to an explicit
+    `ClassName x();`) is paid once, mechanically, across the stdlib/tests/e2e programs.
+  - This is also what *enables* picking a different constructor overload per branch with **no**
+    default-construction overhead: `mut Widget w; if (c) { w = Widget(1); } else { w =
+    Widget('a'); }` constructs directly into `w` on whichever branch runs, never wastes work
+    constructing-then-discarding a default, and needs no temp object at all.
+  - **Codegen fast path for the defining assignment** (`CodeGen::emitObjectDirectInit`, extracted
+    from `genVarDecl`'s existing initializer-lowering so both share it): `analyzeAssign` captures
+    `wasUninitialized = !sym->isInitialized` *before* the const-single-assignment check runs, and —
+    for an `Object`-kind LHS where `wasUninitialized` holds — records the node in
+    `SemanticResult::directConstructAssigns`. `genAssign` checks that set and, if present, tries
+    `emitObjectDirectInit` (handles a bare constructor-call RHS or an sret call, exactly like a
+    var-decl initializer) **before** falling back to the ordinary `genExpr` + `@Class_clone` copy
+    lowering — so the defining assignment constructs straight into the destination with no
+    temporary, no clone, no wasted allocation. A **non-defining** reassignment of an already-live
+    `mut` binding is untouched (still goes through clone, correctly releasing/replacing the old
+    value). **Loop-safety guard**: `directConstructAssigns` is only recorded when `loopDepth == 0`
+    at the assignment — the semantic pass visits an AST node exactly once, so `wasUninitialized`
+    reflects a single static snapshot; outside any loop that snapshot and "executes at most once
+    ever" coincide exactly, but INSIDE a loop the same instruction can run many times at runtime,
+    and skipping the destroy-old-value step on iterations 2+ would leak. Verified: a resource-owning
+    class reassigned 5× inside a `while` loop (no zero-arg ctor) shows every `malloc` paired with a
+    `free` (falls back to the always-correct clone path inside the loop; only the loop-external case
+    gets the fast path) — this is a missed optimization in that case, never a correctness gap.
+  - **`rejectUncloneablePtrOwner` gating in `analyzeAssign` also had to become two-part**, not
+    zero/one like `analyzeVarDecl`'s: assigning into an Object LHS risks aliasing a raw-ptr-owning
+    class's buffer (no `Clone` impl) via the generated memberwise clone in **two independent** ways
+    — either the destination already holds a live value that a shallow clone would leak (fires
+    whenever `!wasUninitialized`, regardless of the RHS shape), or the RHS is a genuine copy source
+    (an existing live object/reference place, fires **even on the defining assignment** — aliasing
+    two independently-destroyed owners doesn't care whether the destination was previously empty).
+    The check fires on `!wasUninitialized || copySource`; only when *neither* applies (the defining
+    assignment **and** a fresh constructor-call RHS) is it genuinely safe, which is exactly the
+    shape the direct-construct optimization targets. (An earlier, incorrect draft gated solely on
+    `copySource` — mirroring `analyzeVarDecl`'s gating, which is valid there because a var-decl's
+    destination is *always* fresh by construction — and wrongly let a raw-ptr-owning class's
+    **reassignment** via a fresh constructor call, e.g. `mut Buf b(1); b = Buf(2);` with no `Clone`
+    impl, silently skip the leak-detection error; caught by `tests/clone_tests.cpp`'s pre-existing
+    regression test for exactly that shape.)
+  - Tests: `tests/const_tests.cpp` (`[mut][const]`, covering the ctor-less/has-any-ctor split, the
+    explicit-empty-call-is-immediately-usable case, the per-branch-constructor codegen shape, the
+    reassignment-still-clones case, and the two-part `rejectUncloneablePtrOwner` gating),
+    `e2e/definite_init_object_test.gg`.
 - **Parameters**: const by default; `mut` allowed on primitives **and references**
   (`mut Point&` = mutable borrow). A reference param still may **not** be rebound
   (the isParameter+Reference block in `analyzeAssign` fires first); `mut` only unlocks field
@@ -444,6 +521,38 @@ fixpoint as ordinary generic methods.
   rejected). Tests: `tests/variadic_tests.cpp` (`[variadic][genericmethod]`),
   `e2e/variadic_method_test.gg`; the stdlib `Array<T>::emplaceBack` (`stdlib/Array.gg`) is the
   real-world consumer.
+
+### Primitive cast-call syntax — `PrimitiveType(x)` ≡ `x as PrimitiveType`
+A primitive type keyword immediately followed by `(` is a cast-call: `i32(x)` means `x as i32`.
+This exists specifically to make the generic "construct `T` from its packed args" idiom —
+`T(args...)`, the exact shape `Array<T>::emplaceBack`/`emplace` use (see above) and the general
+bare-constructor-call convention this parser already applies everywhere — work when `T`
+monomorphizes to a **primitive** rather than a class. A class instantiates via an ordinary
+constructor call; a primitive has no constructor, so casting its single (packed) argument to it is
+the only meaning that makes sense. Before this, `Array<i32>::emplaceBack(42)` (or any generic
+method using the `T(args...)` pattern with a primitive element type) was a hard **parser** error —
+`i32(args...)` after substitution left a bare `i32` keyword token followed by `(`, and
+`parsePrimary`'s catch-all "a bare type keyword leaked into expression position" diagnostic fires
+unconditionally on any type keyword in expression-starting position, with no exception for what
+follows. Confirmed nobody had ever exercised `emplaceBack` with a primitive element type before —
+every existing test/e2e file used a class `T` (`Vec<Point>`, never `Vec<i32>`).
+- **Parser** (`parsePrimary`, `Parser_Expr.cpp`): a new branch checked via `isTypeKeyword(peek().type)
+  && peekNext().type == LEFT_PAREN`, inserted immediately before the catch-all error. Parses the
+  argument list exactly like any other call (`parseCallArgs`, so a spread `args...` unwraps via
+  `unwrapSpreadArgs` exactly as it already does for an ordinary bare constructor call — a primitive
+  cast is never itself pack-bearing), requires **exactly one** argument (a primitive can't be
+  "constructed" from zero or several values — a clear error otherwise), and produces an ordinary
+  `CastExpr{ operand, targetType }` — the same node the `as` operator builds. **Purely additive**:
+  a bare type keyword in expression position was *unconditionally* a hard parse error before this,
+  and neither of that error's own two documented causes (`f(i32)` passing a type as an argument;
+  `Name<i32>(...)` misparsed as a comparison chain when `Name` isn't a declared generic) ever
+  produces a type keyword *immediately* followed by `(` — in both those cases the keyword is
+  followed by `)` or `>` respectively — so this new branch's trigger condition never overlaps with
+  either, and nothing that used to compile is affected.
+- Tests: `tests/generic_method_tests.cpp`/`tests/variadic_tests.cpp` exercise `Array<i32>`-shaped
+  variadic-method calls; verified via a minimal non-stdlib repro (`class Vec<T> { fn
+  emplaceBack<...Ts>(Ts... args) mut { v = T(args...); } }` instantiated at `T = i32`) and the full
+  `Array<i32>` stdlib path (`push`/`emplace`/`pop`/`delete`/`contains`, see below).
 
 ### Switch — statement and expression (Java arrow form)
 Java-style `switch`, arrow form only (`case L1, L2 -> body;` / `default -> body;`, **no**
@@ -1058,6 +1167,32 @@ Rejects the "value-object → reference borrow" footgun: passing a **stack value
   - `Pair<i32,f64>`  → `Pair$i32$f64`
   - `Vec<Box<i32>>`  → `Vec$Box$i32`
   - `Vec<Point&>`    → `Vec$Point.ref`
+- **Bare generic template names are rejected as an unknown type** (`resolveTypeToken`,
+  `SemanticAnalyzer.cpp`): the parser's `isTypeName()`/`typeSpanAt` accept a bare, unparameterized
+  generic template name (`Array`, not `Array<i32>`) as a type token in several positions — a fixed-
+  size-array declaration (`Array[5] arr;`), an ordinary var-decl (`Array a;`), a parameter type
+  (`fn f(Array a)`) — because those checks only confirm the name is *some* known class/template, not
+  that it was ever actually instantiated (only `consumeTypeCore`'s `Name<args>` branch, gated on a
+  following `<`, produces a real mangled instantiation). A bare template name that reaches
+  `resolveTypeToken` matches none of its resolution branches (it's not in `classRegistry`/
+  `declaredClassNames_` — only *mangled* instantiations like `Array$i32` are ever registered there)
+  and used to fall through silently to `typeFromToken`'s `TypeKind::Error` fallback with **no
+  diagnostic at all** — every caller assumes an `Error` result already had `error()` called on it, so
+  it just silently propagated. Codegen's own `Error → "i32"` IR fallback (`irTypeName`, meant for
+  "an error was already reported elsewhere") then rendered the bogus type as a plain `i32`: `Array[5]
+  arr;` silently became `[5 x i32]` — a 5-element `i32` array of zeros, not five `Array` objects, no
+  error, no crash, just silently wrong. Fixed by making `resolveTypeToken`'s final IDENTIFIER
+  fallback call `error(typeToken, "unknown type '<name>'")` before returning `Error` — since `error()`
+  throws (single-shot), every caller across the codebase (params, fields, return types, var decls,
+  casts) gets this diagnostic for free with no other changes needed. There is currently **no valid
+  syntax** for "a fixed-size array of N instances of a generic-instantiated class" at all — the
+  fixed-array grammar only accepts a *bare* type token immediately followed by `[`, and
+  `Array<i32>[5]` doesn't parse either (the general var-decl branch requires an `IDENTIFIER`
+  immediately after the type span, not `[`) — so this is a real, currently-unsupported gap, not just
+  a diagnostic-quality one. `samples/std_lib.gg`'s stale `Array[5] arrayArray;` (previously marked
+  `//TODO how does this get initialized?`) was removed rather than fixed, since it never did anything
+  real and there is no working syntax to replace it with yet. Tests: `tests/semantic_tests.cpp`
+  (`[semantic][generics]`).
 - **Generic functions may return a reference** (`T& maxOf<T>(...)`): `tryCaptureFunctionTemplate`
   / `prescanTemplateNames` accept an optional `&` between the return type and the name.
 - **Generic functions may use an arrow-form return slot** (`dup<T>(...) -> Point p`, even
@@ -1284,15 +1419,56 @@ parser-visible** — a bare in-scope local/param/field, `this`, or the static `C
   class/method work), stopping when nothing's pending or no pass makes progress (→ a clear error).
 - **Variadic methods** (`fn m<...Ts>(Ts... args)`) build on this — see the "Variadic methods" invariant
   below; the flagship use is `Array<T>::emplaceBack`.
-- **v1 limits** (clean errors, never a miscompile): explicit `<T>` required (no argument inference for
-  method calls) — **except** a variadic method, whose pack is always inferred from the trailing args;
-  impl/trait-block generic methods rejected;
+- **Type-argument DEDUCTION for a call with no explicit `<…>`** (`recv.m(args)` in place of
+  `recv.m<T>(args)`) — the method counterpart of the free-function inference described under "Generic
+  type-argument deduction" below, sharing its exact param-list-scan mechanism.
+  `Parser::inferTypeArgsFromParamList` (`Parser_Generics.cpp`) was extracted out of
+  `inferGenericTypeArgs`'s body (scan the raw parameter list for a bare-type-parameter position, then
+  read that type off the matching positional argument via an in-scope identifier / `Class(...)`
+  constructor call / `new Class(...)` — literals and other expression shapes stay un-inferable) so it
+  could be reused, unchanged, by both call sites — `inferGenericTypeArgs` (after its free-function
+  overload-candidate selection) and the new `Parser::inferGenericMethodTypeArgs` (methods have no
+  candidate-selection step: one template per `Owner::method` key). The call site (`parsePostfix`,
+  right where the ordinary/variadic method-call branch already parses `args`) gates on
+  `member ∈ genericMethodNames`, resolves the receiver's class exactly as the explicit-`<…>` path does,
+  requires a **positional** call with **no spread** (a named/reordered arg would break the
+  positional-index assumption the scan relies on), and looks up `methodTemplates[recvClass + "::" +
+  method]` — using the receiver's **full** (possibly mangled, e.g. `Array$i32`) class name, NOT the
+  `$`-stripped base, since that is exactly the key `captureMethodTemplate` registers under. On success:
+  mangle + `recordMethodInstantiation` + emit the mangled `MethodCallExpr`, identically to the explicit
+  path — so an inferred call and an equivalent explicit-`<T>` call dedupe to the same instantiation.
+  **On failure this is silent, never an error** — falls through to the ordinary method-call path below
+  it, so a same-named ordinary overload, or a call shape inference can't handle, resolves/errors exactly
+  as it did before this feature existed (a literal argument, a named argument, an argument whose type
+  isn't parser-visible).
+  - **Real v1 boundary — only works when the owner is a plain (non-generic) class.** `methodTemplates`
+    for a method ON a generic class (e.g. `Array<T>::pushAll`) is populated by `captureMethodTemplate`
+    only once that owner class has ITSELF been monomorphized (a generic class's body is captured as raw,
+    unparsed tokens — `parseMemberList`/`captureMethodTemplate` only run on it during the
+    post-monomorphization re-parse under its **mangled** name, e.g. `Array$i32`). Monomorphization runs
+    strictly after the ENTIRE program's initial parse completes (all files), so a call site in the same
+    initial parse pass — which is every call site, in practice — can never see that owner's
+    `methodTemplates` entry yet; the lookup misses and inference silently doesn't fire. The EXPLICIT
+    `<T>` form sidesteps this because it never needs to consult `methodTemplates` at the call site at
+    all — `looksLikeGenericCall`'s lookahead is purely syntactic, and `recordMethodInstantiation` queues
+    the instantiation "blind" (mangled from the explicit args, no template lookup needed) for
+    `instantiateMethod` to resolve later, deferring via `pendingMethodInsts_` until the owner class
+    exists. Making inference work here too would need an analogous deferral — capturing the
+    already-parsed argument `Expr`s and re-running `inferTypeArgsFromParamList` once the owner's
+    template becomes available, then patching the (already-constructed) `MethodCallExpr`'s method
+    token — which is a materially bigger change than reusing the existing eager-token mechanism, and is
+    NOT implemented. So `arr.pushAll(other)` on a generic `Array<T>` still requires
+    `arr.pushAll<OtherType>(other)` today; only a method on a non-generic class (`Box::identity`,
+    `Factory::make`) benefits from inference.
+- **v1 limits** (clean errors, never a miscompile): impl/trait-block generic methods rejected;
   `@annotation` on a generic method rejected; non-parser-visible receivers (call results, `a.b.m<T>()`
   chains, and a **`var`-typed** local — `var` records a sentinel type at parse time, same limitation as
   generic type-argument inference over `var`) → the "cannot determine receiver" error. A bare
-  `obj.m(args)` with no `<…>` reports the
-  terse "no method 'm'" (semantics can't see generic-method names — a documented cosmetic gap).
-  Tests: `tests/generic_method_tests.cpp` (`[genericmethod]`), `e2e/generic_method_test.gg`.
+  `obj.m(args)` with no `<…>` that inference can't resolve (an owner-is-a-generic-class call, a literal/
+  named/un-inferable argument, or a name semantics can't see as generic at all) reports the terse
+  "no method 'm'" error — unchanged from before inference existed.
+  Tests: `tests/generic_method_tests.cpp` (`[genericmethod]`, inference cases tagged `[geninfer]`),
+  `e2e/generic_method_test.gg`, `e2e/generic_method_infer_test.gg`.
 
 ### Type-parameter sigil substitution — `T*`/`T&` when `T` is itself a reference (`spliceTypeArg`)
 A type parameter's captured argument is a **token span**, not one synthesized token — `Point&`
@@ -2157,10 +2333,29 @@ branches on the concrete element type after monomorphization; primitives are unc
 - **Owning-`ptr` guard** (`analyzeIndexAssign` → `classOwnsRawPtr`): a value object that transitively
   owns a raw `ptr`/`ptr<T>` field (String, nested `Array`) is **rejected** as a `ptr<T>` element unless
   it impls `Clone` — memberwise clone is shallow and would double-free. (See the `Clone` trait above.)
-- stdlib `Array.gg`: `push(T* value)`/`set(i32 i, T* value)` (`T&`→`T*`), `pop() -> T out` (clone out +
-  `destroy` the buffer copy = ownership transfer), `clear`/`~Array` destroy loops. `Array<Point>` works;
-  `Array<String>`/`Array<Array<Point>>` work via the Phase-2 `Clone` impls.
-  Tests: `tests/array_object_tests.cpp` (`[array-object]`), `e2e/array_object_test.gg`.
+- stdlib `Array.gg`'s current method set — `pushBack(T* value)` / `emplaceBack<...Ts>(Ts... args)`
+  (append), `push(i32 pos, T* value)` / `emplace<...Ts>(i32 pos, Ts... args)` (insert at `pos`,
+  shifting `[pos, count)` right), `popBack() -> T out` / `pop(i32 pos) -> T out` (remove-and-return,
+  shifting the tail left for the positional form), `delete(i32 pos)` (remove-and-destroy, no
+  return), `contains(T* value) -> bool`, `pushAll<U: Iterable>(U collection)` (iterate `collection`
+  via `for (T* elem : collection) { pushBack(elem); }` — see the `for`-in invariant; requires an
+  explicit `arr.pushAll<OtherType>(other)` type argument today, since argument-driven inference for
+  a generic method whose OWNER is itself a generic class can't see the owner's `methodTemplates`
+  entry until the owner itself is monomorphized, which happens after the call site's own parse —
+  see the generic-method-inference invariant above), plus `set(i32 i, T* value)` (via `impl Index`).
+  `set(T&)` (`impl Index for Array<T>`), `push`/`emplace`/`pop`/`delete` all use the
+  **clone-forward-then-destroy** shift idiom (`data[i] = data[i∓1]; destroy(data[i∓1]);`, one pair
+  per shifted slot) rather than a raw `memmove` — 2× the memory traffic of a true move, but correct
+  for arbitrary (including resource-owning) `T` with zero new codegen, reusing exactly the
+  clone/destroy primitives `popBack`/`set` already established; a raw-pointer-level move would be
+  more efficient but was never built since GG has no move semantics separate from clone. `clear`/
+  `~Array` destroy loops. `Array<Point>` (a plain value class) and `Array<i32>` (primitive `T`, only
+  reachable once the primitive-cast-call parser fix above landed — `Array<i32>::emplaceBack`
+  literally never compiled before that) both work; `Array<String>`/`Array<Array<Point>>` work via
+  the Phase-2 `Clone` impls. **`e2e/array_object_test.gg` and `e2e/array_clone_test.gg` are stale**
+  against this current method set (written against an older `push(value)`/`pop()`-with-no-position
+  API and no longer compile) — a known, pre-existing gap, not touched here.
+  Tests: `tests/array_object_tests.cpp` (`[array-object]`).
 
 ### `str` — compile-time string-literal type (Phase 1)
 `str` is the type of a **string literal** — an immutable view over static (rodata) bytes, lowered to
@@ -2314,6 +2509,131 @@ mirroring private fields/methods. Same-file calls are silent.
     silent, used-internally-then-imported warns only at the cross-file site), each with a pack
     template instead of a plain function.
 
+### Field default initializers + constructor field-initialization enforcement
+Two coupled features: (1) instance fields may carry a default initializer at their declaration
+(`= expr` or `{args}`), and (2) every field a constructor doesn't cover via a default must be
+definitely assigned somewhere in that constructor's own body, or it's a compile error. Together
+these close the same class of bug the "Object locals" definite-init work fixed for locals — a field
+silently left at its zero-initialized (possibly invariant-violating) state — but for class FIELDS.
+v1 is self-contained-initializer-only (no `this`/params/other fields in an initializer expression);
+see "v1 limits" below for the full boundary.
+
+- **Field default initializers — syntax** (`Parser_Decl.cpp`'s field branch): `[modifiers] Type name
+  [= expr | {args}];`. Previously `= expr` only parsed for **static** fields; now any INSTANCE field
+  may carry one too. `{args}` is new for fields entirely — mirrors the local var-decl `Type
+  name{args}` brace-construction sugar exactly: gated on `classNames.count(memberType.lexeme) > 0`
+  (so it fires only for a class-typed field; `consumeType` already synthesized/mangled `memberType`
+  and registered it in `classNames`, identically to how a local's type token does for a generic
+  instantiation), parses a positional arg list, and lowers to an ordinary `CallExpr{ memberType, args
+  }` stored in the existing `FieldDecl::initializer` (previously statics-only). **Enums are
+  excluded** from both new forms (they have their own, separate, already-correct model — fields set
+  via variant constructor args, immutable thereafter); only the pre-existing static-field `=` form
+  is preserved for an enum, unchanged.
+- **Semantic** (`analyzeClassDecl`, `SemanticAnalyzer_Stmts.cpp`): each non-static field initializer
+  is analyzed with the field's declared type as the expected type (literal adoption, same as a
+  static field's), but with `currentClassName` **cleared** for the duration — the exact guard
+  `analyzeParamDefaults` already uses for the identical reason: a bare name must not resolve via the
+  implicit-instance-field fallback, and `this` must be a clean "used outside of a class method"
+  error rather than silently resolving to this class. `ClassInfo::Field` gained `hasInitializer`
+  (set in `buildClassInfo` from `fd.initializer != nullptr`). **The class's own static fields are NOT
+  blocked**: `Config::DEFAULT` (explicit, qualified) resolves via the type name — independent of
+  `currentClassName` — so it works from a field initializer; a **bare** `DEFAULT` still fails
+  ("undeclared identifier"), matching `analyzeParamDefaults`' own identical pre-existing asymmetry
+  (same guard, same gap) rather than introducing a new inconsistency.
+- **Codegen — zero-copy, not clone** (`CodeGen::genFieldInitializer`, `CodeGen_Classes.cpp`, right
+  after `genMemberAssign`): a per-class `classFieldInits_` map (className → ordered
+  `(fieldName, const Expr*)`, populated in `generate()`'s existing per-class fields prepass) is
+  walked in `genMethod` for every constructor, emitting each initializer **before** the constructor's
+  own body runs (C++ member-init-list order). Unlike `genMemberAssign`'s Object-field branch (always
+  construct-a-temp-then-clone — correct there since an ordinary `this.field = ...` write may be
+  overwriting an already-live value), a field's own default runs on freshly zero-initialized storage,
+  so it gets the **direct-construct fast path** first (`emitObjectDirectInit` — the same one a
+  local's defining assignment uses: a bare constructor-call RHS, which is what `{args}` always
+  produces and what `= Ctor(args)` commonly does, constructs straight into the field's GEP address,
+  no temp, no clone), falling back to clone only for a non-bare-constructor-call RHS shape. This is
+  what makes the flagship case (`Array<List<V>> values{8};` in `HashMap<K,V>`) truly zero-copy — see
+  the stdlib note below.
+- **A class with field initializers but NO user-written constructor at all is synthesized one**
+  (`Parser::parseClassDecl`, right after `parseMemberList` returns): if no method in the parsed set
+  has `isConstructor` and at least one non-static field has an initializer, an empty `ClassName() { }`
+  `MethodDecl` is pushed into the class's method list — literally as if the author had written it
+  themselves (same token/field shape as a hand-parsed constructor). This is not a rare edge case —
+  it's the flagship shape (`class HashMap<K,V> { Array<List<V>> values{8}; }`, zero explicit methods
+  at all): without a real `MethodDecl` there is nothing for the codegen prologue-injection to attach
+  to, and nothing for the deferred-init rule (below) to see either. A class **with** a user ctor is
+  unaffected — the user's own ctor already hosts the injected prologue.
+  - **Interaction with the "Object locals" no-magic rule**: this synthesized ctor is a REAL
+    constructor in `ClassInfo::methods`, so `objectHasAnyCtor` (in `analyzeVarDecl`) sees it exactly
+    like a hand-written one — a bare `HashMap<K,V> m;` local is deferred-init (errors), matching the
+    established "any constructor at all ⇒ never implicit" rule; only an explicit `HashMap<K,V> m();`
+    (an ordinary initializer) constructs it.
+- **Constructor field-initialization enforcement** (the actual "must-initialize" check): every
+  instance field must be definitely assigned by the time a constructor returns, on every reachable
+  path, unless it's exempt (below). Reuses the ENTIRE existing branch-merge machinery for locals —
+  the mechanism is a `SymbolTable::ctorFieldInit_` map (field name → assigned) that rides along
+  inside the SAME `InitSnapshot` a local's `isInitialized` already uses, under a reserved key prefix
+  (`"#field#"`, not a legal identifier prefix) that `captureInitState`/`restoreInitState` fold in and
+  extract transparently. Because `analyzeIf`/`analyzeWhile`/`analyzeFor`'s merge loops iterate the
+  whole flat snapshot map generically (they don't enumerate known variable names), if/else
+  both-arms-assign, one-arm-only, and loop-body-only-assigns-don't-count all fall out **with zero
+  changes to any control-flow analyzer** — the same reason the earlier definite-init work for locals
+  composed for free.
+  - **Seeded** at constructor entry (`analyzeClassDecl`'s per-method loop, right after `enterScope()`)
+    from each field's exemption status (below); **marked** true at the two field-write hooks
+    (`analyzeMemberAssign`'s `this.field = value` tail, and `analyzeAssign`'s implicit-`this`
+    fallback branch) — both call `symbolTable.setFieldInitialized(name)` right before returning,
+    gated (for the explicit path) on the write target actually being `this` and `inConstructor`.
+  - **Checked at TWO points**, mirroring `checkReturnAliasAssignedAtExit`'s existing two-point shape
+    for the identical reason (a function can exit either by falling off the end or via an early
+    `return`, and each must be checked where it actually happens): a bare `return;` inside a
+    constructor calls the new `checkCtorFieldsInitialized` at that exact point (catches a field
+    skipped by an early exit — `if (skip) { return; }` before a field is set); and once after the
+    whole body if control can fall off the end (`!alwaysReturns(md.body)`, skipped when the body
+    always returns — every path already went through the live per-return check). Error: `field 'x' is
+    not initialized in constructor 'C'; assign it, or give it a default value at its declaration`.
+  - **Exemptions** (a field starts "already initialized," so the constructor need not touch it) —
+    computed once per constructor from `ClassInfo::Field`/`Type`, in order:
+    1. **Has a default initializer** (`hasInitializer`, i.e. Phase 1 above) — the obvious case.
+    2. **Is NULLABLE** (`Type::isNullable`) — a nullable field's zero-initialized state (`null` / an
+       empty tag) is already a meaningful, deliberate value (the field is "absent"), exactly
+       analogous to a ctor-less class's zero bytes already being complete. Without this, every
+       existing nullable-field class in the test suite (`N&? next;`, `i32? tag;`, left unset in a
+       trivial ctor — a completely ordinary, correct pattern) would have needed busywork
+       `= null`-equivalent assignments for no safety benefit.
+    3. **An embedded value-object field whose class has NO constructor at all** — zero bytes
+       genuinely IS that class's complete valid state (mirrors the identical ctor-less-class
+       exemption already used for locals in `analyzeVarDecl`'s `objectHasAnyCtor` check, applied
+       here to a FIELD's class instead of the field's OWN class).
+    A field whose type is Object with a REAL constructor, and is neither defaulted nor nullable,
+    is NOT exempt — this is the case the whole feature targets (a `HashMap`-shaped field silently
+    skipping `Array<T>`'s own cap/data setup, the exact "worked by luck via `realloc(NULL,…)`" latent
+    bug this session found and fixed in the real `stdlib/utility/HashMap.gg`, below).
+  - **v1 limits** (clean errors or accepted-as-is, never a miscompile): **intraprocedural only** — a
+    field set by a helper method the constructor calls (`this.init();`) is not seen; the constructor
+    must assign it directly. **Read-before-init is not checked** — only "assigned by the end"; a
+    `field += 1;` compound-assign does not itself count as the defining write (conservative — it
+    reads before writing, so it doesn't satisfy "assign it a value" the way a plain `=` does), so a
+    ctor relying solely on compound assignment for a field still errors, prompting an explicit `=`
+    or a default initializer instead. **Switch/match arms are not merged** for field (or, pre-
+    existing, local) definite-assignment at all — only if/while/for participate; a field assigned on
+    every switch/match arm is conservatively still "not initialized" after — a known, pre-existing
+    gap for locals that this feature inherits rather than introduces or fixes.
+- **Real-world fix, found via this feature**: `stdlib/utility/HashMap.gg`'s own constructor —
+  `HashMap() { values.reserve(8); }` — called a method on `values` (`Array<List<V>>`) **before**
+  `Array`'s own constructor had ever run, silently "working" only because `reserve`'s `realloc(data,
+  …)` happens to tolerate a null/zero `data`/`cap` (a latent bug identified earlier in this same
+  session, then still present). Phase 2 now catches this at COMPILE TIME (`field 'values' is not
+  initialized`) instead of relying on that implementation-defined `realloc(NULL, …)` behavior. Fixed
+  to `Array<List<V>> values{};` (a Phase-1 default initializer, zero-copy per the direct-construct
+  path above) with an empty constructor body — `Array()`'s own ctor already sets `cap = 8` by
+  default, so the explicit `reserve(8)` became unnecessary too.
+- Tests: `tests/const_tests.cpp`-adjacent field-initializer/enforcement cases (parse/semantic/codegen
+  for both initializer forms, the synthesized-ctor path, the three exemptions, if/else branch-merge,
+  early-return, and the direct-construct-vs-clone codegen shape). Migration: ~30 pre-existing unit
+  tests across 12 files had an empty or field-incomplete constructor written purely to exercise
+  unrelated functionality (escape analysis, generic impls, ref-field layout, …) — each fixed by
+  adding the missing assignment/default, not by weakening the check.
+
 ### Static members (class-level)
 Roadmap: (1) **static fields** ✅ done, (2) **static methods** ✅ done, (3) **static local
 variables** (C-style) ✅ done, (4) polish — **const statics** ✅ done (see below); access
@@ -2383,6 +2703,150 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1435 test cases / 2678 assertions** (as of making `resolveTypeToken` report "unknown type" for a
+bare, unparameterized generic class template name instead of silently degrading to `Error → i32` —
+see the new bullet under the "Generics" invariant above. 4 new `tests/semantic_tests.cpp` cases
+(`[semantic][generics]`): the array-declaration, plain-var-decl, and parameter-type shapes of the bug
+now error, plus a control case confirming a properly instantiated `Vec<i32>` is unaffected. Full
+`GG_tests` suite + a manual sweep of every file under `e2e/`/`samples/` confirmed no regressions —
+7 pre-existing, unrelated e2e failures were found in the sweep (definite-init/field-initialization
+errors, an arg-count mismatch, a use-before-assignment, and a `List.gg` reference-type restriction),
+none mentioning "unknown type," confirmed pre-existing and out of scope. `samples/std_lib.gg`'s own
+stale `Array[5] arrayArray;` line (previously compiling silently wrong, now caught) was removed —
+see the "Generics" invariant. Prior baseline was
+**1431 test cases / 2670 assertions** (as of a follow-up edge-case sweep over the field-init feature
+below, prompted by "double check the tests for missed edge cases." Hand-verified then permanently
+pinned down 8 more `tests/const_tests.cpp` cases (`[fieldinit]`): per-constructor-overload isolation
+(a class with two constructors, only one of which correctly initializes every field, errors on
+exactly that one — and the correct sibling type-checks clean in isolation); a synthesized
+constructor coexisting with a user-written destructor; a generic class's field default staying
+independent per instantiation (two instantiations, no cross-contamination); a field default that
+references the class's own type parameter; and the class's own static field from a default
+initializer — confirmed **asymmetric but intentional**: `Config::DEFAULT` (explicit) works (static
+access resolves via the type name, independent of the `currentClassName`-clearing guard), while bare
+`DEFAULT` fails with "undeclared identifier" — verified this is not a new gap but an exact match for
+`analyzeParamDefaults`' own pre-existing identical limitation (same guard, same asymmetry), so the
+field-initializer feature inherits established behavior rather than introducing a new inconsistency.
+All were already correct before being pinned down — no bugs found, only missing coverage. Prior
+baseline was **1423 test cases / 2658 assertions** (as of adding field default initializers + constructor
+field-initialization enforcement — see the "Field default initializers + constructor
+field-initialization enforcement" invariant above. 16 new `tests/const_tests.cpp` cases
+(`[fieldinit]`) cover both initializer forms, the self-contained-only restriction (field/`this`
+references rejected), the enum exclusion, the synthesized-empty-ctor path (and its interaction with
+the bare-declaration no-magic rule), the missing-field error, all three exemptions (defaulted,
+nullable, ctor-less field class — including the negative case: a field class with a MIXED zero-arg-
+and-parameterized ctor set is NOT exempt), if/else branch-merge, the early-`return;` catch, and the
+direct-construct-not-clone codegen shape plus prologue-before-body ordering. Migration: ~30
+pre-existing tests across 12 files (fixed by adding the missing field assignment/default, not by
+weakening the check — see the invariant above) plus one real stdlib bug fixed
+(`stdlib/utility/HashMap.gg`'s constructor was calling a method on a field before that field's own
+constructor had ever run — see the invariant's "Real-world fix" bullet). Prior baseline was
+**1407 test cases / 2628 assertions** (as of removing the implicit zero-arg-constructor auto-invoke
+on a bare `ClassName name;` declaration — see the "Object (class-value) locals" invariant above.
+A follow-up edge-case sweep (prompted by "double check the tests for missed edge cases") added 3
+more `tests/const_tests.cpp` cases pinning down shapes no existing test covered: a MIXED ctor set
+(a zero-arg overload coexisting with parameterized ones — every existing test used a pure zero-arg
+or pure parameterized set) is still deferred; passing a deferred-init object as a call ARGUMENT
+before assignment errors (every existing test read via a field/method, not an argument); and the
+direct-construct fast path works when a branch picks the zero-arg overload specifically out of a
+mixed set. All three were hand-verified as already correct before being pinned down — no new bug,
+just missing regression coverage. (Also found, en route, a genuinely separate pre-existing bug,
+untouched here at the time: a fixed-size array of a bare non-parameterized generic class, e.g.
+`Array[5] arr;` with no `<T>` — since fixed by teaching `resolveTypeToken` to error on any
+unresolvable identifier; see the "Generics" invariant's "Bare generic template names are rejected as
+an unknown type" bullet below. `samples/std_lib.gg`'s own `Array[5] arrayArray;` line, marked
+`//TODO how does this get initialized?`, was removed as part of that fix — it never did anything real
+in the first place.)
+The prior hybrid auto-invoked a class's zero-arg-callable constructor on a bare declaration to avoid
+disrupting existing code; this was deliberately reverted in favor of a simpler, uniform rule: ANY
+constructor on the class (zero-arg or not) makes a bare declaration deferred-init, full stop — a
+bare declaration never implicitly calls anything. Whether it's safe to use a bare declaration
+immediately must never depend on the invisible detail of the class's constructor shape. An explicit
+`ClassName name();`/`ClassName name{}` is unaffected (an ordinary initializer) and remains the way to
+construct immediately.
+
+This is a real behavioral reversion with a known, bounded migration cost — every bare
+`ClassName x;` for a class that has ANY constructor (not just non-zero-arg ones, as before) must
+become an explicit `ClassName x();`. Fixed across: 6 unit test files with 20 individual call-site
+updates (`escape_tests.cpp`, `generic_method_tests.cpp`, `clone_tests.cpp`, `refcount_tests.cpp`,
+`array_object_tests.cpp`, `ref_tests.cpp`, `variadic_tests.cpp`, `implicit_this_tests.cpp`,
+`var_infer_tests.cpp`, `class_tests.cpp`, `named_args_tests.cpp`, `const_tests.cpp` — the latter also
+had 3 tests specifically validating the now-removed auto-invoke behavior, repurposed to assert the
+new no-magic rule instead), plus `samples/std_lib.gg` and `e2e/definite_init_object_test.gg`/
+`e2e/array_position_ops_test.gg`. A broad re-compile sweep of every file under `e2e/` (not just the
+ones touched by earlier sessions) turned up two more affected sites that had never been re-verified
+against the *earlier* ctor-aware-hybrid work in this same session — `e2e/class_test.gg`'s `Point
+zero;`/`Counter blank;` (both classes have only parameterized constructors, so these were already
+broken under the hybrid, just never caught) — fixed to explicit zero-value constructor calls.
+
+Also fixed along the way, found via the same e2e sweep: `Array<T>::contains(T* value)` compared
+`data[i] == value` — for a class `T` implementing `Eq` with an owning-reference-typed `eq(Self&)`
+parameter (e.g. `String`), passing the borrow parameter `value` as the right-hand operand hit the
+deliberately-forbidden borrow→owning-reference coercion ("no matching 'eq' method"). Flipping the
+comparison to `value == data[i]` fixes it: the right operand (`data[i]`, a genuine object *value*)
+binds to the owning `Self&` parameter via the separately-allowed "value object → reference in
+argument position" rule. This was a latent bug in `contains` since it was added, invisible until a
+class with a real `Eq` impl (`String`) was used as `T` — surfaced by `e2e/array_clone_test.gg`, one
+of two pre-existing stale e2e tests (the other: `e2e/array_object_test.gg`) that predated the
+`push`/`pop` → `pushBack`/`popBack` + positional `push(pos,value)`/`pop(pos)` split and had never
+been updated; both fixed to the current API. A third, previously-undiscovered stale test in the same
+family, `e2e/array_test.gg` (single-arg `push`/no-arg `pop`), was also fixed the same way.
+
+Prior baseline was **1403 test cases / 2618 assertions** (as of implementing `Array<T>`'s remaining unfinished methods
+— `push`/`emplace`/`pop`/`delete`/`contains` — which surfaced two real, unrelated compiler bugs
+along the way, both now fixed:
+1. **`Array<T>::emplaceBack`/`emplace` never compiled for a primitive `T`** (e.g. `Array<i32>`) —
+   the flagship `T(args...)` construct pattern becomes `i32(args...)` after monomorphization, and
+   the parser had no notion of calling a bare primitive-type keyword at all; it was an unconditional
+   hard error. Fixed by adding `PrimitiveType(x)` as cast-call syntax (`≡ x as PrimitiveType`),
+   spread-aware — see the new "Primitive cast-call syntax" invariant above. Purely additive; no
+   prior valid program could have relied on that exact "keyword immediately followed by `(`" shape
+   erroring, since it was the only shape reachable there.
+2. **A far more consequential, PRE-EXISTING definite-initialization gap**, found while chasing a
+   heap-corruption crash in the new `push`/`emplace`/`pop`/`delete` methods against `Array<T>` for a
+   resource-owning `T`: a bare `ClassName name;` (no initializer) was **unconditionally** marked
+   definitely-initialized in `analyzeVarDecl` the instant its struct was zero-initialized —
+   regardless of whether the class had a constructor, so `Array`'s own ctor (which sets up
+   `cap`/`data`) silently never ran, and `cap` stayed `0` forever (`grow()` doubles `0` to `0`).
+   Fixed with a ctor-aware hybrid: auto-invoke a zero-arg-callable constructor at a bare declaration
+   (zero disruption — confirmed by first trying the "always require deferred init" version, which
+   broke 27 pre-existing tests, all of which rely on exactly this "just works" pattern for a
+   trivial zero-arg ctor); genuinely defer (require an explicit assignment before use, exactly like
+   an uninitialized primitive) only when a class has constructor(s) but none is zero-arg-callable.
+   The deferred case's single defining assignment additionally constructs directly into the
+   destination with no temporary/clone (a real efficiency win for a "pick a different constructor
+   per branch" pattern), gated safely against running inside a loop more than once. See the new
+   "Object (class-value) locals" sub-bullet under the const-by-default invariant above for the full
+   mechanism, the two-part `rejectUncloneablePtrOwner` gating this also required, and the specific
+   pre-existing test (`Clone - assigning a raw-ptr class without Clone is a clean error`) whose
+   regression caught an incorrect first draft of that gating.
+Net: +10 test cases in `tests/const_tests.cpp` (`[mut][const]`, the definite-init hybrid across all
+three ctor shapes + the direct-construct codegen shape + the two-part Clone gating), plus
+`e2e/definite_init_object_test.gg` and `e2e/array_position_ops_test.gg` (the new `Array<T>`
+`push`/`emplace`/`pop`/`delete`/`contains` methods against both a primitive and a resource-owning
+element type — previously unreachable at all, since bug #2 corrupted memory before any assertion
+could even run). Prior baseline was
+**1393 test cases / 2604 assertions** (as of adding argument-driven type-argument DEDUCTION for
+generic-method calls — `recv.m(args)` in place of `recv.m<T>(args)` — see the "Generic methods"
+invariant's new sub-bullet above. Extracted the free-function inference's param-list-scan into a
+shared `Parser::inferTypeArgsFromParamList` and added `Parser::inferGenericMethodTypeArgs` +
+a new call-site branch in `parsePostfix` (`Parser_Expr.cpp`) right alongside the existing
+variadic-method-call check. Caught one real bug against my own first draft, via hand-verification
+with a scratch `.gg` program before writing the permanent tests: the call site's methodTemplates
+lookup used the `$`-stripped BASE class name (`"Holder"`, mirroring the cheap `genericMethodKeys`
+check used for the unrelated explicit-call-site heuristic) instead of the receiver's FULL,
+possibly-mangled name (`"Holder$i32"`) — the actual key `captureMethodTemplate` registers under —
+so inference always missed for a method on a generic class, silently falling through to the
+"no method" error instead of ever succeeding. Fixing the lookup key surfaced a second, structural
+finding (not a bug — a real v1 boundary, now pinned down by a dedicated test rather than left as
+prose): inference for a method on a GENERIC owner class can never fire at all in practice, because
+that owner's `methodTemplates` entry doesn't exist until the owner itself is monomorphized, which
+happens strictly after the call site's own parse. So `Array<T>::pushAll`-shaped calls still need
+explicit `<T>`; only methods on plain (non-generic) classes gained the new inference. 6 new
+`tests/generic_method_tests.cpp` cases (`[genericmethod][geninfer]`: instance + static inferred
+calls, dedup against an equivalent explicit call, an un-inferable-literal fallthrough, a named-arg
+fallthrough, and the generic-owner-class limitation) + 1 new `e2e/generic_method_infer_test.gg`.
+Full-suite regression run confirmed zero change to any pre-existing test. Prior baseline was
 **1387 test cases / 2592 assertions** (as of hardening the `MemberAccessExpr` case in
 `Parser::deduceArgTypeToken` added just below — a self-review pass looking for edge cases the
 original fix missed found two real gaps, both now fixed):

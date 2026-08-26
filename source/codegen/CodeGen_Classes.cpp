@@ -191,6 +191,57 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
     return value;
 }
 
+// ---- Field default initializer (injected into every constructor's prologue) ----
+
+// Unlike genMemberAssign's Object-field branch (always construct-a-temp-then-clone — correct for an
+// ordinary `this.field = ...` write, which may be overwriting a live value), a field's OWN default
+// initializer runs on freshly zero-initialized storage, so it gets the zero-copy direct-construct
+// fast path (the same one a local's defining assignment uses) first, falling back to clone only for
+// a non-bare-constructor-call RHS shape.
+void CodeGen::genFieldInitializer(const std::string& className, const std::string& fieldName,
+                                  const Expr& init) {
+    auto [gep, fieldType] = resolveFieldGEP("%self", className, fieldName);
+    if (fieldType.kind == TypeKind::Error) return;
+
+    if (fieldType.kind == TypeKind::Object) {
+        if (!emitObjectDirectInit(init, gep, fieldType.className)) {
+            clonesNeeded_.insert(fieldType.className);
+            std::string src = genExpr(init);
+            emit("call void @" + fieldType.className + "_clone(ptr " + gep + ", ptr " + src + ")");
+        }
+        return;
+    }
+
+    // Borrow field (`Class*`): non-owning — just store the pointer.
+    if (fieldType.kind == TypeKind::Reference && fieldType.borrow) {
+        Type        valueType = exprType(init);
+        std::string newVal    = genExpr(init);
+        newVal = emitCast(newVal, valueType, fieldType);
+        emitStore("ptr", newVal, gep);
+        return;
+    }
+
+    // Owning reference field: retain the new target. The field is freshly zero-initialized (this
+    // prologue runs before any user code), so there is no old target to release — gg_release on the
+    // still-null slot would be a safe no-op anyway, but skipping it documents that invariant here.
+    if (fieldType.kind == TypeKind::Reference) {
+        usesRefcount_ = true;
+        bool        plusOne  = producesPlusOne(init);
+        Type        valueType = exprType(init);
+        std::string newVal    = genExpr(init);
+        newVal = emitCast(newVal, valueType, fieldType);
+        if (plusOne) claimTemp(newVal);
+        else         emit("call void @gg_retain(ptr " + newVal + ")");
+        emitStore("ptr", newVal, gep);
+        return;
+    }
+
+    Type        valueType = exprType(init);
+    std::string value     = genExpr(init);
+    value = emitCast(value, valueType, fieldType);
+    emitStore(irTypeName(fieldType), value, gep);
+}
+
 // ---- Method call ----
 
 std::string CodeGen::genTraitMethodCall(const void* node, const std::string& className,

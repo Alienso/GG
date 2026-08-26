@@ -72,7 +72,7 @@ TEST_CASE("Named - a method call accepts named arguments", "[named][semantic]") 
         class Box { mut i32 w; mut i32 h; Box() { w = 0; h = 0; }
                     fn set(i32 width, i32 height) mut { w = width; h = height; } }
         fn main() -> i32 {
-            mut Box b;
+            mut Box b();
             b.set(height: 4, width: 3);
             return b.w;
         }
@@ -321,7 +321,7 @@ TEST_CASE("Named - an implicit-this method call accepts named arguments", "[name
             fn setTo(i32 base, i32 step) mut { n = base + step; }
             fn bump() mut { this.setTo(step: 2, base: 100); }
         }
-        fn main() -> i32 { mut Counter c; c.bump(); return c.n; }
+        fn main() -> i32 { mut Counter c(); c.bump(); return c.n; }
     )");
     REQUIRE_FALSE(r.hadError);
 }

@@ -112,6 +112,16 @@ private:
         const std::string& filePath,
         std::unordered_set<std::string>& visitedPaths);
 
+    // Collects all USER-DECLARED trait names (transitively) reachable from filePath by lexing each
+    // file and scanning for "trait IDENTIFIER" tokens. Mirrors collectClassNames exactly (including
+    // scanning the file's own tokens, not just its dependencies), so a bare-trait-name parameter
+    // (`fn square(Iterable x)`, desugared to a bounded generic — see Parser::desugarTraitParams) is
+    // recognised regardless of which file declares the trait. Built-in operator/marker traits (Add,
+    // Eq, Iterable, ...) need no scan — Parser seeds those unconditionally.
+    std::unordered_set<std::string> collectTraitNames(
+        const std::string& filePath,
+        std::unordered_set<std::string>& visitedPaths);
+
     // Strips the surrounding double-quote characters from a STRING token lexeme.
     static std::string stripQuotes(const std::string& lexeme);
 

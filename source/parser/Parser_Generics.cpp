@@ -124,6 +124,112 @@ void Parser::prescanTemplateNames(const std::vector<Token>& toks) {
     }
 }
 
+void Parser::prescanTraitNames(const std::vector<Token>& toks) {
+    // Trait declarations are always top-level (no nesting), so a flat scan suffices — mirrors the
+    // class/enum half of prescanTemplateNames's own first loop.
+    for (size_t i = 0; i + 1 < toks.size(); ++i) {
+        if (toks[i].type == TokenType::TRAIT && toks[i + 1].type == TokenType::IDENTIFIER)
+            traitNames.insert(toks[i + 1].lexeme);
+    }
+}
+
+// See the Parser.h doc comment. Runs as a flat token-copy pass: only a top-level (brace depth 0,
+// i.e. free-function) `fn [private] NAME (` with NO explicit `<...>` of its own is ever examined; a
+// method (depth > 0) or an already-generic declaration is copied through byte-for-byte untouched.
+std::vector<Token> Parser::desugarTraitParams(const std::vector<Token>& toks) const {
+    std::vector<Token> out;
+    out.reserve(toks.size());
+    int braceDepth = 0;
+    int synthCounter = 0;   // fresh __T<n> names, unique across the whole file — never reused
+
+    size_t i = 0;
+    while (i < toks.size()) {
+        const TokenType tt = toks[i].type;
+        if (tt == TokenType::LEFT_BRACE)  { braceDepth++; out.push_back(toks[i]); ++i; continue; }
+        if (tt == TokenType::RIGHT_BRACE) { braceDepth--; out.push_back(toks[i]); ++i; continue; }
+
+        if (tt == TokenType::FN && braceDepth == 0) {
+            size_t nameIdx = i + 1;
+            if (nameIdx < toks.size() && toks[nameIdx].type == TokenType::PRIVATE) ++nameIdx;
+            if (nameIdx < toks.size() && toks[nameIdx].type == TokenType::IDENTIFIER
+                && nameIdx + 1 < toks.size() && toks[nameIdx + 1].type == TokenType::LEFT_PAREN) {
+                size_t parenOpen = nameIdx + 1;
+
+                // Scan the parameter list (paren-depth 1 relative to parenOpen) for a trait name used
+                // as a whole parameter TYPE — bare (`Trait x`, desugars to a borrow `T* x`, like an
+                // ordinary bare-object param) or with an explicit `&`/`*` sigil (`Trait& x` desugars to
+                // an OWNING reference `T& x`; `Trait* x` to an explicit borrow `T* x`) — preceded by
+                // `(`/`,`/`mut`, then an optional `&`/`*`, then the parameter's name IDENTIFIER. The
+                // `&` form matters in practice: a bare/borrow param can never be passed to a method
+                // expecting `Self&` (GG forbids borrow→owning-reference everywhere), which is exactly
+                // what every built-in operator trait's conventional signature takes — so `fn same(Eq&
+                // a, Eq& b) -> bool { return a == b; }` needs the `&` to actually call `a.eq(b)`.
+                // Each occurrence is an INDEPENDENT type parameter (two `Eq&` params may bind to two
+                // different concrete types — Rust `impl Trait` semantics), so a repeated trait still
+                // yields one fresh synthesized name per hit; only the sigil, if any, is preserved
+                // as-is (copied through unchanged in the substitution pass below).
+                std::vector<std::pair<size_t, std::string>> hits;   // (index into toks, trait name)
+                size_t j = parenOpen;
+                int parenDepth = 0;
+                do {
+                    if (toks[j].type == TokenType::LEFT_PAREN) parenDepth++;
+                    else if (toks[j].type == TokenType::RIGHT_PAREN) parenDepth--;
+                    else if (parenDepth == 1 && toks[j].type == TokenType::IDENTIFIER
+                             && traitNames.count(toks[j].lexeme)
+                             && j > parenOpen
+                             && (toks[j - 1].type == TokenType::LEFT_PAREN
+                                 || toks[j - 1].type == TokenType::COMMA
+                                 || toks[j - 1].type == TokenType::MUT)) {
+                        size_t afterType = j + 1;
+                        bool hasSigil = afterType < toks.size()
+                            && (toks[afterType].type == TokenType::AMPERSAND
+                                || toks[afterType].type == TokenType::STAR);
+                        size_t nameTok = hasSigil ? afterType + 1 : afterType;
+                        if (nameTok < toks.size() && toks[nameTok].type == TokenType::IDENTIFIER)
+                            hits.emplace_back(j, toks[j].lexeme);
+                    }
+                    ++j;
+                } while (j < toks.size() && parenDepth > 0);
+                size_t parenClose = j;   // one past the matching ')'
+
+                if (!hits.empty()) {
+                    // `fn [private] NAME` unchanged, then a synthesized `< __T0 : Trait0, ... >`.
+                    for (size_t k = i; k <= nameIdx; ++k) out.push_back(toks[k]);
+                    int line = toks[nameIdx].line;
+                    out.push_back(Token{ TokenType::LESS, "<", line });
+                    std::vector<std::string> synthNames(hits.size());
+                    for (size_t h = 0; h < hits.size(); ++h) {
+                        synthNames[h] = "__T" + std::to_string(synthCounter++);
+                        if (h > 0) out.push_back(Token{ TokenType::COMMA, ",", line });
+                        out.push_back(Token{ TokenType::IDENTIFIER, synthNames[h], line });
+                        out.push_back(Token{ TokenType::COLON, ":", line });
+                        out.push_back(Token{ TokenType::IDENTIFIER, hits[h].second, line });
+                    }
+                    out.push_back(Token{ TokenType::GREATER, ">", line });
+                    // The parameter list itself, with each hit's trait-name token swapped for its
+                    // synthesized type-param name; everything else (mut, param names, defaults,
+                    // commas, nested parens) copied through verbatim.
+                    size_t hitIdx = 0;
+                    for (size_t k = parenOpen; k < parenClose; ++k) {
+                        if (hitIdx < hits.size() && k == hits[hitIdx].first) {
+                            out.push_back(Token{ TokenType::IDENTIFIER, synthNames[hitIdx], toks[k].line });
+                            ++hitIdx;
+                        } else {
+                            out.push_back(toks[k]);
+                        }
+                    }
+                    i = parenClose;
+                    continue;
+                }
+            }
+        }
+
+        out.push_back(toks[i]);
+        ++i;
+    }
+    return out;
+}
+
 void Parser::monomorphize(Program& program, const std::string& filenameStr) {
     filename = filenameStr;   // label any monomorphization parse error with the source file
     runMonomorphization(program);

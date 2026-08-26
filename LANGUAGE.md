@@ -146,12 +146,16 @@ f64 pi = 3.14159;
 bool flag = true;
 char c = 'A';
 
-// Object — stack-allocated, zero-initialised (no constructor call)
+// Object — bare declaration. If the class has NO constructor, this zero-initialises and is
+// ready to use. If the class HAS any constructor, a bare declaration is "deferred init": it is
+// NOT auto-constructed, and using it before an explicit construction/assignment is an error
+// (see §8, "Constructors and zero-init"). Construct explicitly with () or {}:
 Point p;
 
 // Object — stack-allocated, constructor called
 Point p(1.0, 2.0);
 Point p{1.0, 2.0};       // braces: an alternate delimiter for the same constructor call
+Point p();               // explicit zero-argument construction (calls the no-arg constructor)
 
 // Object — initialised from another value (deep copy via clone helper)
 Point q = p;
@@ -543,9 +547,9 @@ Rules:
   be borrowed** (`Point*`) — a bare `Point p` is a compile error (a value copy per element is
   disallowed). `mut T*` gives a mutable borrow.
 - Each loop obtains a **fresh** iterator, so loops nest and re-run over the same collection.
-- The iterable may be a local, field, index, `this`, `new`, or a **reference-returning call**
-  (`for (x : getItems())` where `getItems() -> Items&`). A call that returns a collection **by value**
-  is not supported yet — bind it to a local first (`var c = f(); for (x : c) { … }`).
+- The iterable may be a local, field, index, `this`, `new`, a **reference-returning call**
+  (`for (x : getItems())` where `getItems() -> Items&`), or a call that returns a collection **by
+  value** (`getItems() -> Items`) — a temporary is kept alive for the whole loop in that case.
 - Making a type iterable — two symmetric built-in traits: the **collection** implements `Iterable`
   (`fn iter() -> <cursor>`), and the **cursor** implements `Iterator` (`hasNext`/`next`):
 ```gg
@@ -840,7 +844,9 @@ Functions may receive **class references** (`ClassName&`) as parameters — thes
 borrows (the caller retains ownership). They may **not** be reassigned inside the function
 (the binding is immutable), but their fields can be mutated freely.
 
-Value-typed class parameters (`ClassName` without `&`) are not supported;
+A **bare value-object parameter** (`ClassName` without `&`) is accepted too — it is **sugar for a
+non-owning borrow** (`fn f(Obj o)` ≡ `fn f(Obj* o)`; GG objects are address-backed, so there is no
+by-value struct copy). Use `Obj&` when you want an owning reference, `Obj` / `Obj*` for a plain borrow.
 
 ```gg
 fn bump(Point& p) {
@@ -1088,12 +1094,10 @@ deliberately shadows the field.
 
 ### Using classes
 ```gg
-// Stack value — zero-initialised (fields = 0), no constructor call
-Point zero;
-
 // Stack value — constructor called
 Point p(3.0, 4.0);
 Point q{3.0, 4.0};        // brace form — identical to the line above
+Point z();                // explicit zero-arg construction (Point must have a no-arg constructor)
 
 // Field access (read / write)
 f32 len = p.x * p.x + p.y * p.y;
@@ -1152,7 +1156,7 @@ type must be inferable (untyped `{…}` with no class context, or a brace on an 
 - Members are **public by default** — accessible from anywhere.
 - Prefix a member with `private` to restrict it to the class's own methods.
 - Accessing a `private` member from outside the class emits a **compile-time warning** but is not an error — the code still compiles and runs.
-- **Free functions** may also be `private`: `fn private helper(...) { … }`. This makes the function **file-local** — calling it from a **different source file** (i.e. through an `import`) emits the same **advisory warning**, while calls within the declaring file are silent. As with members, it is warning-level, not enforced. (Not supported on generic free functions in v1.)
+- **Free functions** may also be `private`: `fn private helper(...) { … }`. This makes the function **file-local** — calling it from a **different source file** (i.e. through an `import`) emits the same **advisory warning**, while calls within the declaring file are silent. As with members, it is warning-level, not enforced. This works on **generic** free functions too (`fn private wrap<T>(T x) -> T { … }`).
 
 ### Field mutability — `const` by default, `mut` to opt in
 Instance fields are **immutable by default**, just like local variables. A const field may
@@ -1227,9 +1231,58 @@ Rules:
 - Destructor injection order: **last declared, first destroyed** (LIFO) within a scope.
 
 ### Constructors and zero-init
-If you declare an object variable without parentheses (`Point p;`), its fields are
-zero-initialised and the constructor is **not** called. Always call the constructor
-explicitly when the class's invariants require it.
+A **bare** object declaration (`Point p;`, no `()`/`{}`) behaves differently depending on whether
+the class has a constructor — a bare declaration **never** implicitly calls one:
+
+- **Class with no constructor at all** → `Point p;` zero-initialises the fields and is immediately
+  usable. Zero bytes genuinely *is* the class's complete state (there is no constructor logic to skip).
+- **Class with any constructor** → `Point p;` is a **deferred initialisation**: the object is *not*
+  constructed, and using it before an explicit construction or assignment is a
+  *"used before it has been assigned a value"* error — exactly like an uninitialised primitive. Give
+  it a value with an explicit construction (`Point p();` / `Point p(1, 2)` / `Point p{1, 2}`) or a
+  later assignment. The single defining assignment may be split across branches, as for any const
+  binding:
+
+  ```gg
+  mut Point w;                       // deferred — Point has a constructor
+  if (c) { w = Point(1, 2); }        // construct on each branch…
+  else   { w = Point(9, 9); }        // …directly into w, no temporary
+  i32 s = w.sum();                   // OK — definitely assigned on every path
+  ```
+
+This means whether a bare declaration is usable no longer depends on the invisible detail of whether
+the class happens to have a zero-argument constructor; it is always "construct it explicitly, or
+assign before use."
+
+### Field default initializers & required initialization
+A field may carry a **default initializer** at its declaration (`= expr`, or `{args}` for a
+class-typed field), used when a constructor doesn't set it:
+
+```gg
+class Config {
+    mut i32 retries = 3;              // default value
+    mut Logger log{};                 // default-construct the field (brace form)
+    Config() { }                      // retries=3 and log{} run before the body
+}
+```
+
+And every constructor **must initialise every field** — on every path, by the time it returns — or
+it's a compile error, unless the field is exempt: it has a default initializer, it is **nullable**
+(`T?`, whose zeroed "absent" state is already meaningful), or it is an embedded value object of a
+class that itself has no constructor. This closes the "silently forgot to set a field" class of bug:
+
+```gg
+class Node {
+    mut i32 v;
+    mut Node&? next;                  // nullable — exempt (starts null)
+    Node(i32 x) { v = x; }            // OK: v assigned; next exempt
+    // Node(i32 x) { }                // ERROR: field 'v' is not initialized in constructor 'Node'
+}
+```
+
+A class that has field initializers but **no** explicit constructor gets an empty one synthesised
+automatically (so the defaults run). The check is intraprocedural — a field set by a helper the
+constructor calls isn't counted; assign it directly or give it a default.
 
 ### Static members
 Prefix a field or method with `static` to make it **class-level** — shared by all
@@ -1558,6 +1611,26 @@ expects: `data[i] = Point(data[i].x, data[i].y + 1)` increments `y` correctly ra
 zeros. (Assigning an element to *itself*, e.g. `data[i] = data[i]`, is not safe and not supported —
 this is no different from any other self-assignment through a raw buffer.)
 
+### `addressOf(local)` — raw address of a local's storage
+`addressOf(x)` returns the raw address of a **local variable's or parameter's** own storage slot as a
+typed `ptr<T>`. It's an FFI / C-binding primitive — the way to hand a C function an out-parameter
+address — and, like the raw-pointer types, it is **`--unsafe-ptr`-gated** and intended for
+stdlib/binding code:
+
+```gg
+extern strtoll(ptr s, ptr endptr, i32 base) -> i64;
+
+mut ptr end;
+i64 n = strtoll(s.data, addressOf(end), 10);   // C writes the end pointer back through the slot
+```
+
+- The element type follows the slot: `i32 x` → `addressOf(x)` is `ptr<i32>`; a value object `Point p`
+  → `ptr<Point>`; an owning reference `Point& r` → `ptr<Point&>` (a pointer *to the slot holding the
+  reference*, i.e. one level of indirection above the object — what an allocator out-param needs); a
+  `ptr`-typed local → `ptr<ptr>`.
+- v1: **locals and parameters only** (not fields, elements, or `this`); borrow-typed and nullable
+  locals are rejected.
+
 ### `sizeof`
 ```gg
 u64 n = sizeof(i32);    // 4
@@ -1672,16 +1745,20 @@ fn main() -> i32 {
 }
 ```
 
-The **type arguments are required** (`b.wrap<i32>(5)`, not `b.wrap(5)`) — a generic-method call must
-be written with explicit `<…>`. The receiver must be something whose type is obvious at the call site:
-a local, a parameter, a field, `this`, or the `Class::method<T>(...)` static form. A receiver that is
-itself a call result or a longer chain (`makeBox().wrap<i32>(5)`, `a.b.wrap<i32>(5)`) is not
-supported — bind it to a local first. Bounds work as elsewhere (`fn run<T: Show>(T* x) -> i32 { return
-x.show(); }`).
+Type arguments may be **deduced from the arguments**, like a generic free function — `b.wrap(5)`
+works the same as `b.wrap<i32>(5)` when `wrap`'s type parameter appears directly as a parameter type
+and the argument's type is known from its syntax (an in-scope variable, a `Class(...)` call, or `new
+Class(...)`). Explicit `<…>` always works and is required when inference can't apply (e.g. the type
+parameter is only in the return type, or the argument is a bare literal). The receiver must be
+something whose type is obvious at the call site: a local, a parameter, a field, `this`, or the
+`Class::method<T>(...)` static form. A receiver that is itself a call result or a longer chain
+(`makeBox().wrap<i32>(5)`, `a.b.wrap<i32>(5)`) is not supported — bind it to a local first. Bounds
+work as elsewhere (`fn run<T: Show>(T* x) -> i32 { return x.show(); }`).
 
-**v1 limitations** (clean errors): explicit `<T>` required (no argument inference — **except** a
-variadic method, below, whose pack is always inferred); generic methods in `impl`/`trait` blocks and
-non-obvious receivers are not supported yet.
+**v1 limitations** (clean errors): argument-driven inference works only when the method's **owner is a
+non-generic class** — a generic method *on a generic class* (e.g. `Array<T>::pushAll<U>`) still needs
+explicit `<U>` (its concrete template isn't available at the call site's parse time). Generic methods
+in `impl`/`trait` blocks and non-obvious receivers are not supported yet.
 
 ### Variadic methods
 
@@ -1800,40 +1877,48 @@ class Point { mut i32 x; mut i32 y; Point(i32 a, i32 b) { this.x = a; this.y = b
 fn origin() -> i32 { return 0; }
 ```
 
-Reference a module's symbols the **Java way** — load the file, then either import the name to use it
-bare, or write it fully-qualified:
+Module names may be **dotted** (`module std.utility;`), and a directory *is* its module: a dotted
+`import` **self-loads** every `*.gg` file in the directory that module maps to — you no longer write a
+companion quoted `import "…"` for it. Reference a module's symbols the **Java way**:
 
 ```gg
-// file app.gg
-import "geo.gg";          // load the file (as usual)
-import geo.Point;         // bring `Point` into scope unqualified (note: dotted name, no quotes)
+// file app.gg  (std/utility/ is a directory whose *.gg files all declare `module std.utility;`)
+import std.utility.Pair;   // dotted import: self-loads the module's directory AND binds `Pair`
+import std.io.*;           // wildcard: bind every member of module `std.io` (non-recursive)
 
 fn main() -> i32 {
-    Point p(1, 2);        // bare — resolves to geo.Point via the import
-    geo.Point q(3, 4);    // fully-qualified — always works once the file is loaded
-    return geo.origin();  // qualified free-function call
+    Pair<i32, i32> p(1, 2);        // bare — resolved via the import
+    std.utility.Pair<i32,i32> q(3, 4);  // fully-qualified — always works once the module is loaded
+    print("hi");                   // `print` came in via `import std.io.*;`
+    return 0;
 }
 ```
 
-- A file with **no** `module` declaration is in the global namespace (unchanged behaviour); all
-  existing code keeps working.
-- A **fully-qualified** name (`geo.Point`) works anywhere once the defining file is loaded — the
-  `import geo.Point;` is only a convenience that lets you drop the prefix.
-- If two imported modules both export `Point`, the **bare** name is ambiguous and is a compile
-  error — write `geo.Point` / `phys.Point` to disambiguate (Java-style; there is no import alias).
-- Two modules may declare the same type name freely: `geo.Point` and `phys.Point` are distinct.
-- `import geo.Point;` (a *symbol* import, dotted) is separate from `import "geo.gg";` (a *file* load,
-  a string path). A symbol import does **not** load the file — the file must still be `import "…"`-ed
-  somewhere in the build.
+- A file with **no** `module` declaration is in the global namespace (unchanged behaviour).
+- A **fully-qualified** name (`std.utility.Pair`) works anywhere once the module is loaded — the
+  `import` is a convenience that lets you drop the prefix.
+- **Dotted self-loading import** (`import a.b.C;` or a bare `import a.b;`): the last segment is the
+  symbol, the rest is the module path. If that path maps to a **directory**, **all** its `*.gg` files
+  are loaded (importing one symbol makes its module-siblings available too). Every file in a module
+  directory must declare that module (a mismatch is reported). A module living in a **single file**
+  (not its own directory) still needs a quoted `import "path.gg";` to load it — the dotted import then
+  only binds the name.
+- **Wildcard** `import a.b.*;` binds every top-level member (types **and** free functions) of module
+  `a.b` — non-recursive (a submodule `a.b.c` is not pulled in), Java-style.
+- If two imported modules both export `Point`, the **bare** name is ambiguous — write the FQN to
+  disambiguate (there is no import alias). Two modules may declare the same name freely.
+- A quoted `import "path"` (a *file* load) still works and is the escape hatch for module-less /
+  ad-hoc files.
+- The entire standard library is namespaced under `std` (e.g. `import std.String;`, `import
+  std.io.*;`, `import std.utility.Pair;`).
 
 A class field, method, or local **may** share a name with a module-level function (`fn size()` and a
-field `size` coexist fine). The rare exceptions that are rejected — rename one to resolve: a field or
-enum variant named identically to a **type** in the same module, and a local named identically to a
-top-level **function** when used in a `<` comparison.
+field `size` coexist fine). The rare rejected exceptions (rename one to resolve): a field or enum
+variant named identically to a **type** in the same module, and a local named identically to a
+top-level **function** used in a `<` comparison.
 
-**v1 limitations:** module names are single-segment (`module geo;`, not dotted `module a.b;`); there
-is no `import geo.*;` wildcard, no import aliasing, and no module-private visibility (a module only
-namespaces — all its symbols remain accessible). Don't name a local variable the same as a module.
+**v1 limitations:** no import aliasing, and no module-private visibility (a module only namespaces —
+all its symbols remain accessible). Don't name a local variable the same as a module.
 
 ### Calling C functions (`extern`)
 ```gg
@@ -1950,6 +2035,53 @@ The concrete impl is used for exactly that instantiation; the blanket covers all
 order doesn't matter. Because GG only has two tiers (a fully-concrete impl vs. a fully-generic one —
 there's no partial specialization like `impl<T> for Box<Vec<T>>`), there's never any ambiguity about
 which is "more specific."
+
+### Trait-typed parameters (sugar for a bounded generic)
+
+A **free function** may write a trait name directly as a parameter type — `fn draw(Shape s)` — as
+shorthand for a bounded generic `fn draw<T: Shape>(T s)`. It's the Java-`interface`-parameter /
+Rust-`impl Trait`-in-argument-position ergonomic, but it stays **fully static** (monomorphized, no
+vtable): each call compiles a concrete instantiation, exactly as if you'd written the `<T: Shape>`
+form yourself.
+
+```gg
+trait Shape { fn area() -> i32; }
+class Square { mut i32 s; Square(i32 v) { s = v; } }
+impl Shape for Square { fn area() -> i32 { return s * s; } }
+
+fn totalArea(Shape a) -> i32 { return a.area(); }   // ≡ fn totalArea<T: Shape>(T a) -> i32
+
+fn main() -> i32 {
+    Square& sq = new Square(4);
+    return totalArea(sq);        // called with no <...> — the type is deduced (see §11)
+}
+```
+
+- **Use the `&` sigil when the trait's method takes `Self&`.** A bare `Shape a` desugars to a
+  **borrow** (`T*`, following the bare-object-parameter rule in §6), which is fine for a method that
+  takes no `Self`-typed argument (like `area()` above). But the built-in operator traits (`Eq`,
+  `Add`, `Ord`, …) and many user traits declare methods taking `Self&` (`fn eq(Self& other)`), and a
+  borrow cannot bind to an owning `Self&`. Write the parameter as `Trait&` (an owning reference) in
+  that case:
+
+  ```gg
+  fn same(Eq& a, Eq& b) -> bool { return a == b; }   // `&` needed: eq takes Self&
+  ```
+
+  This mirrors ordinary class-parameter syntax exactly — `f(Obj o)` borrows, `f(Obj& o)` takes an
+  owning reference (§6). `mut Trait&` and `Trait*` work too, with the usual meanings.
+- **Each trait-typed parameter is an independent type.** `fn f(Eq& a, Eq& b)` becomes `fn f<T: Eq, U:
+  Eq>(T& a, U& b)` — `a` and `b` may bind to *different* concrete types. (Consequently `a == b`
+  between them only type-checks when the caller happens to pass the same type; if you require "both
+  the same type", write the explicit `fn f<T: Eq>(T& a, T& b)` form.)
+- Both **built-in** operator traits and **user-declared** traits work (including traits declared in an
+  imported file). An explicit call `totalArea<Square>(sq)` resolves to the same instantiation as the
+  deduced one.
+- **v1 limits** (clean errors, never a miscompile): **free functions only** — a bare trait name used
+  as a *method* parameter type, or on a function that already has its own explicit `<...>`, is the
+  ordinary "not a known type" error. No return-type or variable trait sugar (`-> Shape` / `Shape x =
+  …`) — that would require a runtime trait object, which GG does not have (dispatch is static only;
+  see §15).
 
 ### Operator overloading
 
@@ -2169,17 +2301,15 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Types & values
 | Missing feature | Notes |
 |-----------------|-------|
-| Built-in string type | Strings are C `ptr`; use `extern puts` and pass string literals directly |
 | Union / sum types | No tagged unions (enums are Java-style singletons, not sum types — see §9) |
-| Tuples | No tuple syntax or destructuring |
 | Nullable value objects | `T?` covers references, borrows, enums, and primitives; `Point?` (a value object) is rejected — use `Point&?` |
+| `str` slicing / concat / `==` | The `str` type (§1) is a read-only literal view — no slicing, concatenation, or `==` yet; use the `String` class |
 
 ### Functions & methods
 | Missing feature | Notes |
 |-----------------|-------|
-| Variadic functions | No `...` — use `extern` to call C variadics |
+| Runtime (C-style) variadic functions | No runtime `...` — use `extern` to call C variadics. GG *does* have **compile-time** type packs (`fn f<...Ts>(Ts... args)`, §5) and variadic methods (§11) |
 | Escaping / stored lambdas | Lambdas (§14) exist but are non-escaping value objects usable only as a literal argument to a `Call`-bounded generic; no `dyn Call` for heterogeneous storage |
-| Multiple return values | Return a class instance instead |
 
 ### Classes
 | Missing feature | Notes |
@@ -2195,10 +2325,11 @@ Attempting them will produce a compile error (or will simply not parse).
 ### Control flow
 | Missing feature | Notes |
 |-----------------|-------|
-| `match` (pattern matching / binding) | `switch` (§5) exists, but only value/identity labels — no destructuring patterns |
 | `do-while` loops | Negate condition and use `while` |
 | `goto` | Not present |
 | Exception handling (`try`/`catch`/`throw`) | No exception model; errors are return values |
+
+(`match` destructuring patterns **and** `switch` both exist — see §5.)
 
 ### Memory
 | Missing feature | Notes |
@@ -2213,12 +2344,14 @@ Attempting them will produce a compile error (or will simply not parse).
 | Missing feature | Notes |
 |-----------------|-------|
 | Type inference (return / params) | `var` infers **local** variable types; parameter, field, and return types are always written explicitly |
-| Runtime reflection (`typeof`, downcast) | No runtime type information — reflection is **compile-time only** (see below) |
-| Compile-time evaluation (`constexpr`) | `sizeof(T)` is the only compile-time computation |
-| Preprocessor / macros | None — generics handle the primary use case |
-| Modules / namespaces | No namespacing; all declarations share a flat global scope |
+| Runtime reflection (`typeof`, downcast) | No runtime type information — reflection is **compile-time only** (§2), and dispatch is static (no trait objects) |
+| General compile-time evaluation (`constexpr`) | No general CTFE — but `sizeof(T)`, `@`-reflection queries, and `inline for` (§2) all evaluate at compile time |
+| Preprocessor / macros | None — generics + reflection handle the primary use cases |
 | String interpolation | No template strings |
 | Assertions | Use `if (cond) { exit(1); }` or call `abort()` via `extern` |
+
+(Tuples §5, `match` §5, `str` §1, compile-time reflection & annotations §2, and modules/namespaces
+§12 **are** supported — they were once on this list.)
 
 ## 16. Debugging (`--debug` / `-g`)
 

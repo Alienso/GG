@@ -47,8 +47,13 @@ Program ImportResolver::resolve(const std::string& rootFilePath, const ModuleSea
     scanModules(rootFilePath, modVisited);
 
     // Pass 1: pre-register every generic template name across all files so that
-    // use sites are recognised regardless of which file declares the template.
-    Parser seedParser({}, &sharedGenerics_);
+    // use sites are recognised regardless of which file declares the template. Trait names are
+    // collected for the WHOLE graph up front (like collectClassNames) so seedParser's own
+    // desugarTraitParams call (inside prescanTemplates) recognises a user trait no matter which file
+    // in the graph declares it, or the order files are visited in — including import cycles.
+    std::unordered_set<std::string> traitSeedVisited;
+    std::unordered_set<std::string> traitSeedNames = collectTraitNames(rootFilePath, traitSeedVisited);
+    Parser seedParser({}, &sharedGenerics_, std::move(traitSeedNames));
     std::unordered_set<std::string> tplVisited;
     prescanTemplates(rootFilePath, tplVisited, seedParser);
 
@@ -291,8 +296,13 @@ void ImportResolver::prescanTemplates(const std::string& filePath,
     const auto& tokens = lexer.tokens()[0];
 
     // Register template names under their qualified module names (pass 0 has populated the tables),
-    // so a cross-file use site `geo.Vec<i32>` resolves to the same `geo.Vec` template.
-    seedParser.prescanTemplateNames(qualifyFileTokens(tokens));
+    // so a cross-file use site `geo.Vec<i32>` resolves to the same `geo.Vec` template. Desugar
+    // bare-trait-name parameters FIRST (seedParser was pre-seeded with the full-graph trait-name set
+    // in resolve(), so this sees every user trait regardless of which file in the graph declares it) —
+    // otherwise a sugared function would look non-generic here and wrongly land in ordinaryFuncNames.
+    std::vector<Token> qualified = qualifyFileTokens(tokens);
+    qualified = seedParser.desugarTraitParams(qualified);
+    seedParser.prescanTemplateNames(qualified);
 
     fs::path parentDir = canonical.parent_path();
     for (const std::string& dep : dependencyPaths(tokens, parentDir))
@@ -344,6 +354,43 @@ std::unordered_set<std::string> ImportResolver::collectClassNames(
 }
 
 // ============================================================
+// Trait-name pre-scanner (mirrors collectClassNames exactly)
+// ============================================================
+
+std::unordered_set<std::string> ImportResolver::collectTraitNames(
+    const std::string& filePath,
+    std::unordered_set<std::string>& visitedPaths)
+{
+    std::error_code ec;
+    fs::path canonical = fs::weakly_canonical(fs::path(filePath), ec);
+    if (ec || !fs::exists(canonical)) { reportMissingImport(filePath); return {}; }
+
+    std::string canonicalStr = canonical.string();
+    std::string key = dedupKey(canonical);
+    if (visitedPaths.count(key)) return {};
+    visitedPaths.insert(key);
+
+    std::vector<std::string> paths{ canonicalStr };
+    Lexer lexer(paths);
+    lexer.lex();
+    const std::vector<Token> tokens = qualifyFileTokens(lexer.tokens()[0]);
+
+    std::unordered_set<std::string> names;
+    fs::path parentDir = canonical.parent_path();
+
+    // Trait declarations are always top-level (no nested traits), so a flat scan suffices.
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type == TokenType::TRAIT && tokens[i + 1].type == TokenType::IDENTIFIER)
+            names.insert(tokens[i + 1].lexeme);
+    }
+    for (const std::string& dep : dependencyPaths(tokens, parentDir)) {
+        auto imported = collectTraitNames(dep, visitedPaths);
+        names.insert(imported.begin(), imported.end());
+    }
+    return names;
+}
+
+// ============================================================
 // Recursive file processor
 // ============================================================
 
@@ -367,6 +414,11 @@ Program ImportResolver::processFile(const std::string& filePath) {
     // variable declarations during parsing.
     std::unordered_set<std::string> classNameVisited;
     auto allClassNames = collectClassNames(canonicalString, classNameVisited);
+
+    // Same for user-declared trait names, so a bare-trait-name parameter (desugared to a bounded
+    // generic — see Parser::desugarTraitParams) recognises a trait declared in ANY imported file.
+    std::unordered_set<std::string> traitNameVisited;
+    auto allTraitNames = collectTraitNames(canonicalString, traitNameVisited);
 
     // Lex the file (parsing is deferred — see below).
     std::vector<std::string> paths = { canonicalString };
@@ -400,7 +452,7 @@ Program ImportResolver::processFile(const std::string& filePath) {
     // Now parse this file's own tokens — every dependency's generic templates are already captured
     // in gen_->templates. Bind to the shared generics registry and defer monomorphization —
     // resolve() expands all instantiations once after every file has been parsed.
-    Parser parser(std::move(allClassNames), &sharedGenerics_);
+    Parser parser(std::move(allClassNames), &sharedGenerics_, std::move(allTraitNames));
     Program rawProgram = parser.parse(tokens, canonicalString, /*runMonomorphization=*/false);
     // Append this file's own declarations, dropping ImportStmt nodes (quoted imports — already
     // followed above; dotted imports produce no AST node at all).

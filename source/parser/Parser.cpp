@@ -6,9 +6,21 @@
 #include "Parser_internal.h"
 #include <iostream>
 
-Parser::Parser(std::unordered_set<std::string> initialClassNames, GenericRegistry* sharedRegistry)
-    : classNames(std::move(initialClassNames)) {
+// Built-in operator/marker traits — mirrors SemanticAnalyzer::isBuiltinTrait's set exactly (kept as a
+// separate literal here since the parser layer has no dependency on SemanticAnalyzer). These are
+// always valid bare-trait-parameter bounds with no scan required, unlike a user `trait` decl.
+static const std::unordered_set<std::string>& builtinTraitNames() {
+    static const std::unordered_set<std::string> names = {
+        "Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord", "Neg", "Index", "Clone", "Iterator", "Iterable"
+    };
+    return names;
+}
+
+Parser::Parser(std::unordered_set<std::string> initialClassNames, GenericRegistry* sharedRegistry,
+              std::unordered_set<std::string> initialTraitNames)
+    : classNames(std::move(initialClassNames)), traitNames(std::move(initialTraitNames)) {
     if (sharedRegistry) gen_ = sharedRegistry;
+    traitNames.insert(builtinTraitNames().begin(), builtinTraitNames().end());
 }
 
 Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& filenameStr,
@@ -27,6 +39,14 @@ Program Parser::parse(const std::vector<Token>& inputTokens, const std::string& 
     if (!currentModule_.empty() || !gen_->moduleNames.empty())
         tokens = qualifyTokens(tokens, currentModule_, importBindings_, ambiguousImports_,
                                gen_->moduleTypes, gen_->moduleFuncs, gen_->moduleNames);
+
+    // Register this file's own trait names (cross-file names already seeded by the caller via the
+    // constructor), then desugar bare-trait-name parameters into bounded generics — BEFORE
+    // prescanTemplateNames, so a sugared function's synthesized `<...>` is what gets registered (else
+    // prescanTemplateNames would see the pre-desugar, apparently-non-generic signature and wrongly
+    // record the name in `gen_->ordinaryFuncNames`).
+    prescanTraitNames(tokens);
+    tokens = desugarTraitParams(tokens);
 
     // Register this file's template/class names (idempotent if pre-seeded by the caller).
     prescanTemplateNames(tokens);

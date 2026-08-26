@@ -1537,6 +1537,74 @@ instantiation site (the concrete arg must implement the trait) **and** by checki
   failing monomorphized instantiation (pass 2) can pre-empt the pass-3 message for the same misuse;
   the body-check's unique value is catching use-beyond-bounds that instantiation would accept.
 
+### Trait-name parameter sugar — `fn f(Trait a)` / `fn f(Trait& a)`
+A bare (or `&`/`*`-sigiled) trait name used as a whole parameter TYPE is sugar for a bounded generic
+(Java `interface`-parameter / Rust `impl Trait`-in-argument-position style): `fn square(Iterable x)`
+means `fn square<T: Iterable>(T x)`. Implemented as a **pure token-level rewrite**
+(`Parser::desugarTraitParams`, `Parser_Generics.cpp`) that runs BEFORE `tryCaptureFunctionTemplate`
+ever sees the declaration, so the desugared function flows through the **entire existing** bounded-
+generic pipeline (instantiation, `GenericBoundCheck` obligations, `checkGenericBodies`) with **zero**
+semantic/codegen changes — same design as tuples/ternary/lambdas ("parser-only sugar").
+- **Rewrite**: `fn [private] NAME (` at brace depth 0 (free function; no explicit `<...>` of its own)
+  has its parameter list scanned for an IDENTIFIER that (a) is a known trait name, (b) sits in type
+  position (preceded by `(`/`,`/`mut`), (c) is followed by an optional `&`/`*` sigil then the param's
+  name IDENTIFIER. Each hit is rewritten to a **fresh synthesized type-param name** (`__T0`, `__T1`,
+  …, unique per file) and a matching `<__T0: Trait0, __T1: Trait1, …>` is spliced in right after the
+  function name — e.g. `fn same(Eq& a, Eq& b) -> bool { return a == b; }` becomes `fn same<__T0: Eq,
+  __T1: Eq>(__T0& a, __T1& b) -> bool { return a == b; }`. An explicit sigil is preserved verbatim
+  (copied through unchanged); a bare param keeps no sigil.
+- **Why the sigil matters (not just cosmetic)**: a bare/no-sigil trait param is sugar for a **borrow**
+  (`T*`), following the pre-existing "bare value-object parameter is sugar for a non-owning class
+  borrow" rule. But GG forbids passing a borrow into a method expecting an **owning** reference
+  (`Self&`) — and every built-in operator trait's conventional method (`eq(Self&)`, `add(Self&)`, …)
+  and the common user-trait-method pattern both take `Self&`. So a bare-trait param can only call
+  trait methods that take **no** Self-typed argument (e.g. a zero-arg `size()`); calling `a.eq(b)` or
+  `a == b` between two bare-trait params is a clean "no matching 'eq' method" error. Writing `Eq& a`
+  (an explicit `&`) desugars to an **owning-reference** type param instead — which *does* satisfy
+  `Self&` — so operator-trait/Self&-taking usage requires the `&` sigil. This is discoverable, not
+  silent: the error names the concrete instantiation type, and the fix (`&`) mirrors ordinary class
+  param syntax exactly (`fn f(Obj o)` = borrow, `fn f(Obj& o)` = owning reference).
+- **Each occurrence is an INDEPENDENT type parameter** (Rust `impl Trait` semantics): `fn f(Eq& a, Eq&
+  b)` desugars to **two** unrelated bounded params (`__T0`, `__T1`), so `a` and `b` may bind to
+  different concrete types at a call site — but that also means `a == b` between them is a compile
+  error unless the caller happens to pass the same concrete type (checked at the definition by
+  `checkGenericBodies`, same as any other bounded-generic body). A user who wants "both params must
+  be the exact same type" writes the explicit form `fn f<T: Eq>(T& a, T& b)` — the sugar deliberately
+  does not infer that constraint, exactly as Rust's `impl Trait` doesn't either.
+- **Trait-name recognition**: built-in operator/marker traits (`Add`/`Sub`/`Mul`/`Div`/`Rem`/`Eq`/
+  `Ord`/`Neg`/`Index`/`Clone`/`Iterator`/`Iterable`) are seeded unconditionally in the `Parser`
+  constructor (`builtinTraitNames()`, `Parser.cpp` — a small literal kept in sync with
+  `SemanticAnalyzer::isBuiltinTrait`'s set by hand, since the parser layer has no dependency on
+  `SemanticAnalyzer`). User-declared traits are recognised **regardless of which file declares
+  them**, mirroring the existing `classNames` cross-file prescan: `Parser::traitNames` (a **separate**
+  set from `classNames`, so a bare trait name is never mistaken for an ordinary type anywhere else —
+  var decls, return types, `new`, …) is seeded from `ImportResolver::collectTraitNames` (a
+  `collectClassNames` clone: scans a file's own `trait NAME` tokens + recurses into every dependency)
+  at `Parser` construction in `processFile`, PLUS a same-file `Parser::prescanTraitNames` call inside
+  `parse()` itself (mirrors `prescanTemplateNames`'s own "idempotent if pre-seeded by the caller"
+  pattern) so a bare single-`Parser` caller (unit tests, single-file compilation with no
+  `ImportResolver`) still sees same-file trait declarations. `ImportResolver::resolve`'s pass-1
+  `seedParser` is ALSO pre-seeded with the full-graph trait-name set (computed once up front, same as
+  `collectClassNames` is for pass 3) so its own `desugarTraitParams` call — needed so a sugared
+  function is recognised as generic in `gen_->funcNames`/not wrongly landing in
+  `ordinaryFuncNames` — sees every trait regardless of file visitation order, including import
+  cycles.
+- **Call sites need no new code**: an inferred call (`square(x)`, no explicit `<...>`) rides the
+  pre-existing "Generic type-argument deduction" feature (`inferGenericTypeArgs`) unchanged — the
+  desugared function is an ordinary generic free function by the time any call-site code runs. An
+  explicit `square<Array$i32>(x)` call also works unchanged.
+- **v1 limits** (clean pre-existing errors, never a miscompile): **free functions only** — a method
+  (inside a class body; brace depth > 0) is untouched by the rewrite, so a bare trait name there hits
+  the ordinary "not a known type" parameter-type error. A declaration with its **own** explicit
+  `<...>` is left completely untouched (no mixing sugar with hand-written generics on the same
+  function) — a bare trait name used as a param type there also hits the ordinary type error (once
+  the template is actually instantiated; an uninstantiated generic's body is never parsed at all, so
+  a *dead* mis-typed template silently compiles, same as any other unused generic). No return-type or
+  local-variable trait sugar (`-> Iterable` / `Iterable x = ...`) — that would be a **trait object**
+  (erased type, runtime vtable dispatch), a fundamentally different feature requiring a new dispatch
+  mechanism GG doesn't have; deliberately out of scope. Tests: `tests/trait_param_sugar_tests.cpp`
+  (`[traitparam]`), `e2e/trait_param_sugar_test.gg`.
+
 ### Memory model
 - **Value objects** (`Point p`): stack-allocated struct; copied on assignment.
 - **`new` → value-object binding warns** (`analyzeVarDecl`): `Point p = new Point(...)` binds a heap
@@ -2703,6 +2771,37 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1451 test cases / 2696 assertions** (as of adding trait-name parameter sugar — `fn f(Trait a)` /
+`fn f(Trait& a)` as sugar for a bounded generic — see the "Trait-name parameter sugar" invariant
+above. 16 `tests/trait_param_sugar_tests.cpp` cases (`[traitparam]`): the desugar records a real
+`GenericBoundCheck` obligation (for both a user trait and a built-in operator trait), a satisfied
+bound is accepted whether called via inference or explicit `<...>`, the `&` sigil is what lets an
+operator-trait method taking `Self&` (e.g. `Eq::eq`) actually be called, a bare (borrow) param works
+for a Self-argument-free trait method, two same-trait params bind independently to different
+concrete types, a trait declared in a separate imported file is recognised, an unsatisfied bound is a
+clean semantic error, and the two v1-scope boundaries (a class method; mixing with an explicit
+`<...>` on the same function) hit the ordinary pre-existing "not a known type" parser error — surfaced
+that this specific error is a PARSE-time `CompileError`, which `parseString`'s catch block swallows
+into an empty (trivially error-free) `Program`, so those two cases assert via `StderrCapture` rather
+than `SemanticResult::hadError` (`analyzeString` can't see a parse-time failure at all). A follow-up
+edge-case sweep (prompted by "double check the tests for missed edge cases") added 4 more cases,
+each verified by hand against a scratch `.gg` program first: `mut Trait&` (the trait recognised when
+preceded by `mut`, both `mut` and `&` preserved), the `Trait*` explicit-borrow sigil, a `fn private`
+free function using the sugar (the desugar skips the optional `private` between `fn` and the name),
+and the false-positive guard — a parameter *named* like a trait (`fn f(i32 Eq)`, `Eq` preceded by the
+`i32` type keyword, not `(`/`,`/`mut`) is NOT rewritten and stays an ordinary non-generic function.
+Also added `e2e/trait_param_sugar_test.gg`. Full `GG_tests` suite plus a fresh compile-only sweep of
+every file under `e2e/` (75 files, via `GG.exe --unsafe-ptr` directly) confirmed no regressions — the
+same 7 pre-existing, unrelated failures already documented in the baseline below reappeared verbatim
+(same files, same messages), none newly failing and none mentioning "not a known type" or "trait".
+Separately, **`LANGUAGE.md` (the user-facing reference) was brought up to date** — it had last been
+touched at commit `24aa3f3` and was missing/contradicting 10 commits' worth of features: added the
+trait-param-sugar subsection (§13), `addressOf()` (§10), and corrected §2/§8 (bare `ClassName p;` no
+longer auto-invokes a constructor; field default initializers + constructor field-init enforcement),
+§6 (bare value-object params are sugar for a borrow), §11 (generic-method argument inference), §8
+(private generic functions), §12 (dotted module names, `import a.b.*` wildcards, dotted self-loading
+imports), and §15's stale "not supported" list (tuples/`match`/modules/`str`/variadics all shipped).
+Prior baseline was
 **1435 test cases / 2678 assertions** (as of making `resolveTypeToken` report "unknown type" for a
 bare, unparameterized generic class template name instead of silently degrading to `Error → i32` —
 see the new bullet under the "Generics" invariant above. 4 new `tests/semantic_tests.cpp` cases
@@ -2958,3 +3057,17 @@ exactly once (balanced counter ⇒ no leak; a double-free crashes). Complemented
 
 Treat CLAUDE.md as the authoritative onboarding document — it is auto-loaded at the
 start of every Claude Code session and replaces the need to re-explain the project.
+
+**`LANGUAGE.md` must be updated in the SAME change whenever a user-facing language feature
+changes.** CLAUDE.md is the internal/implementation reference; `LANGUAGE.md` is the user-facing
+language reference (syntax, semantics, and the "What GG does NOT support" list). Any change to
+**observable language behavior** — new syntax, a new type/operator/trait, changed defaults (e.g.
+"bare `ClassName p;` no longer auto-invokes a constructor"), a feature moving from unsupported to
+supported, or a new v1 limitation — must be reflected in `LANGUAGE.md` too, not just here.
+- When you promote a feature from "not yet supported" to working, **remove it from `LANGUAGE.md`'s
+  §15 ("What GG does NOT support")** in the same commit — a stale §15 that contradicts the body of
+  the same document is the most common way `LANGUAGE.md` rots (it happened across ~10 commits once).
+- Purely internal changes (refactors, codegen/IR shape, pass reordering, new C++ source files, test
+  scaffolding) touch **only CLAUDE.md** — `LANGUAGE.md` describes the language, not the compiler.
+- `LANGUAGE.md` is git-tracked; CLAUDE.md is not. So a "did I forget to update the docs?" check is
+  `git log -1 -- LANGUAGE.md` vs. the language-feature commits since — if they've diverged, sync it.

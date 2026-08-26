@@ -1,0 +1,75 @@
+// End-to-end test for trait-name parameter sugar: `fn f(Trait a)` / `fn f(Trait& a)`.
+// A bare (or `&`/`*`-sigiled) trait name used as a whole parameter type desugars, at the token
+// level, into a bounded generic — see Parser::desugarTraitParams. Expected exit code: 0.
+
+trait Shape {
+    fn area() -> i32;
+}
+
+class Square {
+    mut i32 side;
+    Square(i32 s) { side = s; }
+}
+
+class Rect {
+    mut i32 w;
+    mut i32 h;
+    Rect(i32 a, i32 b) { w = a; h = b; }
+}
+
+impl Shape for Square {
+    fn area() -> i32 { return side * side; }
+}
+
+impl Shape for Rect {
+    fn area() -> i32 { return w * h; }
+}
+
+class Vec2 {
+    mut i32 x;
+    mut i32 y;
+    Vec2(i32 a, i32 b) { x = a; y = b; }
+    fn sum() -> i32 { return x + y; }
+}
+
+impl Eq for Vec2 {
+    fn eq(Vec2& r) -> bool { return x == r.x && y == r.y; }
+}
+
+// Bare (borrow) trait param — fine, since `area()` takes no Self-typed argument.
+fn totalArea(Shape a) -> i32 {
+    return a.area();
+}
+
+// `&` sigil — required since the built-in `Eq` trait's conventional `eq(Self&)` needs an
+// owning-reference argument (a borrow cannot bind to an owning-reference parameter).
+fn same(Eq& a, Eq& b) -> bool {
+    return a == b;
+}
+
+// Two occurrences of the same trait bind INDEPENDENTLY (Rust `impl Trait` semantics) — Square and
+// Rect are unrelated classes, both implementing Shape, filling the two slots at once.
+fn combinedArea(Shape a, Shape b) -> i32 {
+    return a.area() + b.area();
+}
+
+fn main() -> i32 {
+    Square& sq = new Square(3);
+    Rect&   r  = new Rect(2, 5);
+
+    // Called with NO explicit <...> — relies on the pre-existing generic type-argument inference.
+    if (totalArea(sq) != 9)  { return 1; }
+    if (totalArea(r)  != 10) { return 2; }
+    if (combinedArea(sq, r) != 19) { return 3; }
+
+    // Explicit <...> resolves to the same instantiation as inference.
+    if (totalArea<Square>(sq) != 9) { return 4; }
+
+    Vec2& a = new Vec2(1, 2);
+    Vec2& b = new Vec2(1, 2);
+    Vec2& c = new Vec2(9, 9);
+    if (!same(a, b)) { return 5; }
+    if (same(a, c))  { return 6; }
+
+    return 0;
+}

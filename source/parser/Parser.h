@@ -157,8 +157,11 @@ public:
     // Pre-register class names from imported files so that cross-file constructor
     // calls (e.g. "String s(...)") are recognised as VarDecl. A shared GenericRegistry
     // (when provided) lets generics span files; otherwise an internal one is used.
+    // `initialTraitNames` seeds cross-file USER trait names (built-ins are always seeded
+    // unconditionally) for the bare-trait-parameter sugar — see desugarTraitParams.
     explicit Parser(std::unordered_set<std::string> initialClassNames = {},
-                    GenericRegistry* sharedRegistry = nullptr);
+                    GenericRegistry* sharedRegistry = nullptr,
+                    std::unordered_set<std::string> initialTraitNames = {});
     // runMonomorphization=false defers expansion (the caller invokes monomorphize()
     // once, after every file has been parsed into the shared registry).
     [[nodiscard]] Program parse(const std::vector<Token>& inputTokens,
@@ -168,6 +171,22 @@ public:
     // Pre-register generic template names from a token stream so that use sites
     // are recognised regardless of which file declares the template.
     void prescanTemplateNames(const std::vector<Token>& inputTokens);
+    // Pre-register `trait NAME { ... }` declarations found in this token stream (same-file scan —
+    // mirrors prescanTemplateNames; cross-file names come from ImportResolver::collectTraitNames via
+    // the constructor). Traits are always top-level, so this is a flat, brace-agnostic scan.
+    void prescanTraitNames(const std::vector<Token>& inputTokens);
+    // Trait-name parameter sugar: `fn square(Iterable x) -> ... { ... }` is rewritten, purely at the
+    // token level, into `fn square<__T0: Iterable>(__T0 x) -> ... { ... }` before the ordinary
+    // generic-capture pass (tryCaptureFunctionTemplate) ever sees it — so semantics/codegen need no
+    // changes, and this is just sugar over the existing bounded-generic pipeline. An explicit `&`/`*`
+    // sigil is preserved (`Eq& a` -> `__T0& a`, an owning reference; `Eq* a` -> `__T0* a`, an explicit
+    // borrow) — the `&` form matters because a bare/borrow param can never be passed to a method
+    // expecting `Self&` (borrow -> owning-reference is forbidden everywhere in GG), which is exactly
+    // what every built-in operator trait's conventional signature takes. Each trait-typed parameter
+    // gets an INDEPENDENT fresh type parameter (Rust `impl Trait` semantics: two `Eq&` params may bind
+    // to two different concrete types). v1: top-level (free) functions only, and only when the
+    // declaration has no explicit `<...>` of its own (no mixing sugar with explicit generics).
+    std::vector<Token> desugarTraitParams(const std::vector<Token>& toks) const;
     // Expand all pending instantiations, appending concrete declarations to `program`.
     // `filename` labels monomorphization parse errors (reported at the use-site line).
     void monomorphize(Program& program, const std::string& filename = "");
@@ -206,6 +225,11 @@ private:
     size_t                         current = 0;
     std::string                    filename;               // source filename for error messages
     std::unordered_set<std::string> classNames;   // class names registered during parse
+    // Known trait names (built-ins seeded unconditionally in the ctor, plus this file's own + any
+    // cross-file names passed in) — used ONLY by desugarTraitParams's narrow param-type check, kept
+    // separate from `classNames` so a bare trait name is never mistaken for an ordinary type anywhere
+    // else (var decls, return types, `new`, ...).
+    std::unordered_set<std::string> traitNames;
     bool                           insideFunction = false;  // true when parsing a function/method body
 
     // ---- Module namespacing (per file) ----

@@ -1,0 +1,46 @@
+// End-to-end: a reader/writer lock (`Shared<RwLock<T>>`, concurrency Phase 2).
+//
+// One writer thread and two reader threads share a Data behind a RwLock. `.write(p -> {...})` takes
+// the exclusive lock (`p : mut Data*`); `.read(p -> {...})` takes a shared lock (`p : Data*`, so
+// several readers may proceed at once). The exact value a reader observes races the writer (not
+// asserted); what matters is that concurrent read/write is memory-safe and the refcount balances.
+//
+// Data tracks its own live instances (ctor ++ / dtor --, plus a Clone impl for the interior copy the
+// lock makes). After the shared handle is dropped, Data::live must be 0 — released exactly once.
+import std.thread.Thread;
+import std.sync.RwLock;
+
+class Data {
+    mut static i32 live;
+    mut i32 v;
+    Data() { v = 0; Data::live = Data::live + 1; }
+    ~Data() { Data::live = Data::live - 1; }
+    fn get() -> i32 { return v; }
+    fn set(i32 x) mut { v = x; }
+}
+impl Clone for Data { fn clone(Data& src) mut { v = src.v; Data::live = Data::live + 1; } }
+class G { mut static i32 seen; }
+
+fn writer(Shared<RwLock<Data>> d) {
+    mut i32 i = 1;
+    while (i <= 500) { d.write((mut Data* p) -> { p.set(i); }); i = i + 1; }
+}
+fn reader(Shared<RwLock<Data>> d) {
+    mut i32 i = 0;
+    while (i < 500) { d.read((Data* p) -> { G::seen = p.get(); }); i = i + 1; }
+}
+
+fn main() -> i32 {
+    {
+        Shared<RwLock<Data>> d = Shared<RwLock<Data>>(Data());
+        Thread w  = Thread.create(() -> { writer(d); });
+        Thread r1 = Thread.create(() -> { reader(d); });
+        Thread r2 = Thread.create(() -> { reader(d); });
+        w.join();
+        r1.join();
+        r2.join();
+    }   // d + its RwLock<Data> leave scope → the guarded Data is freed exactly once
+
+    if (Data::live == 0) { return 42; }   // balanced ⇒ no leak / no double free under concurrent R/W
+    return 1;
+}

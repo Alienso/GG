@@ -2246,6 +2246,7 @@ A **lambda** is an anonymous callable written `(params) -> [ReturnType] { body }
 (i32 a, i32 b) -> i32 { return a + b; }   // typed return
 (i32 x) -> { doSomething(x); }            // omitted return type ⇒ void
 () -> i32 { return 42; }                  // no parameters
+(mut Point* p) -> { p.x = 0; }            // a `mut` borrow parameter (e.g. for a Mutex `.with`, §15)
 ```
 
 When a lambda is passed to a `Call`-bounded function (below), its parameter types **and** return
@@ -2323,9 +2324,9 @@ i32 n = c.get();
   `enum` fields (data races produce garbage but never memory corruption), and non-`mut` reference or
   value-object fields whose types are themselves Shareable — but **not** a `mut` reference field (a
   rebind is a cross-thread double-free hazard), nor any raw `ptr`/borrow field. A non-Shareable `T`
-  is rejected at the construction site, naming the offending field. (A `Mutex<T>`/`RwLock<T>` for
-  guarded mutable sharing is planned; today, mutate `mut` primitive fields at your own risk, or keep
-  shared classes effectively immutable.)
+  is rejected at the construction site, naming the offending field. (To *mutate* shared state safely,
+  wrap it in a `Mutex<T>`/`RwLock<T>` — see below; a bare `Shared<T>` is for immutable sharing, where
+  mutating a `mut` primitive field is racy-but-memory-safe.)
 - `Shared<T>?` (a nullable shared handle) is allowed.
 
 ### `Thread` — run a closure on a new OS thread
@@ -2365,8 +2366,41 @@ fn main() -> i32 {
 - **Platform.** Threads use the OS primitives (Windows `CreateThread`; Linux `pthread`). On Windows,
   linking pulls in `kernel32` automatically via `compile.ps1`.
 
-**Not yet:** `Mutex`/`RwLock` for guarded mutable sharing, thread return values, detaching, and
-thread-local storage. A `mut` reference field inside a `Shared<T>` is rejected pending `Mutex<T>`.
+### `Mutex<T>` / `RwLock<T>` — safe mutable shared state
+
+A plain `Shared<T>` shares *immutable* state. To mutate shared state safely, wrap it in a lock cell
+(`import std.sync.Mutex;` / `import std.sync.RwLock;`) and share *that*: `Shared<Mutex<T>>`. The lock
+serialises every access, so an arbitrary `T` — even one with mutable reference fields — is race-free
+inside.
+
+Access is **scoped through a closure** that receives a borrow of the guarded value, valid only for the
+duration of the call (the compiler forbids the borrow from escaping):
+
+The closure's parameter must be written **explicitly** — `(mut T* p)` for exclusive access,
+`(T* p)` for a read-only share (untyped inference isn't available for these accessors yet):
+
+```gg
+Shared<Mutex<Counter>> counter = Shared<Mutex<Counter>>(Counter());
+counter.with((mut Counter* p) -> { p.bump(); });     // exclusive lock
+
+Shared<RwLock<Config>> cfg = Shared<RwLock<Config>>(Config());
+cfg.read((Config* p)  -> { use(p.host); });          // shared lock (read-only) — readers run concurrently
+cfg.write((mut Config* p) -> { p.host = "new"; });   // exclusive lock
+```
+
+- **`Mutex<T>`** has one accessor, `.with((mut T* p) -> {...})` (exclusive).
+- **`RwLock<T>`** has `.read((T* p) -> {...})` (shared lock, read-only — many readers at once) and
+  `.write((mut T* p) -> {...})` (exclusive).
+- A lock cell is **non-copyable** (it owns an OS handle) — always share it via `Shared<...>`.
+- **Limitations** (compile errors, not crashes): the closure parameter must be explicitly typed (no
+  inference yet); the borrow may not escape its closure (enforced intraprocedurally — a borrow
+  forwarded into another function that stores it is *not* caught yet); a `.with`/`.read`/`.write`
+  closure cannot be written *directly* inside a thread body (nested lambdas are unsupported — call a
+  helper that locks). Locks are **non-reentrant** (re-locking inside the closure deadlocks), there is
+  no deadlock detection, and `Shared<Mutex<T>>` locks all of `T` (no per-field locking).
+
+**Not yet:** condition variables, `try_lock`, reentrant locks, closure-parameter inference for the
+accessors, thread return values, detaching, and thread-local storage.
 
 ## 16. What GG does NOT support
 

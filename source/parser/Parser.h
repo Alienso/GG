@@ -296,13 +296,16 @@ private:
     [[noreturn]] void throwTypeExpected(const std::string& what);
     // True if the tokens at the current `(` form a lambda `( … ) -> …` (vs a grouped expression).
     [[nodiscard]] bool isLambdaAhead() const;
-    // Parse the parenthesized parameter list of a lambda, allowing typed (`i32 x`) and untyped (`x`)
-    // parameters (nullopt type ⇒ inferred from the expected signature).
-    [[nodiscard]] std::vector<std::pair<Token, std::optional<Token>>> parseLambdaParamList();
+    // One lambda parameter: name, optional explicit type (nullopt ⇒ inferred from the expected
+    // signature), and a `mut` flag (`mut T* p` — a mutable borrow, needed by a `Mutex.with` closure).
+    struct LambdaParam { Token name; std::optional<Token> type; bool isMut = false; };
+    // Parse the parenthesized parameter list of a lambda, allowing typed (`i32 x`), untyped (`x`), and
+    // `mut`-qualified (`mut T* x`) parameters.
+    [[nodiscard]] std::vector<LambdaParam> parseLambdaParamList();
     // Finish a lambda given its parameters (types optional): parse `-> [Ret] { body }`, resolve any
     // omitted parameter/return types from the expected signature, generate the class + impl, and
     // return the stack-construction expression `__lambda_N(captures…)`.
-    [[nodiscard]] Expr finishLambda(std::vector<std::pair<Token, std::optional<Token>>> params, int line);
+    [[nodiscard]] Expr finishLambda(std::vector<LambdaParam> params, int line);
     // Parse a lambda literal `(params) -> [Ret] { body }` (parenthesized-parameter form).
     [[nodiscard]] Expr parseLambda();
     // Canonical `Call$…` trait name for a call signature (param type tokens + return type token);

@@ -378,6 +378,159 @@ void CodeGen::emitThreadRuntime() {
     }
 }
 
+// ============================================================
+// OS mutex runtime — the stdlib Mutex<T> lock primitives
+// ============================================================
+//
+// Four platform-neutral helpers the stdlib `Mutex<T>` (std.sync) ctor/dtor/`.with` lowering call:
+//   @gg_mutex_create() -> ptr        — allocate + init an OS mutex, return an opaque handle
+//   @gg_mutex_destroy(ptr handle)    — destroy + free it
+//   @gg_mutex_lock(ptr handle)       — acquire (exclusive; blocks)
+//   @gg_mutex_unlock(ptr handle)     — release
+// Gated by declare-presence (like emitStdioHelpers' gg_stdout): if the program imported Mutex, its
+// `extern gg_mutex_*` declares are present — we remove them and emit the definitions (LLVM forbids a
+// declare + define of the same symbol). Windows uses SRWLOCK held exclusively (in kernel32, already
+// linked via -lkernel32); POSIX uses pthread_mutex. Non-reentrant on both.
+void CodeGen::emitMutexRuntime() {
+    bool useMutex = false, useRw = false;
+    for (auto it = module.declares.begin(); it != module.declares.end(); ) {
+        if (it->find("@gg_mutex_create(") != std::string::npos
+            || it->find("@gg_mutex_destroy(") != std::string::npos
+            || it->find("@gg_mutex_lock(") != std::string::npos
+            || it->find("@gg_mutex_unlock(") != std::string::npos) {
+            useMutex = true;
+            it = module.declares.erase(it);
+        } else if (it->find("@gg_rwlock_") != std::string::npos) {
+            useRw = true;
+            it = module.declares.erase(it);
+        } else ++it;
+    }
+    if (useRw) emitRwLockRuntime();
+    if (!useMutex) return;
+
+    // malloc/free hold the lock storage; dedup against extern-imported / refcount-runtime decls.
+    const std::string mallocDecl = "declare ptr @malloc(i64)";
+    const std::string freeDecl   = "declare void @free(ptr)";
+    bool haveMalloc = false, haveFree = false;
+    for (const auto& d : module.declares) {
+        if (d == mallocDecl) haveMalloc = true;
+        if (d == freeDecl)   haveFree = true;
+    }
+    if (!haveMalloc) module.declares.push_back(mallocDecl);
+    if (!haveFree)   module.declares.push_back(freeDecl);
+
+    if (targetWindows_) {
+        // SRWLOCK is one pointer-sized word; needs no explicit destroy (just free the storage).
+        module.declares.push_back("declare void @InitializeSRWLock(ptr)");
+        module.declares.push_back("declare void @AcquireSRWLockExclusive(ptr)");
+        module.declares.push_back("declare void @ReleaseSRWLockExclusive(ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_mutex_create() {\n"
+            "entry:\n"
+            "  %h = call ptr @malloc(i64 8)\n"
+            "  call void @InitializeSRWLock(ptr %h)\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_destroy(ptr %h) {\n"
+            "entry:\n  call void @free(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_lock(ptr %h) {\n"
+            "entry:\n  call void @AcquireSRWLockExclusive(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_unlock(ptr %h) {\n"
+            "entry:\n  call void @ReleaseSRWLockExclusive(ptr %h)\n  ret void\n}\n");
+    } else {
+        // pthread_mutex_t is opaque and platform-sized (≤ 40 bytes on glibc/musl); over-allocate 64.
+        module.declares.push_back("declare i32 @pthread_mutex_init(ptr, ptr)");
+        module.declares.push_back("declare i32 @pthread_mutex_destroy(ptr)");
+        module.declares.push_back("declare i32 @pthread_mutex_lock(ptr)");
+        module.declares.push_back("declare i32 @pthread_mutex_unlock(ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_mutex_create() {\n"
+            "entry:\n"
+            "  %h = call ptr @malloc(i64 64)\n"
+            "  %r = call i32 @pthread_mutex_init(ptr %h, ptr null)\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_destroy(ptr %h) {\n"
+            "entry:\n"
+            "  %r = call i32 @pthread_mutex_destroy(ptr %h)\n"
+            "  call void @free(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_lock(ptr %h) {\n"
+            "entry:\n  %r = call i32 @pthread_mutex_lock(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_mutex_unlock(ptr %h) {\n"
+            "entry:\n  %r = call i32 @pthread_mutex_unlock(ptr %h)\n  ret void\n}\n");
+    }
+}
+
+// OS reader/writer-lock runtime for the stdlib RwLock<T> (std.sync). Six helpers
+// (create/destroy/rdlock/rdunlock/wrlock/wrunlock). Windows uses SRWLOCK, which is a native
+// reader/writer lock but needs a MODE-MATCHED release (Shared vs Exclusive) — hence distinct
+// rd/wr unlocks; POSIX uses pthread_rwlock, whose single unlock serves both modes.
+void CodeGen::emitRwLockRuntime() {
+    const std::string mallocDecl = "declare ptr @malloc(i64)";
+    const std::string freeDecl   = "declare void @free(ptr)";
+    bool haveMalloc = false, haveFree = false;
+    for (const auto& d : module.declares) {
+        if (d == mallocDecl) haveMalloc = true;
+        if (d == freeDecl)   haveFree = true;
+    }
+    if (!haveMalloc) module.declares.push_back(mallocDecl);
+    if (!haveFree)   module.declares.push_back(freeDecl);
+
+    if (targetWindows_) {
+        module.declares.push_back("declare void @InitializeSRWLock(ptr)");
+        module.declares.push_back("declare void @AcquireSRWLockShared(ptr)");
+        module.declares.push_back("declare void @ReleaseSRWLockShared(ptr)");
+        module.declares.push_back("declare void @AcquireSRWLockExclusive(ptr)");
+        module.declares.push_back("declare void @ReleaseSRWLockExclusive(ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_rwlock_create() {\n"
+            "entry:\n"
+            "  %h = call ptr @malloc(i64 8)\n"
+            "  call void @InitializeSRWLock(ptr %h)\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_destroy(ptr %h) {\nentry:\n  call void @free(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_rdlock(ptr %h) {\nentry:\n  call void @AcquireSRWLockShared(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_rdunlock(ptr %h) {\nentry:\n  call void @ReleaseSRWLockShared(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_wrlock(ptr %h) {\nentry:\n  call void @AcquireSRWLockExclusive(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_wrunlock(ptr %h) {\nentry:\n  call void @ReleaseSRWLockExclusive(ptr %h)\n  ret void\n}\n");
+    } else {
+        module.declares.push_back("declare i32 @pthread_rwlock_init(ptr, ptr)");
+        module.declares.push_back("declare i32 @pthread_rwlock_destroy(ptr)");
+        module.declares.push_back("declare i32 @pthread_rwlock_rdlock(ptr)");
+        module.declares.push_back("declare i32 @pthread_rwlock_wrlock(ptr)");
+        module.declares.push_back("declare i32 @pthread_rwlock_unlock(ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_rwlock_create() {\n"
+            "entry:\n"
+            "  %h = call ptr @malloc(i64 64)\n"
+            "  %r = call i32 @pthread_rwlock_init(ptr %h, ptr null)\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_destroy(ptr %h) {\nentry:\n  %r = call i32 @pthread_rwlock_destroy(ptr %h)\n  call void @free(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_rdlock(ptr %h) {\nentry:\n  %r = call i32 @pthread_rwlock_rdlock(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_rdunlock(ptr %h) {\nentry:\n  %r = call i32 @pthread_rwlock_unlock(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_wrlock(ptr %h) {\nentry:\n  %r = call i32 @pthread_rwlock_wrlock(ptr %h)\n  ret void\n}\n");
+        module.runtime.push_back(
+            "define void @gg_rwlock_wrunlock(ptr %h) {\nentry:\n  %r = call i32 @pthread_rwlock_unlock(ptr %h)\n  ret void\n}\n");
+    }
+}
+
 // The per-closure C-ABI trampoline the OS thread runs: it invokes the closure's `call()` then
 // releases the (heap, sole-owned) closure. Return type matches the platform's thread-entry ABI
 // (Windows `DWORD(*)(LPVOID)` = i32; pthread `void*(*)(void*)` = ptr). Deduped by closure class.

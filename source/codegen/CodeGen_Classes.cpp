@@ -286,6 +286,35 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
 }
 
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
+    // Scoped sync-cell access `cell.with/read/write(closure)` (Phase 2): acquire the lock, invoke the
+    // closure with a borrow of the guarded interior, then release. Lowered here (not an ordinary
+    // method call) because a closure type is unspellable and a lock guard must never be a first-class
+    // value; the borrow's confinement to this call was checked in semantics.
+    if (syncAccessCalls_) {
+        auto it = syncAccessCalls_->find(&mc);
+        if (it != syncAccessCalls_->end()) {
+            const std::string& kind = it->second;            // "with"|"write" (exclusive), "read" (shared)
+            std::string cellClass = exprType(*mc.object).className;
+            std::string recv = genExpr(*mc.object);          // ptr to the cell (a Shared<> auto-derefs)
+            auto [handleGep, ht] = resolveFieldGEP(recv, cellClass, "handle");
+            std::string handle   = emitLoad("ptr", handleGep);       // the OS lock handle
+            auto [valueGep, vt]  = resolveFieldGEP(recv, cellClass, "value");   // &interior : [mut] T*
+            std::string closureClass = exprType(*mc.args[0]).className;
+            std::string closure  = genExpr(*mc.args[0]);     // ptr to the materialized closure value
+            // Lock mode by access kind. A Windows SRWLOCK needs a mode-matched release, so read and
+            // write have distinct unlock helpers (POSIX maps both to pthread_rwlock_unlock).
+            std::string lockFn, unlockFn;
+            if (isRwLockName(cellClass)) {
+                if (kind == "read") { lockFn = "gg_rwlock_rdlock"; unlockFn = "gg_rwlock_rdunlock"; }
+                else                { lockFn = "gg_rwlock_wrlock"; unlockFn = "gg_rwlock_wrunlock"; }
+            } else            { lockFn = "gg_mutex_lock"; unlockFn = "gg_mutex_unlock"; }
+            emit("call void @" + lockFn + "(ptr " + handle + ")");
+            emit("call void @" + closureClass + "_call(ptr " + closure + ", ptr " + valueGep + ")");
+            emit("call void @" + unlockFn + "(ptr " + handle + ")");
+            return "";
+        }
+    }
+
     // Built-in `obj.clone()`: materialize a fresh value-object temp, deep-copy the receiver into it
     // via `@Class_clone(dest, src)` (generated memberwise clone, or the user's `impl Clone`), and
     // yield the temp's address. Same `(dest, src)` shape as an sret return slot.

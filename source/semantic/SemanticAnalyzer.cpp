@@ -107,6 +107,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     callArgOrder_.clear();
     inferredVarType_.clear();
     directConstructAssigns_.clear();
+    syncAccessCalls_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
     stdlibDir_        = options.stdlibDir;
@@ -139,7 +140,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
                           std::move(structuralValueCmp_), std::move(eqImpls),
                           std::move(callableCalls_), std::move(braceInitClass_),
                           std::move(callArgOrder_), std::move(inferredVarType_),
-                          std::move(builtinCloneCalls_), std::move(directConstructAssigns_) };
+                          std::move(builtinCloneCalls_), std::move(directConstructAssigns_),
+                          std::move(syncAccessCalls_) };
 }
 
 // ============================================================
@@ -686,6 +688,11 @@ bool SemanticAnalyzer::isSharedSafeField(const Type& ft, bool isMut) {
 }
 
 bool SemanticAnalyzer::isShareableClass(const std::string& cn) {
+    // The stdlib sync cells (Mutex<T>/RwLock<T>) are the interior-mutability escape hatch: they are
+    // inherently Shareable regardless of their internals (a raw lock handle + an arbitrary interior
+    // `T`), because the lock serialises every access to that interior. So `Shared<Mutex<T>>` is safe
+    // for ANY `T`. Recognised by simple name (short-circuits before the raw-ptr-field check below).
+    if (isSyncCellName(cn)) return true;
     auto cached = shareableCache_.find(cn);
     if (cached != shareableCache_.end()) return cached->second;
     auto it = classRegistry.find(cn);

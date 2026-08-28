@@ -134,6 +134,8 @@ private:
     const std::unordered_map<const void*, std::string>* builtinCloneCalls_ = nullptr;
     // Object-local defining-assignment nodes eligible for direct construction (no temp + clone).
     const std::unordered_set<const void*>* directConstructAssigns_ = nullptr;
+    // Scoped sync-cell access nodes → kind ("with"/"read"/"write") — lowered to acquire/call/release.
+    const std::unordered_map<const void*, std::string>* syncAccessCalls_ = nullptr;
     // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
     const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
     // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
@@ -461,6 +463,13 @@ private:
     // deduped by closure class. The signature is platform-specific (Windows i32 / pthread ptr return).
     void emitThreadTrampoline(const std::string& closureClass);
     std::unordered_set<std::string> threadTrampolines_;
+    // OS mutex runtime (@gg_mutex_create/destroy/lock/unlock) for the stdlib Mutex<T> (std.sync).
+    // Windows SRWLOCK (exclusive) / POSIX pthread_mutex; gated by declare-presence like the stdio
+    // helpers (the stdlib `extern gg_mutex_*` declares are replaced by definitions). Phase 2.
+    void emitMutexRuntime();
+    // OS reader/writer-lock runtime (@gg_rwlock_*) for the stdlib RwLock<T>. Windows SRWLOCK (shared
+    // + exclusive) / POSIX pthread_rwlock; declare-presence gated (emitted from emitMutexRuntime).
+    void emitRwLockRuntime();
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

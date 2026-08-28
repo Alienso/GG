@@ -32,6 +32,7 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     this->braceInitClass_ = &semanticResult.braceInitClass;
     this->builtinCloneCalls_ = &semanticResult.builtinCloneCalls;
     this->directConstructAssigns_ = &semanticResult.directConstructAssigns;
+    this->syncAccessCalls_ = &semanticResult.syncAccessCalls;
     this->callArgOrder_ = &semanticResult.callArgOrder;
     this->inferredVarType_ = &semanticResult.inferredVarType;
     this->enumRegistry_ = &semanticResult.enumRegistry;
@@ -367,6 +368,20 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
 
     // Provide the OS-thread runtime (@gg_thread_create/@gg_thread_join) if a Thread was lowered.
     emitThreadRuntime();
+
+    // Provide the OS-mutex runtime (@gg_mutex_*) if the stdlib Mutex was imported (declare-presence).
+    emitMutexRuntime();
+
+    // Dedup identical `declare` lines — independent runtimes may declare the same OS symbol (e.g. the
+    // Mutex and RwLock runtimes both declare SRWLock intrinsics, and importing one std.sync type loads
+    // the whole module directory). LLVM rejects a redefinition of a declared function.
+    {
+        std::unordered_set<std::string> seen;
+        std::vector<std::string> uniq;
+        uniq.reserve(module.declares.size());
+        for (auto& d : module.declares) if (seen.insert(d).second) uniq.push_back(d);
+        module.declares = std::move(uniq);
+    }
 
     // Register every pre-main initializer in one @llvm.global_ctors array.
     emitGlobalCtors();

@@ -246,6 +246,15 @@ bool        isPrefixedIntegerLiteral(const std::string& lexeme);
 // malformed or too-large (> u64) literal, mirroring the try/catch-around-std::stoull pattern every
 // call site used before this helper existed.
 bool        parseIntegerLiteral(const std::string& lexeme, unsigned long long& magnitude);
+
+// The stdlib synchronisation cells (`std.sync.Mutex<T>` / `RwLock<T>`) are recognised by the compiler
+// by SIMPLE name — the last `.`-segment of the class name, with any `$…` monomorphization suffix
+// stripped (so `std.sync.Mutex$Counter` and a bare `Mutex$i32` both match). They are inherently
+// Shareable (the interior-mutability escape hatch) and their `.with`/`.read`/`.write` accessors are
+// compiler-lowered. `isSyncCellName` = either; `isMutexName` / `isRwLockName` distinguish them.
+bool        isMutexName(const std::string& className);
+bool        isRwLockName(const std::string& className);
+bool        isSyncCellName(const std::string& className);
 // Decodes a parser-synthesized type token: "Class&" → Reference, "ptr<Elem>" → TypedPtr.
 // Returns Type{Error} when `tok` is not such a synthesized token.
 Type        decodeSynthesizedType(const Token& tok);

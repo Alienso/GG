@@ -1,0 +1,35 @@
+module std.sync;
+
+// OS mutex primitives. DEFINED by the GG compiler per target platform (Windows: SRWLOCK held
+// exclusively; POSIX: pthread_mutex), so this file stays platform-agnostic — like the thread/stdio
+// helpers. The raw `ptr` handle is exempt from the --unsafe-ptr gate because this file lives under
+// the stdlib root.
+extern gg_mutex_create() -> ptr;         // allocate + initialise an OS mutex; return an opaque handle
+extern gg_mutex_destroy(ptr handle);     // destroy + free the mutex
+extern gg_mutex_lock(ptr handle);        // block until the mutex is acquired (exclusive)
+extern gg_mutex_unlock(ptr handle);      // release the mutex
+
+// A mutual-exclusion cell: it owns a value of type `T` and serialises all access to it. This is the
+// interior-mutability escape hatch that makes `Shared<Mutex<T>>` (the atomic, cross-thread `Arc`)
+// safely MUTABLE — the lock serialises every reader/writer, so an arbitrary `T` (even one with
+// mutable reference fields) is race-free inside.
+//
+// Access is scoped: `m.with(p -> { ... })` acquires the lock, hands the closure a `mut T*` borrow of
+// the interior for the duration of the call, then releases. The borrow is confined to the closure by
+// the compiler (it may not escape) — a compiler-recognised form, not an ordinary method.
+//
+// A Mutex owns a raw handle + a user destructor, so (like Thread) it is non-copyable; share it by
+// wrapping it in a `Shared<Mutex<T>>`.
+class Mutex<T> {
+    private mut ptr handle;   // the OS mutex (stdlib is exempt from the raw-ptr gate)
+    private T value;          // the guarded interior; only reachable through `.with`
+
+    Mutex(T v) {
+        handle = gg_mutex_create();
+        value = v;
+    }
+
+    ~Mutex() {
+        gg_mutex_destroy(handle);
+    }
+}

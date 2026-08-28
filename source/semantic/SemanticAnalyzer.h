@@ -158,6 +158,10 @@ struct SemanticResult {
     // the destination storage (skip the temp + memberwise-clone path), exactly like a var-decl
     // initializer already does — there is no live value there yet to protect.
     std::unordered_set<const void*> directConstructAssigns;
+    // Scoped sync-cell access: MethodCallExpr node → the access kind ("with" for a Mutex; "read"/
+    // "write" for a RwLock). Codegen lowers it to acquire → closure.call(&interior) → release,
+    // instead of an ordinary method call. See docs/concurrency.md Phase 2.
+    std::unordered_map<const void*, std::string> syncAccessCalls;
 };
 
 class SemanticAnalyzer {
@@ -218,6 +222,8 @@ private:
     std::unordered_map<const void*, std::string> builtinCloneCalls_;
     // Object-local defining-assignment nodes eligible for direct construction (copied to SemanticResult).
     std::unordered_set<const void*> directConstructAssigns_;
+    // Scoped sync-cell access nodes → kind ("with"/"read"/"write") (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> syncAccessCalls_;
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
@@ -464,6 +470,10 @@ private:
     [[nodiscard]] Type analyzeRefStore(const RefStoreExpr& refStore);
     [[nodiscard]] Type analyzeBraceInit(const BraceInitExpr& braceInit);
     [[nodiscard]] Type analyzeMethodCall(const MethodCallExpr& methodCall);
+    // Scoped sync-cell access `cell.with/read/write(closure)` (Phase 2): validate the closure is a
+    // `([mut] T*) -> void` whose borrow does not escape, and record the node for codegen lowering.
+    [[nodiscard]] Type analyzeSyncAccess(const MethodCallExpr& mc, const std::string& cellClass,
+                                         const std::string& kind, bool wantMut);
     [[nodiscard]] Type analyzeCast(const CastExpr& castExpr);
     [[nodiscard]] Type analyzeNew(const NewExpr& newExpr);
 

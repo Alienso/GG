@@ -1,9 +1,16 @@
 # Design note: Concurrency (`Shared<T>` + `Thread`)
 
 **Status:** Phase 1 **IMPLEMENTED** (`Shared<T>` + `Thread` + `Sendable`/`Shareable` + the boundary
-check). This note captures the model, the reasoning, and the phased plan. The authoritative
-implementation references are the "`Shared<T>`" and "Threads" invariants in `CLAUDE.md` and the
-user-facing §15 of `LANGUAGE.md`; where this note's *sketches* differ from what shipped, the shipped
+check) and Phase 2 **IMPLEMENTED** (`Mutex<T>` / `RwLock<T>` — guarded mutable sharing via
+compiler-recognised scoped closures `m.with` / `rw.read` / `rw.write`, with the guarded borrow
+confined to the closure). **As-built vs. the §5/Phase-2 sketch:** access is a closure
+(`m.with(p -> {…})`), not a RAII guard, and the sync cells are stdlib generic classes (`std.sync`)
+recognised by simple name, not builtins — see the "`Mutex<T>` / `RwLock<T>`" invariant in CLAUDE.md.
+Still deferred: condition variables, `try_lock`, reentrant locks, fine-grained locking, and the
+interprocedural borrow-confinement that would catch a guarded borrow forwarded into another call.
+This note captures the model, the reasoning, and the phased plan. The authoritative
+implementation references are the "`Shared<T>`" / "Threads" / "`Mutex<T>` / `RwLock<T>`" invariants in
+`CLAUDE.md` and the user-facing §15 of `LANGUAGE.md`; where this note's *sketches* differ from what shipped, the shipped
 surface wins. **As-built vs. the §5 sketch below:** `Thread` is spawned through a **static factory
 `Thread.create(closure) -> Thread`** that starts the thread immediately (not a `Thread t(closure)` +
 separate `start()`), and the compiler's "function-pointer part" is two intrinsics called *inside* that
@@ -259,29 +266,77 @@ t.join();                              // block until completion
 | Object freed while another thread holds it / non-atomic release race | **Solved** (atomic count → freed exactly once) |
 | Dangling **owning** reference across threads | **Solved** (a `Shared` co-owns; can't drop to 0 while held) |
 | Passing a raw `Class&`/`T*` into a thread | **Rejected** (`!Sendable`) |
-| Rebind double-free / reader-vs-rebind UAF on **mutable** shared state | **Phase 2** — needs `Mutex`/`RwLock`; Phase 1 forbids mutable reference fields in a `Shared<T>` |
-| Torn/garbage reads of `mut` **scalar** fields | **Tolerated** (memory-safe, by design) |
+| Rebind double-free / reader-vs-rebind UAF on **mutable** shared state | **SHIPPED (Phase 2)** — `Shared<Mutex<T>>` / `Shared<RwLock<T>>` serialise all access |
+| Torn/garbage reads of `mut` **scalar** fields (bare `Shared<T>`, no lock) | **Tolerated** (memory-safe, by design) |
+| Guarded borrow escaping a `.with`/`.read`/`.write` closure **directly** (return / capture) | **Solved** (void return + non-`mut`/uncapturable captures) |
+| Guarded borrow escaping **through a called function** into a global/static | **Phase 2.5 hole** — intraprocedural confinement only; see §9 item #1 |
 | Logical races (lost updates, deadlock, starvation) | **Not a memory-safety concern**; programmer's responsibility even with locks |
 
 ---
 
 ## 9. Phasing
 
-- **Phase 1 (this note's core):** `Shared<T>` (atomic refcount, immutable sharing) + `Sendable` /
-  `Shareable` + boundary check + `Thread` (`start`/`join`) + the escaping-closure extension +
-  runtime helpers. A complete, shippable, useful subset (immutable shared data: config, loaded
-  assets, read-only entities) with **no locks**.
-- **Phase 2:** `Mutex<T>` / `RwLock<T>` as separate composable types; `read`/`write`/`lock` scoped
-  (closure) access APIs backed by real OS locks; `.with` + guard-scoped-borrow confinement for
-  borrow extraction; mutable shared state.
-- **Deferred / out of scope (may never be needed):** move semantics (share-nothing transfer without
-  refcounting), channels / message passing, structured concurrency (scoped threads), first-class
-  function pointers (would make `Thread` *pure* stdlib + enable general FFI callbacks), green
-  threads / `async` (would require a scheduler runtime — against GG's thin, no-GC character).
+- **Phase 1 — SHIPPED:** `Shared<T>` (atomic refcount, immutable sharing) + `Sendable` / `Shareable`
+  + boundary check + `Thread` (`create`/`join`) + the escaping-closure extension + runtime helpers.
+  A complete, useful subset (immutable shared data: config, loaded assets, read-only entities) with
+  **no locks**.
+- **Phase 2 — SHIPPED:** `Mutex<T>` / `RwLock<T>` as stdlib composable types (`std.sync`); scoped
+  closure access `m.with(p -> {…})` / `rw.read` / `rw.write` backed by real OS locks (Windows
+  SRWLOCK / POSIX pthread); the guarded borrow confined to the closure. Mutable shared state.
 
-Suggested first implementation slice: **`Shared<T>` atomic type without threads yet** — provable in
-isolation (IR shows atomic retain/release, build-in-place construction, `Shareable` gating) before
-`Thread` and the escaping closure are wired up.
+### Phase 2.5 — deferred refinements (build directly on the Phase-2 lock story)
+
+These harden and polish what shipped; same paradigm (lock-based shared memory), same machinery. Not
+a new model. Ordered by value — **#1 is the only one that closes an actual safety gap; the rest are
+ergonomics / features.**
+
+1. **Interprocedural borrow-confinement** *(soundness — highest priority)*. Today the "the guarded
+   borrow can't escape the `.with`/`.read`/`.write` closure" check is **intraprocedural**: it relies
+   on the closure returning `void` + captures being non-`mut`/uncapturable, so the closure itself
+   can't stash the borrow — but a borrow **forwarded into a called function** that stores it is not
+   caught. Confirmed hole (compiles today): `m.with(p -> { stash(p); })` where
+   `fn stash(C* q) { Reg::held = q; }` writes into a `mut static C*`; after `.with` unlocks,
+   `Reg::held` dangles into the mutex interior (a UAF/race). Closing it needs following borrows
+   across call boundaries — the same interprocedural escape analysis `docs/escape-analysis.md` also
+   defers. This is shared machinery with item #2. (Impl note: extend the escape summary from
+   per-parameter "returned / stored into a *this*-field" to also propagate through callees; then the
+   `paramEscapes` check in `analyzeSyncAccess` — currently effectively dead — becomes load-bearing.)
+2. **RAII guard syntax** — an alternative to the closure form: `Guard g = m.lock(); g.ref.n += 1;`,
+   unlocking in the guard's destructor (maps onto GG's deterministic scope-exit dtors). More
+   ergonomic than `.with(...)`, but needs the borrow-lifetime analysis "the `T*` from `g` must not
+   outlive `g`" — essentially item #1's interprocedural confinement. The "Option B" we chose against
+   for v1 (see §5 as-built note).
+3. **Nested `.with` inside a thread closure** — currently blocked (nested lambdas are unsupported), so
+   a thread body must call a helper that locks (`Thread.create(() -> { worker(m); })` where `worker`
+   does the `.with`). Lifting the nested-lambda restriction (a stack of capture contexts instead of
+   the single `capturing_` bool) would let the lock be written directly in the thread body.
+4. **`try_lock` / non-blocking acquire + reentrant locks** — small runtime additions
+   (`TryAcquireSRWLock*` / `pthread_mutex_trylock`; a recursive-mutex variant).
+5. **Condition variables** — wait/notify for producer/consumer patterns (Windows `CONDITION_VARIABLE`
+   / `pthread_cond_*`), as a stdlib `Condvar` over new intrinsics.
+6. **Fine-grained / per-field locking** — today `Shared<Mutex<T>>` locks all of `T`; a way to lock
+   individual fields would reduce contention.
+7. **A value-returning scoped access** — `.with`/`.read`/`.write` closures are `void` today, so
+   getting a computed result out needs a captured static. A value-returning form
+   (`i32 r = m.with(p -> i32 { return p.n; });`) would be more natural (needs the closure return type
+   threaded through the lowering + a result slot).
+8. **Closure-parameter inference for the accessors** — today the closure parameter must be written
+   explicitly (`m.with((mut T* p) -> {…})`); an untyped `m.with(p -> {…})` fails with "cannot infer".
+   Wiring signature-exposure (set `expectedLambdaSig_` to `([mut] T*) -> void` before parsing the
+   `.with`/`.read`/`.write` argument, the same mechanism `Thread.create` and `Call`-bounded generics
+   use) would let the parameter type be inferred — the ergonomic `p -> {…}` form from the original
+   design sketch. Purely a front-end convenience; no runtime change.
+
+### Deferred / out of scope — a *different* paradigm (a notional Phase 3+, may never be needed)
+
+- **Move semantics** (share-nothing transfer without refcounting — the `Send`/move route from
+  `docs/escape-analysis.md` §6.5).
+- **Channels / message passing** (Go/Erlang style — avoids shared mutable state entirely).
+- **Actors** (state owned by one thread, mutated only via messages).
+- **Structured concurrency** (scoped threads that may borrow the parent stack).
+- **First-class function pointers** (would make `Thread` *pure* stdlib — drop the two intrinsics —
+  and enable general FFI callbacks).
+- **Green threads / `async`** (needs a scheduler runtime — against GG's thin, no-GC character).
 
 ---
 

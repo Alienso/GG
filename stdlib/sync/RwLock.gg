@@ -1,0 +1,37 @@
+module std.sync;
+
+// OS reader/writer-lock primitives. DEFINED by the GG compiler per target platform (Windows: SRWLOCK
+// with shared/exclusive modes; POSIX: pthread_rwlock), so this file stays platform-agnostic. The raw
+// `ptr` handle is exempt from the --unsafe-ptr gate because this file lives under the stdlib root.
+extern gg_rwlock_create() -> ptr;        // allocate + init an OS reader/writer lock; return a handle
+extern gg_rwlock_destroy(ptr handle);    // destroy + free it
+extern gg_rwlock_rdlock(ptr handle);     // acquire shared (read) — many readers may hold it at once
+extern gg_rwlock_rdunlock(ptr handle);   // release a shared (read) hold
+extern gg_rwlock_wrlock(ptr handle);     // acquire exclusive (write) — blocks all other readers/writers
+extern gg_rwlock_wrunlock(ptr handle);   // release an exclusive (write) hold
+
+// A reader/writer lock: it owns a value of type `T` and allows EITHER many concurrent readers OR one
+// exclusive writer. Like `Mutex<T>`, it is the interior-mutability escape hatch that makes
+// `Shared<RwLock<T>>` safely shared-and-mutable across threads.
+//
+// Access is scoped:
+//   rw.read(p -> { … })     // shared lock; `p : T*` (read-only) — several threads may read at once
+//   rw.write(p -> { … })    // exclusive lock; `p : mut T*` — a single writer
+// The borrow is confined to the closure by the compiler (it may not escape). These are
+// compiler-recognised forms, not ordinary methods.
+//
+// A RwLock owns a raw handle + a user destructor, so (like Mutex) it is non-copyable; share it by
+// wrapping it in a `Shared<RwLock<T>>`.
+class RwLock<T> {
+    private mut ptr handle;   // the OS reader/writer lock (stdlib is exempt from the raw-ptr gate)
+    private T value;          // the guarded interior; only reachable through `.read` / `.write`
+
+    RwLock(T v) {
+        handle = gg_rwlock_create();
+        value = v;
+    }
+
+    ~RwLock() {
+        gg_rwlock_destroy(handle);
+    }
+}

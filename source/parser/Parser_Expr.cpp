@@ -19,21 +19,23 @@ bool Parser::isLambdaAhead() const {
     return k < tokens.size() && tokens[k].type == TokenType::ARROW;
 }
 
-std::vector<std::pair<Token, std::optional<Token>>> Parser::parseLambdaParamList() {
+std::vector<Parser::LambdaParam> Parser::parseLambdaParamList() {
     consume(TokenType::LEFT_PAREN, "expected '(' in lambda parameters");
-    std::vector<std::pair<Token, std::optional<Token>>> params;
+    std::vector<LambdaParam> params;
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
+            // Optional `mut` (a mutable borrow, e.g. `mut T* p` for a `Mutex.with` closure).
+            bool isMut = match({ TokenType::MUT });
             // Typed `Type name` vs untyped `name` (type inferred from the expected signature).
             size_t span = typeSpanAt(current);
             if (span > 0 && current + span < tokens.size()
                 && tokens[current + span].type == TokenType::IDENTIFIER) {
                 Token type = consumeType();
                 Token name = consume(TokenType::IDENTIFIER, "expected parameter name");
-                params.emplace_back(name, std::optional<Token>(type));
+                params.push_back(LambdaParam{ name, std::optional<Token>(type), isMut });
             } else {
                 Token name = consume(TokenType::IDENTIFIER, "expected lambda parameter name");
-                params.emplace_back(name, std::nullopt);
+                params.push_back(LambdaParam{ name, std::nullopt, isMut });
             }
         } while (match({ TokenType::COMMA }));
     }
@@ -46,7 +48,7 @@ Expr Parser::parseLambda() {
     return finishLambda(parseLambdaParamList(), line);
 }
 
-Expr Parser::finishLambda(std::vector<std::pair<Token, std::optional<Token>>> params, int line) {
+Expr Parser::finishLambda(std::vector<LambdaParam> params, int line) {
     if (capturing_) throw error(peek(), "nested lambdas are not supported");
     consume(TokenType::ARROW, "expected '->' in lambda");
     // Optional explicit return type; otherwise inferred from the expected signature (else void).
@@ -55,22 +57,22 @@ Expr Parser::finishLambda(std::vector<std::pair<Token, std::optional<Token>>> pa
 
     // Resolve parameter types: explicit where written, otherwise from the callee's `Call(…)` bound.
     bool anyUntyped = false;
-    for (const auto& p : params) if (!p.second) { anyUntyped = true; break; }
+    for (const auto& p : params) if (!p.type) { anyUntyped = true; break; }
     if (anyUntyped && !expectedLambdaSig_)
-        throw error(params.empty() ? peek() : params.front().first,
+        throw error(params.empty() ? peek() : params.front().name,
                     "cannot infer this lambda's parameter types here; annotate them "
                     "(e.g. (i32 x) -> …) or pass the lambda to a Call-bounded function");
     if ((anyUntyped || !explicitRet) && expectedLambdaSig_
         && expectedLambdaSig_->first.size() != params.size())
-        throw error(params.empty() ? peek() : params.front().first,
+        throw error(params.empty() ? peek() : params.front().name,
                     "lambda has " + std::to_string(params.size())
                     + " parameter(s) but the expected signature has "
                     + std::to_string(expectedLambdaSig_->first.size()));
 
     std::vector<ParamDecl> methodParams;
     for (size_t i = 0; i < params.size(); ++i) {
-        Token ptype = params[i].second ? *params[i].second : expectedLambdaSig_->first[i];
-        methodParams.push_back(ParamDecl{ ptype, params[i].first, /*isMut=*/false, /*isVariadic=*/false, nullptr });
+        Token ptype = params[i].type ? *params[i].type : expectedLambdaSig_->first[i];
+        methodParams.push_back(ParamDecl{ ptype, params[i].name, params[i].isMut, /*isVariadic=*/false, nullptr });
     }
     Token retType = explicitRet ? *explicitRet
                   : (expectedLambdaSig_ ? expectedLambdaSig_->second
@@ -796,8 +798,8 @@ Expr Parser::parsePrimary() {
         // Bare single-parameter untyped lambda: `x -> …` (the `()` is optional for one parameter).
         // Not inside a switch case label, where `x ->` is `case x -> body`, not a lambda.
         if (check(TokenType::ARROW) && !parsingCaseLabel_) {
-            std::vector<std::pair<Token, std::optional<Token>>> p;
-            p.emplace_back(name, std::nullopt);
+            std::vector<LambdaParam> p;
+            p.push_back(LambdaParam{ name, std::nullopt, /*isMut=*/false });
             return finishLambda(std::move(p), name.line);
         }
 

@@ -425,6 +425,24 @@ TypeKind typeKindFromName(const std::string& name) {
 }
 
 // ============================================================
+// Sync-cell recognition — the stdlib Mutex<T> / RwLock<T> types
+// ============================================================
+
+// The simple name of a class: the last '.'-segment (drops a module prefix), with any '$…'
+// monomorphization suffix stripped. `std.sync.Mutex$Counter` → "Mutex"; `Mutex$i32` → "Mutex".
+static std::string simpleClassName(const std::string& className) {
+    std::string base = className.substr(0, className.find('$'));
+    auto dot = base.rfind('.');
+    return dot == std::string::npos ? base : base.substr(dot + 1);
+}
+bool isMutexName(const std::string& className)   { return simpleClassName(className) == "Mutex"; }
+bool isRwLockName(const std::string& className)  { return simpleClassName(className) == "RwLock"; }
+bool isSyncCellName(const std::string& className) {
+    std::string s = simpleClassName(className);
+    return s == "Mutex" || s == "RwLock";
+}
+
+// ============================================================
 // decodeSynthesizedType — parser-synthesized type token → Type
 //
 // Handles:

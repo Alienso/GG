@@ -1,0 +1,51 @@
+// End-to-end: safe mutable shared state via `Shared<Mutex<T>>` (concurrency Phase 2).
+//
+// Two threads each increment a shared Counter 1000 times under the Mutex. `.with(closure)` acquires
+// the lock, hands the closure a `mut Counter*` borrow of the guarded interior for the duration of the
+// call, then releases — so the increments serialise (no lost updates) and the total is deterministic.
+//
+// A thread body can't nest a `.with` lambda directly (nested lambdas are unsupported), so each thread
+// calls the `worker` helper, which does the locking.
+//
+// Counter tracks its own live instances (ctor ++ / dtor --). After the shared handle is gone,
+// Counter::live must be back to 0 — the Shared<Mutex<Counter>> (and its guarded Counter) is released
+// exactly once even though two threads raced on the atomic refcount.
+import std.thread.Thread;
+import std.sync.Mutex;
+
+class Counter {
+    mut static i32 live;
+    mut i32 n;
+    Counter() { n = 0; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+    fn bump() mut { n = n + 1; }
+    fn get() -> i32 { return n; }
+}
+// The Mutex clones the constructor argument into its interior; a clone is a new live instance, so it
+// must count too (otherwise live-tracking under-counts the interior copy). Also shows Clone + Mutex.
+impl Clone for Counter { fn clone(Counter& src) mut { n = src.n; Counter::live = Counter::live + 1; } }
+class G { mut static i32 total; }
+
+fn worker(Shared<Mutex<Counter>> c) {
+    mut i32 i = 0;
+    while (i < 1000) {
+        c.with((mut Counter* p) -> { p.bump(); });   // exclusive, scoped mutation of the guarded value
+        i = i + 1;
+    }
+}
+
+fn main() -> i32 {
+    {
+        Shared<Mutex<Counter>> counter = Shared<Mutex<Counter>>(Counter());
+        Thread t1 = Thread.create(() -> { worker(counter); });
+        Thread t2 = Thread.create(() -> { worker(counter); });
+        t1.join();
+        t2.join();
+        counter.with((mut Counter* p) -> { G::total = p.get(); });
+    }   // counter + its Mutex<Counter> leave scope → ~Counter runs → live back to 0
+
+    // total == 2000  ⇒ the lock serialised every increment (no lost updates).
+    // Counter::live == 0 ⇒ the shared handle was released exactly once (no leak, no double free).
+    if (G::total == 2000 && Counter::live == 0) { return 42; }
+    return 1;
+}

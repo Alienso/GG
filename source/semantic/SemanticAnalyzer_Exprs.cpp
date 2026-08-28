@@ -2535,6 +2535,19 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
         return makeNullable(t);
     };
 
+    // Scoped sync-cell access — `mtx.with(closure)` on a Mutex (Phase 2). Recognised by the receiver
+    // type + method name and lowered specially (acquire → closure.call(&interior) → release), because
+    // a lock guard's borrow must be confined to the closure and a closure type is unspellable.
+    // `.read`/`.write` on a RwLock join this in a later slice.
+    if (!methodCall.safe && isMutexName(objectType.className) && methodCall.method.lexeme == "with")
+        return analyzeSyncAccess(methodCall, objectType.className, "with", /*wantMut=*/true);
+    if (!methodCall.safe && isRwLockName(objectType.className)) {
+        if (methodCall.method.lexeme == "read")
+            return analyzeSyncAccess(methodCall, objectType.className, "read", /*wantMut=*/false);
+        if (methodCall.method.lexeme == "write")
+            return analyzeSyncAccess(methodCall, objectType.className, "write", /*wantMut=*/true);
+    }
+
     // Generic body-check: a method call on a value of a type parameter resolves against the
     // parameter's bounds (not a concrete class). Unbounded ⇒ permissive (suppressed).
     if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
@@ -2622,6 +2635,70 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
         resolvedCallee[&methodCall] = mangleOverload(
             objectType.className + "_" + methodCall.method.lexeme, method.paramTypes, method.returnType);
     return wrapSafe(method.returnType);
+}
+
+// ============================================================
+// Scoped sync-cell access — `cell.with/read/write(closure)` (Phase 2)
+// ============================================================
+
+Type SemanticAnalyzer::analyzeSyncAccess(const MethodCallExpr& mc, const std::string& cellClass,
+                                         const std::string& kind, bool wantMut) {
+    // The guarded element type T = the cell's single type argument (everything after the first `$`
+    // in the monomorphized class name, e.g. `std.sync.Mutex$Counter` → "Counter").
+    auto dollar = cellClass.find('$');
+    std::string element = (dollar == std::string::npos) ? "" : cellClass.substr(dollar + 1);
+    std::string want = std::string("`(") + (wantMut ? "mut " : "") + element + "*) -> void`";
+
+    if (mc.args.size() != 1) {
+        error(mc.method, "'" + kind + "' takes exactly one argument: a closure " + want);
+        for (const auto& a : mc.args) analyzeExpr(*a);
+        return Type{TypeKind::Void};
+    }
+    Type closureType = analyzeExpr(*mc.args[0]);
+    auto cit = classRegistry.find(closureType.className);
+    if (closureType.kind != TypeKind::Object || cit == classRegistry.end()) {
+        error(mc.method, "'" + kind + "' expects a closure " + want);
+        return Type{TypeKind::Void};
+    }
+    auto mit = cit->second.methods.find("call");
+    if (mit == cit->second.methods.end() || mit->second.size() != 1) {
+        error(mc.method, "the '" + kind + "' argument must be a closure " + want);
+        return Type{TypeKind::Void};
+    }
+    const ClassInfo::Method& call = mit->second.front();
+
+    // Element-type match: a primitive element wants a primitive borrow of that kind; a class element
+    // wants a class borrow of that class.
+    auto borrowMatchesElement = [&](const Type& p) -> bool {
+        if (p.kind != TypeKind::Reference || !p.borrow) return false;
+        TypeKind ek = typeKindFromName(element);
+        if (ek != TypeKind::Error && ek != TypeKind::Void)   // primitive/str element
+            return isPrimitiveBorrow(p) && borrowElementType(p).kind == ek;
+        return p.className == element;                        // class element
+    };
+    if (call.paramTypes.size() != 1 || call.returnType.kind != TypeKind::Void
+        || !borrowMatchesElement(call.paramTypes[0])) {
+        error(mc.method, "the '" + kind + "' closure must be " + want);
+        return Type{TypeKind::Void};
+    }
+    // with/write hand out a mutable borrow; read hands out a shared (read-only) borrow.
+    if (wantMut && !(call.paramMut.empty() ? false : call.paramMut.front()))
+        error(mc.method, "the '" + kind + "' closure parameter must be `mut " + element
+              + "*` — it may mutate the guarded value");
+    if (!wantMut && !call.paramMut.empty() && call.paramMut.front())
+        error(mc.method, "the '" + kind + "' closure parameter must be a read-only `" + element
+              + "*` (not `mut`) — use `.write` to mutate");
+
+    // Confinement (the borrow must not outlive the lock): reject if the closure lets its borrow
+    // parameter escape (returned, or stored into a captured reference field). Reuses the existing
+    // per-parameter escape summary; intraprocedural, so a borrow forwarded into another call that
+    // stores it is a documented v1 hole.
+    if (!call.paramEscapes.empty() && call.paramEscapes.front())
+        error(mc.method, "the guarded borrow escapes the '" + kind + "' closure (it is returned or "
+              "stored) — a lock guard's borrow is valid only for the duration of the closure");
+
+    syncAccessCalls_[&mc] = kind;
+    return Type{TypeKind::Void};
 }
 
 // ============================================================

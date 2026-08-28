@@ -1952,6 +1952,70 @@ callable (a lambda); its captures cross into the spawned thread and so must be *
   and intrinsic arity), `e2e/thread_test.gg` (a thread mutating a captured `Shared<T>`, joined, with a live-counter
   proving exactly-once destruction — 30/30 runs deterministic). See `docs/concurrency.md`.
 
+### `Mutex<T>` / `RwLock<T>` — safe mutable shared state (concurrency Phase 2)
+The interior-mutability escape hatch that makes `Shared<Mutex<T>>` (the `Arc<Mutex<T>>` pattern)
+safely **mutable** across threads: the lock serialises every access, so an arbitrary `T` — even one
+with `mut` reference fields — is race-free inside. Ordinary **stdlib generic classes**
+(`stdlib/sync/{Mutex,RwLock}.gg`, `module std.sync`) like `Thread`; the compiler supplies only the
+parts GG can't express: the OS-lock runtime, the Shareable-gate exemption, and the scoped-access
+lowering + confinement. User surface: `m.with(p -> { … })` (Mutex, exclusive, `p : mut T*`);
+`rw.read(p -> { … })` (shared, `p : T*`) / `rw.write(p -> { … })` (exclusive, `p : mut T*`).
+- **Storage** (stdlib): `class Mutex<T> { private mut ptr handle; private T value; Mutex(T v){…} ~Mutex(){…} }`
+  — a normal generic value class (no reserved name; parses/mangles like any generic). The raw `ptr`
+  field is stdlib-exempt from `--unsafe-ptr`. Owns a raw handle + a user dtor ⇒ **non-copyable** (the
+  raw-ptr copy guard) — share it via `Shared<Mutex<T>>`. Construct `Shared<Mutex<T>>(v)` — `Shared`'s
+  born-in-place ctor runs `Mutex(T v)`, which clones `v` into the interior.
+- **Recognition** (`isSyncCellName`/`isMutexName`/`isRwLockName` in `Type.cpp`, by **simple name** —
+  last `.`-segment, `$…` stripped — so `std.sync.Mutex$Counter` and a bare `Mutex$i32` both match).
+- **Shareable gate** (`isShareableClass` early-return): a sync cell is **inherently Shareable**
+  regardless of its internals (raw handle + arbitrary `T`) — the lock is what makes the interior
+  safe. So `Shared<Mutex<T>>` passes for ANY `T`, and a `Shared<Mutex<T>>` capture is Sendable.
+- **Scoped access** (`analyzeSyncAccess` + `genMethodCall`): `.with`/`.read`/`.write` are
+  compiler-recognised by (receiver is a sync cell) + method name — NOT ordinary methods (a closure
+  type is unspellable and a generic-class method can't infer a lambda arg; a lock guard must never be
+  a first-class value). Semantics validates the closure is a `([mut] T*) -> void` (element-type
+  matched; `.read` demands a non-`mut` borrow, `.with`/`.write` a `mut` one) and records the node in
+  `SemanticResult::syncAccessCalls`. Codegen lowers to `acquire(handle) → @Closure_call(closure,
+  &interior) → release(handle)`, GEPing the cell's `handle`/`value` fields; Windows SRWLOCK needs a
+  **mode-matched** release, so read/write have distinct unlock helpers (POSIX maps both to
+  `pthread_rwlock_unlock`).
+- **Confinement** (folded into `analyzeSyncAccess`): the guarded borrow must not outlive the lock. The
+  effective guarantee comes from two structural facts — the closure returns **void** (can't return the
+  borrow) and a lambda's captures are **non-`mut` / not borrow-capturable** (can't store the borrow
+  into a capture) — so a `.with` closure has no way to stash `p`. The explicit `paramEscapes` check is
+  kept as a defensive belt-and-braces (it would activate if lambda capture ever gained mutable
+  reference fields) but is effectively unreachable given those facts. **Confirmed v1 hole**
+  (interprocedural, documented): a borrow forwarded into *another* function that stores it into a
+  global/static — `m.with(p -> { stash(p); })` where `stash` does `Reg::held = p` into a
+  `mut static T*` — is NOT caught (the analysis is intraprocedural). Closing it needs the deferred
+  interprocedural borrow-confinement.
+- **Runtime** (`emitMutexRuntime`/`emitRwLockRuntime`, declare-presence gated like `emitStdioHelpers`;
+  a shared declare-dedup pass in `generate()` removes duplicate OS-intrinsic declares since importing
+  one `std.sync` type loads the whole module dir): Windows SRWLOCK (`InitializeSRWLock` +
+  `Acquire/Release SRWLock{Exclusive,Shared}`, in kernel32 via `-lkernel32`); POSIX
+  `pthread_mutex`/`pthread_rwlock`. Non-reentrant on both.
+- **Deliberate semantics** (documented, not prevented): no deadlock detection; locks are
+  non-reentrant (re-locking inside the closure deadlocks); a thread that `abort()`s while holding a
+  lock leaves it held (no poisoning — GG has no exceptions); `Shared<Mutex<T>>` locks all of `T`
+  (no fine-grained/per-field locking). **A `.with` cannot nest directly inside a thread closure**
+  (nested lambdas are unsupported) — the thread body calls a helper that locks.
+- **Future refinements** (roadmap in `docs/concurrency.md` §9 "Phase 2.5"): interprocedural
+  borrow-confinement (closes the escape-through-a-called-function hole in the Confinement bullet —
+  the only deferred item that's a real safety gap), RAII guard syntax, nested-`.with`-in-a-thread,
+  `try_lock`/reentrant locks, condition variables, per-field locking, and a value-returning scoped
+  access. A different paradigm (channels / actors / move / async) is a notional Phase 3+.
+- Tests: `tests/sync_tests.cpp` (`[mutex]`/`[rwlock]`, 17 cases — gate incl. Mutex-makes-a-non-
+  Shareable-T-shareable, `.with`/`.read`/`.write` lowering IR, primitive + class interiors, closure
+  validation/confinement rejections (wrong arity, class + primitive element mismatch, read-wants-
+  non-`mut` / write-wants-`mut`, non-void return), a non-cell class's own `.with` not intercepted, a
+  nested `.with` rejected, `Mutex<Shared<T>>` rejected, Sendable capture), `e2e/mutex_test.gg` (2 threads × 1000
+  `.with` increments of a `Shared<Mutex<Counter>>` → **deterministic 2000** + balanced refcount via a
+  live counter, 20/20), `e2e/rwlock_test.gg` (1 writer + 2 readers on a `Shared<RwLock<Data>>`,
+  memory-safe + balanced, 20/20). See `docs/concurrency.md`.
+- **Also this slice**: lambda parameters gained a `mut` flag (`(mut T* p) -> …`) — `Parser::LambdaParam`
+  (was a `pair`), threaded to `ParamDecl::isMut`; needed for a mutable guarded borrow. Purely additive
+  (a bare/typed lambda param without `mut` is unchanged).
+
 ### Nullable types — `T?` (Kotlin-style)
 `T?` marks a **nullable** type, with two representations by underlying kind:
 - **Reference-like** (`Class&?`, `Class*?`, `Color?`) → a plain `ptr` (null = machine null), so `T`
@@ -2939,6 +3003,17 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1525 test cases / 2842 assertions** (as of implementing **`Mutex<T>` / `RwLock<T>`** — safe mutable
+shared state, concurrency Phase 2 — see the "`Mutex<T>` / `RwLock<T>`" invariant above and
+`docs/concurrency.md`. Ordinary stdlib generic classes (`stdlib/sync/`, `module std.sync`) recognised
+by simple name; the compiler adds the OS-lock runtime (Windows SRWLOCK / POSIX pthread), the
+Shareable-gate exemption (a sync cell is inherently Shareable → `Shared<Mutex<T>>` is safe for any
+`T`), and the compiler-recognised scoped access `m.with(p -> {…})` / `rw.read` / `rw.write` — lowered
+to acquire→closure(&interior)→release with the guarded borrow confined to the closure (via the
+existing `paramEscapes` + the void-return requirement). Lambda params gained a `mut` flag for the
+mutable borrow. 17 `tests/sync_tests.cpp` cases (`[mutex]`/`[rwlock]`) + `e2e/mutex_test.gg` (2
+threads ×1000 `.with` increments → deterministic 2000 + balanced refcount, 20/20) +
+`e2e/rwlock_test.gg` (writer + 2 readers, memory-safe + balanced, 20/20). Prior baseline was
 **1513 test cases / 2822 assertions** (as of implementing **threads** — the stdlib `Thread` class +
 the compiler's "function-pointer part" (concurrency Phase 1, execution axis) — see the "Threads"
 invariant above and `docs/concurrency.md`. `Thread` is ordinary GG (`stdlib/thread/Thread.gg`, module

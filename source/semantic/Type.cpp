@@ -71,6 +71,29 @@ CastResult canImplicitlyCast(const Type& from, const Type& to) {
 
     TypeKind f = from.kind, t = to.kind;
 
+    // `Shared<T>` (owning atomic handle): it only converts to the SAME `Shared<T>` (a retaining
+    // copy — the exact-identity case already returned Silent above; this also blesses the `T → T?`
+    // wrap after the nullable recursion). It never coerces to/from a plain `Class&`, a borrow, or a
+    // value `Object` — that's the born-shared + no-leak rule (a shared object has no raw alias, and
+    // you can't smuggle one out). Guarded here so the Reference→Object / value-borrow rules below
+    // can't mis-fire on a shared handle (both are Reference-kind with the same className).
+    if (from.shared || to.shared) {
+        // Shared<T> -> Shared<T> (same class): a retaining copy.
+        if (from.shared && to.shared && from.className == to.className) return CastResult::Silent;
+        // Shared<T> -> a non-owning borrow `Class*` (same class): a safe view — no refcount, no
+        // ownership extracted (escape analysis confines the borrow), exactly like `Class& -> Class*`.
+        if (from.shared && !to.shared && t == TypeKind::Reference && to.borrow
+            && from.className == to.className)
+            return CastResult::Silent;
+        // Shared<T> -> value `Object` (same class): deref + clone (an independent copy), like
+        // `Class& -> Object`.
+        if (from.shared && t == TypeKind::Object && from.className == to.className)
+            return CastResult::Silent;
+        // Everything else involving a Shared is forbidden: `-> Class&` (would create a NON-atomic
+        // co-owner of an atomic object) and anything `-> Shared` (born-shared: no promoting an alias).
+        return CastResult::None;
+    }
+
     // Generic-body checking only: a type parameter `T` and a reference/value of that same
     // parameter (`T&` / `T`) are interchangeable — the value-vs-reference distinction is a
     // concrete-lowering detail not knowable abstractly (a bound method may return `Self` or
@@ -172,7 +195,8 @@ CastResult canPassArgument(const Type& from, const Type& to) {
     // Borrow a value object as a reference of the same class — address-of, no copy, no
     // refcount change. Argument position only (see the header note); refcount safety relies
     // on the callee treating the parameter as a pure borrow.
-    if (from.kind == TypeKind::Object && to.kind == TypeKind::Reference
+    // NOT for a Shared<T> target: born-shared forbids borrowing a stack value as a shared handle.
+    if (from.kind == TypeKind::Object && to.kind == TypeKind::Reference && !to.shared
         && from.className == to.className)
         return CastResult::Silent;
     return canImplicitlyCast(from, to);
@@ -268,8 +292,9 @@ std::string typeName(const Type& t) {
         case TypeKind::Object: return t.className;
         case TypeKind::Enum:   return t.className;
         case TypeKind::Reference:
-            // Non-owning borrow renders with a postfix `*` (`i32*`, `Point*`); owning heap
-            // reference renders with a postfix `&` (`Point&`).
+            // A `Shared<Class>` handle renders as `Shared<Class>`; a non-owning borrow renders with a
+            // postfix `*` (`i32*`, `Point*`); an owning heap reference renders with a postfix `&`.
+            if (t.shared) return "Shared<" + t.className + ">";
             if (t.borrow) return (t.className.empty() ? typeName(Type{t.elementKind}) : t.className) + "*";
             return t.className + "&";
         case TypeKind::TypedPtr: {
@@ -307,6 +332,8 @@ std::string mangleType(const Type& t) {
             // mangled suffix, overloading one against the other would emit two definitions with the
             // same symbol (a raw clang "invalid redefinition"). A PRIMITIVE borrow has an empty
             // className, so it must encode its element type too, or `i32*` and `f64*` would collide.
+            if (t.shared)
+                return t.className + ".shared";   // atomically-refcounted owning handle (distinct symbol)
             if (t.borrow)
                 return (t.className.empty() ? typeName(Type{t.elementKind}) : t.className) + ".brw";
             return t.className + ".ref";   // owning heap reference
@@ -431,6 +458,10 @@ Type decodeSynthesizedType(const Token& tok) {
         return makeBorrowType(inner);
     }
 
+    // Shared handle: "shared:Class" — an owning, atomically-refcounted heap reference (born-shared).
+    if (s.size() > 7 && s.compare(0, 7, "shared:") == 0)
+        return makeSharedType(s.substr(7));
+
     // Reference: "Class&"
     if (!s.empty() && s.back() == '&')
         return makeReferenceType(s.substr(0, s.size() - 1));
@@ -500,6 +531,9 @@ Token synthTypeToken(const Type& t, int line) {
             // A plain class / enum / type-parameter name.
             return Token{ TokenType::IDENTIFIER, t.className, line };
         case TypeKind::Reference:
+            if (t.shared)
+                // Owning atomic handle → the internal "shared:<Class>" spelling.
+                return Token{ TokenType::IDENTIFIER, "shared:" + t.className, line };
             if (t.borrow) {
                 // Non-owning borrow → the internal "ref:<inner>" spelling.
                 std::string inner = t.className.empty()

@@ -1,0 +1,53 @@
+// End-to-end test for Shared<T> (Phase 1: atomic-refcounted, born-shared ownership handle).
+// No threads yet — this exercises construction, field/method access via auto-deref, copy (retain),
+// and scope-exit release, and proves the refcount is balanced (no leak / no double free) via a
+// live-object counter. Expected exit code: 0.
+
+class Counter {
+    mut static i32 live;
+    mut i32 hp;
+    Counter(i32 h) { hp = h; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+    fn get() -> i32 { return hp; }
+}
+
+fn useShared(Shared<Counter> c) -> i32 {
+    return c.get();        // auto-deref through the shared handle
+}
+
+// Returns an owned (+1) shared handle — exercises the atomic +1 return convention.
+fn makeShared(i32 h) -> Shared<Counter> {
+    Shared<Counter> c = Shared<Counter>(h);
+    return c;
+}
+
+fn main() -> i32 {
+    {
+        Shared<Counter> a = Shared<Counter>(10);   // born-shared, atomic +1
+        if (a.hp != 10)      { return 1; }          // field access via auto-deref
+        if (a.get() != 10)   { return 2; }          // method call via auto-deref
+        if (Counter::live != 1) { return 3; }        // one live object
+
+        Shared<Counter> b = a;                      // copy = atomic retain (count 2)
+        if (Counter::live != 1) { return 4; }        // still one object (shared)
+        if (b.get() != 10)   { return 5; }
+
+        if (useShared(a) != 10) { return 6; }        // pass a shared handle (retain in, release out)
+        if (Counter::live != 1) { return 7; }
+
+        // Rebind a mut shared handle: release old, retain new (both atomic).
+        mut Shared<Counter> m = Shared<Counter>(20);
+        if (Counter::live != 2) { return 8; }        // a's object + m's object
+        m = Shared<Counter>(30);                      // old (20) released, new (30) bound
+        if (Counter::live != 2) { return 9; }        // still two live (20 freed, 30 created)
+        if (m.get() != 30)   { return 10; }
+
+        // Return an owned shared handle (+1 return convention).
+        Shared<Counter> r = makeShared(99);
+        if (r.get() != 99)   { return 11; }
+    }
+    // scope exit: every handle released → all objects freed exactly once
+    if (Counter::live != 0) { return 12; }           // balanced: no leak, no double free
+
+    return 0;
+}

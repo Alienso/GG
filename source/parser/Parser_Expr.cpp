@@ -534,10 +534,74 @@ Expr Parser::parsePostfix() {
 
             if (check(TokenType::LEFT_PAREN)) {
                 advance();  // consume '('
+
+                // Resolve the receiver's class ONCE (reused for lambda-signature exposure below and
+                // lambda-literal inference after the args are parsed) — the static-method surface a
+                // stdlib `Thread.create(() -> {…})` needs. Only meaningful for a generic method name.
+                std::string lamRecvClass;
+                const std::pair<std::vector<Token>, Token>* savedSigM = expectedLambdaSig_;
+                if (gen_->genericMethodNames.count(member.lexeme)) {
+                    if (const auto* id = std::get_if<IdentifierExpr>(expression.node.get())) {
+                        if (classNames.count(id->name.lexeme) || gen_->classNames.count(id->name.lexeme))
+                            lamRecvClass = id->name.lexeme;                     // static form `Class::m(...)`
+                        else if (auto t = deduceArgTypeToken(&expression)) lamRecvClass = genericArgBaseName(*t);
+                    } else if (auto t = deduceArgTypeToken(&expression)) {
+                        lamRecvClass = genericArgBaseName(*t);
+                    }
+                    // Single-`Call`-bounded generic method → expose that bound's signature so an
+                    // untyped lambda argument (e.g. `(x) -> {…}`) infers its param/return types
+                    // while parsing (mirrors the free-function exposure). A no-arg `() -> {…}`
+                    // closure needs no exposure — it already parses as `Call() -> void`.
+                    if (!lamRecvClass.empty()) {
+                        auto mit = gen_->methodTemplates.find(lamRecvClass + "::" + member.lexeme);
+                        if (mit != gen_->methodTemplates.end() && mit->second.typeParams.size() == 1
+                            && !mit->second.bounds.empty()) {
+                            for (const std::string& b : mit->second.bounds[0]) {
+                                if (b.rfind("Call$", 0) != 0) continue;
+                                auto sit = gen_->callTraitSigs.find(b);
+                                if (sit != gen_->callTraitSigs.end()) expectedLambdaSig_ = &sit->second;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 std::vector<Token> argNames;
                 std::vector<bool>  argSpreads;
                 std::vector<std::unique_ptr<Expr>> args =
                     parseCallArgs(argNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &argSpreads);
+                expectedLambdaSig_ = savedSigM;   // restore (handles nested calls)
+
+                // Lambda-literal inference for a single-`Call`-bounded generic METHOD called without
+                // explicit `<…>` (mirrors the free-function lambda inference): infer the method's type
+                // parameter as the lambda's generated class (otherwise unspellable). This is what makes
+                // the stdlib `Thread t = Thread.create(() -> {…})` static-factory surface work.
+                if (!lamRecvClass.empty() && gen_->genericMethodNames.count(member.lexeme)) {
+                    auto mit = gen_->methodTemplates.find(lamRecvClass + "::" + member.lexeme);
+                    if (mit != gen_->methodTemplates.end() && mit->second.typeParams.size() == 1
+                        && !mit->second.bounds.empty()) {
+                        bool callBound = false;
+                        for (const std::string& b : mit->second.bounds[0])
+                            if (b.rfind("Call$", 0) == 0) { callBound = true; break; }
+                        std::string lam;
+                        if (callBound)
+                            for (const auto& a : args)
+                                if (const auto* c = std::get_if<CallExpr>(a->node.get()))
+                                    if (c->callee.lexeme.rfind("__lambda_", 0) == 0) { lam = c->callee.lexeme; break; }
+                        if (!lam.empty()) {
+                            std::vector<std::vector<Token>> typeArgs =
+                                { { Token{ TokenType::IDENTIFIER, lam, member.line } } };
+                            std::string mangledMethod = mangleInstantiation(member.lexeme, typeArgs);
+                            recordMethodInstantiation(lamRecvClass, member.lexeme, mangledMethod,
+                                                      std::move(typeArgs));
+                            expression = makeExpr(MethodCallExpr{
+                                box(std::move(expression)),
+                                Token{ TokenType::IDENTIFIER, mangledMethod, member.line },
+                                std::move(args), std::move(argNames), safe });
+                            continue;
+                        }
+                    }
+                }
 
                 // Variadic method call `recv.m(fixed…, pack…)` (no explicit `<…>` — the pack is inferred
                 // from the trailing args, like a variadic free function). Resolve the receiver's class,
@@ -828,6 +892,26 @@ Expr Parser::parsePrimary() {
             recordInstantiation(name.lexeme, mangled, std::move(typeArgs), idx);
             return makeExpr(CallExpr{ Token{ TokenType::IDENTIFIER, mangled, name.line },
                                       std::move(genArgs), std::move(genNames) });
+        }
+
+        // Shared handle construction: `Shared<Class>(args)` — atomic, born-shared. Reuses the
+        // heap-allocation lowering (a NewExpr) but with shared=true → atomic refcount + a
+        // Shared<Class> result type. Recognised by the reserved name `Shared` followed by `<`
+        // (Shared is never a class name). The Class arg may itself be a generic instantiation
+        // (`Shared<Box<i32>>`), handled by parseTypeArgList/argMangle exactly like `new`.
+        if (name.lexeme == "Shared" && check(TokenType::LESS)) {
+            std::vector<std::vector<Token>> typeArgs = parseTypeArgList();
+            if (typeArgs.size() != 1)
+                throw error(name, "Shared<T> takes exactly one type argument");
+            Token cls{ TokenType::IDENTIFIER, argMangle(typeArgs[0]), name.line };
+            consume(TokenType::LEFT_PAREN, "expected '(' to construct a shared handle: Shared<T>(args)");
+            std::vector<Token> ctorNames;
+            std::vector<bool>  ctorSpreads;
+            std::vector<std::unique_ptr<Expr>> ctorArgs =
+                parseCallArgs(ctorNames, TokenType::RIGHT_PAREN, /*allowNames=*/true, &ctorSpreads);
+            for (bool s : ctorSpreads) if (s) { unwrapSpreadArgs(ctorArgs, ctorNames, ctorSpreads); break; }
+            return makeExpr(NewExpr{ name, cls, std::move(ctorArgs), std::move(ctorNames),
+                                     /*shared=*/true });
         }
 
         // Generic constructor call (value construction, no `new`): ClassName<typeArgs>(args).

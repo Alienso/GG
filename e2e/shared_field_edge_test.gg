@@ -1,0 +1,77 @@
+// End-to-end edge cases for Shared<T> class fields: a const field, a nullable field, a field
+// alongside a USER destructor, nested Shared<Wrapper-holding-Shared>, and an embedded value object
+// that owns a Shared field. Only Counter tracks live-object count; balance proves correctness.
+// Expected exit code: 0.
+
+// Only Counter (the refcounted shared object) tracks `live`; wrappers/value objects don't, so the
+// clone-doesn't-call-ctor asymmetry can't skew the balance check.
+class Counter {
+    mut static i32 live;
+    mut i32 hp;
+    Counter(i32 h) { hp = h; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+    fn get() -> i32 { return hp; }
+}
+
+// (1) const Shared field (co-own, never rebind) + (3) a USER destructor on the owner.
+class ConstHolder {
+    Shared<Counter> c;        // const field — set once in ctor
+    mut i32 tag;
+    ConstHolder(Shared<Counter> x) { c = x; tag = 7; }
+    ~ConstHolder() { tag = 0; }   // user dtor must compose with the generated field-release
+    fn peek() -> i32 { return c.get(); }
+}
+
+// (2) nullable Shared field.
+class MaybeHolder {
+    mut Shared<Counter>? c;
+    MaybeHolder() { c = null; }
+    fn setIt(Shared<Counter> x) mut { c = x; }
+}
+
+// (5) an embedded value object that itself owns a Shared field. `c` is const (set once, never
+// rebound) so Inner is Shareable — required for the Shared<Inner> nested case (4) below.
+class Inner  { Shared<Counter> c; Inner(Shared<Counter> x) { c = x; } }
+class Outer  { mut Inner inner; Outer(Inner i) { inner = i; } }
+
+fn main() -> i32 {
+    // (1)+(3) const field + user dtor
+    {
+        Shared<Counter> s = Shared<Counter>(10);
+        ConstHolder h(s);
+        ConstHolder h2 = h;                 // clone retains the const Shared field
+        if (h2.peek() != 10)    { return 1; }
+        if (Counter::live != 1) { return 2; }
+    }
+    if (Counter::live != 0) { return 3; }
+
+    // (2) nullable Shared field
+    {
+        mut MaybeHolder m();
+        if (Counter::live != 0) { return 4; }   // still null
+        Shared<Counter> s = Shared<Counter>(20);
+        m.setIt(s);                              // c = s → retain
+        if (Counter::live != 1) { return 5; }
+    }
+    if (Counter::live != 0) { return 6; }        // m destroyed → nullable field released
+
+    // (4) nested shared: Shared<Wrapper-that-holds-Shared>
+    {
+        Shared<Inner> si = Shared<Inner>(Shared<Counter>(30));
+        if (Counter::live != 1) { return 7; }
+        Shared<Inner> si2 = si;                  // retain the outer; inner Counter untouched
+        if (Counter::live != 1) { return 8; }
+    }
+    if (Counter::live != 0) { return 9; }        // both outer handles drop → Inner dtor → Counter freed
+
+    // (5) embedded value object owning a Shared field
+    {
+        Inner i(Shared<Counter>(40));
+        Outer o(i);                              // Outer embeds Inner by value → deep clone retains
+        Outer o2 = o;                            // clone Outer → clone Inner → retain Shared
+        if (Counter::live != 1) { return 10; }
+    }
+    if (Counter::live != 0) { return 11; }
+
+    return 0;
+}

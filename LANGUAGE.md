@@ -23,8 +23,9 @@ via monomorphization.
 12. [Imports & extern](#12-imports--extern)
 13. [Traits & operator overloading](#13-traits--operator-overloading)
 14. [Lambdas & callable objects](#14-lambdas--callable-objects)
-15. [What GG does NOT support](#15-what-gg-does-not-support)
-16. [Debugging (`--debug` / `-g`)](#16-debugging---debug----g)
+15. [Concurrency (`Shared<T>` & threads)](#15-concurrency-sharedt--threads)
+16. [What GG does NOT support](#16-what-gg-does-not-support)
+17. [Debugging (`--debug` / `-g`)](#17-debugging---debug----g)
 
 ---
 
@@ -2293,7 +2294,81 @@ apply((f64 y) -> f64 { return y; }, 5);          // ERROR: (f64)->f64 does not s
 
 ---
 
-## 15. What GG does NOT support
+## 15. Concurrency (`Shared<T>` & threads)
+
+GG has real OS threads with a compile-time safety model built on two axes: a **lifetime** handle
+(`Shared<T>`) for state shared across threads, and an **execution** primitive (`Thread`) that runs a
+closure on a new thread. The design is single-threaded-correct today and atomic under threads.
+
+### `Shared<T>` — an atomically reference-counted, shared ownership handle
+
+`Shared<T>` is like an owning heap reference (`T&`, §10) but its reference count is **atomic** — the
+`Arc` to `T&`'s `Rc`. It is the only handle safe to share across threads. `T` must be a **class**.
+
+```gg
+class Counter { mut i32 val; Counter() { val = 0; } fn bump() mut { val = val + 1; } fn get() -> i32 { return val; } }
+
+Shared<Counter> c = Shared<Counter>();   // construct a shared Counter (born shared)
+c.bump();                                // auto-derefs, exactly like T&
+i32 n = c.get();
+```
+
+- **Born shared.** A `Shared<T>` is created directly with `Shared<T>(args)` (it runs `T`'s
+  constructor in place). You cannot turn an existing `T&`/value object *into* a `Shared<T>` — sharing
+  is decided at construction, so there is never a non-atomic alias of a shared object.
+- **Coercions.** `Shared<T>` copies to another `Shared<T>` (an atomic retain), and can be **borrowed**
+  as `T*` or **copied** to a value `T` — the same "borrow out / clone out" options as `T&`. It may
+  **not** be coerced to an owning `T&` (that would create a non-atomic co-owner).
+- **Shareable gate.** `Shared<T>` requires `T` to be *Shareable*: it may have `mut` primitive/`str`/
+  `enum` fields (data races produce garbage but never memory corruption), and non-`mut` reference or
+  value-object fields whose types are themselves Shareable — but **not** a `mut` reference field (a
+  rebind is a cross-thread double-free hazard), nor any raw `ptr`/borrow field. A non-Shareable `T`
+  is rejected at the construction site, naming the offending field. (A `Mutex<T>`/`RwLock<T>` for
+  guarded mutable sharing is planned; today, mutate `mut` primitive fields at your own risk, or keep
+  shared classes effectively immutable.)
+- `Shared<T>?` (a nullable shared handle) is allowed.
+
+### `Thread` — run a closure on a new OS thread
+
+`Thread` is a standard-library class (`import std.thread.Thread;`). `Thread.create(closure)` spawns a
+new thread that runs `closure` (a `() -> void` lambda) immediately; `.join()` blocks until it finishes.
+
+```gg
+import std.thread.Thread;
+
+fn main() -> i32 {
+    Shared<Counter> c = Shared<Counter>();
+    Thread t = Thread.create(() -> { c.bump(); c.bump(); });   // capture c; run on a new thread
+    t.join();                                                    // wait for it
+    return c.get();                                              // 2
+}
+```
+
+- **Captures must be Sendable.** A thread closure captures enclosing variables by value; each captured
+  value crosses into the new thread, so it must be *Sendable*: a copied value (primitive, `str`, enum,
+  or a value object whose fields are all Sendable) or an atomically-shared `Shared<T>`. Capturing a
+  non-atomic owning `T&`, a borrow `T*`, or a raw `ptr` is a **compile error** — share the state with
+  `Shared<T>` instead. This is what makes data sharing across threads safe by construction.
+- **Statics touched by a thread must be shareable too.** The same safety extends to any `static` a
+  thread body reaches — directly or through a function/method it calls. A `mut static i32` (a racy
+  but memory-safe scalar) or a plain `static Shared<T>` is fine, but a **`mut static` reference or
+  handle is rejected** — including `mut static Shared<T>` — because it could be *rebound* from two
+  threads at once (a data race on the slot itself, not just its target). So a shared singleton must
+  be a plain `static Shared<T>` (const, so it can never be rebound); a `mut static Class&` is a
+  compile error either way.
+- **Lifetime.** The closure (and everything it captured) is owned solely by the spawned thread, which
+  releases it when it finishes — a captured `Shared<T>` is released atomically, so the shared object
+  is destroyed exactly once even though the spawning thread and the new thread race the count. The
+  `Thread` itself releases its OS handle when it goes out of scope (a destructor), so it is
+  **non-copyable** (a thread handle must not be duplicated) — hold it by value and `join()` it, or
+  pass it by reference; you cannot copy it into another variable.
+- **Platform.** Threads use the OS primitives (Windows `CreateThread`; Linux `pthread`). On Windows,
+  linking pulls in `kernel32` automatically via `compile.ps1`.
+
+**Not yet:** `Mutex`/`RwLock` for guarded mutable sharing, thread return values, detaching, and
+thread-local storage. A `mut` reference field inside a `Shared<T>` is rejected pending `Mutex<T>`.
+
+## 16. What GG does NOT support
 
 The following features are **currently absent** from the current implementation. They may be added in the future.
 Attempting them will produce a compile error (or will simply not parse).
@@ -2353,7 +2428,7 @@ Attempting them will produce a compile error (or will simply not parse).
 (Tuples §5, `match` §5, `str` §1, compile-time reflection & annotations §2, and modules/namespaces
 §12 **are** supported — they were once on this list.)
 
-## 16. Debugging (`--debug` / `-g`)
+## 17. Debugging (`--debug` / `-g`)
 
 GG can emit DWARF debug information so a compiled program is debuggable with standard C/C++
 debuggers (**gdb** / **lldb**) — set breakpoints on `.gg` lines, single-step, inspect a backtrace,

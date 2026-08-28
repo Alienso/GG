@@ -159,6 +159,9 @@ if (Test-Path $exeOut) {
 
 $clangArgs = @("$llFile", "-o", "$exeOut", "-O$Opt")
 if ($DebugInfo) { $clangArgs += "-g" }
+# kernel32 provides CreateThread/WaitForSingleObject for the Thread runtime (gg_thread_create/join).
+# Harmless when a program uses no threads; always available on Windows.
+$clangArgs += "-lkernel32"
 $clang = Invoke-Native $Clang $clangArgs
 
 foreach ($line in ($clang.Stdout + $clang.Stderr)) {

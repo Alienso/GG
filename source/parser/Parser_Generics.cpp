@@ -590,14 +590,18 @@ size_t Parser::typeSpanAt(size_t from) const {
         return (i + 1) - from;                                          // include ')'
     }
 
+    // `Shared<T>` — builtin generic handle, recognised by the reserved name + `<`.
+    bool isSharedName = t.type == TokenType::IDENTIFIER && t.lexeme == "Shared"
+                        && from + 1 < tokens.size() && tokens[from + 1].type == TokenType::LESS;
     bool isType = isTypeKeyword(t.type)
+               || isSharedName
                || (t.type == TokenType::IDENTIFIER
                    && (classNames.count(t.lexeme) || gen_->classNames.count(t.lexeme)));
     if (!isType) return 0;
 
     size_t i = from + 1;
-    // generic argument list: Name<...>  or  typed pointer: ptr<...>
-    if (((t.type == TokenType::IDENTIFIER && gen_->classNames.count(t.lexeme))
+    // generic argument list: Name<...>  or  typed pointer: ptr<...>  or  Shared<...>
+    if (((t.type == TokenType::IDENTIFIER && (gen_->classNames.count(t.lexeme) || isSharedName))
          || t.type == TokenType::PTR)
         && i < tokens.size() && tokens[i].type == TokenType::LESS) {
         int depth = 1; ++i;
@@ -648,6 +652,15 @@ std::vector<std::vector<Token>> Parser::parseTypeArgList() {
 std::vector<Token> Parser::parseOneTypeArg() {
     std::vector<Token> cur;
     Token base = advance();
+    // `Shared<T>` as a (possibly nested) generic type argument — e.g. a container of shared handles
+    // `Array<Shared<Player>>` — is a Phase-1 limitation (it needs a symbol-safe mangling of the
+    // shared element, reconciling the internal "shared:Class" decode spelling with the "Class.shared"
+    // mangle spelling). Reject it with a clear message here instead of the cryptic "expected '>'"
+    // that would otherwise result from the reader not recognising the `Shared` builtin.
+    if (base.type == TokenType::IDENTIFIER && base.lexeme == "Shared" && check(TokenType::LESS))
+        throw error(base, "'Shared<T>' is not yet supported as a generic type argument "
+                          "(e.g. a container of shared handles like 'Array<Shared<T>>'); "
+                          "this is a Phase-1 limitation");
     if (base.type == TokenType::IDENTIFIER && gen_->classNames.count(base.lexeme)
         && check(TokenType::LESS)) {
         std::vector<std::vector<Token>> nested = parseTypeArgList();

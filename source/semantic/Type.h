@@ -48,6 +48,17 @@ struct Type {
                                                // element kind in elementKind (an lvalue ref, like
                                                // C++'s `int&` — auto-derefs on read, stores through
                                                // on write).
+    bool        shared      = false;           // `Shared<Class>`: an OWNING heap reference like
+                                               // `Class&`, but ATOMICALLY refcounted and "born
+                                               // shared" (constructed in place, never aliased as a
+                                               // raw `Class&`) — the cross-thread ownership handle.
+                                               // Only when kind == Reference; className is the
+                                               // pointee class. Reuses the reference machinery
+                                               // (member access / dispatch); differs only at
+                                               // refcount (atomic), construction (build-in-place),
+                                               // cast (no coercion to `Class&`), and the
+                                               // Sendable/Shareable markers. Mutually exclusive with
+                                               // `borrow` in Phase 1. See docs/concurrency.md.
     TypeKind    elementKind = TypeKind::Error;  // only valid when kind == Array
     size_t      arraySize   = 0;               // only valid when kind == Array
     std::string className;                     // only valid when kind == Object
@@ -116,6 +127,20 @@ inline Type makePrimitiveBorrow(TypeKind elementKind) {
     t.elementKind = elementKind;
     return t;
 }
+
+// An owning, atomically-refcounted heap reference `Shared<Class>` — the cross-thread ownership
+// handle. Internally a Reference (a ptr to the heap body) with the `shared` flag; retain/release
+// emit atomic ops, construction builds in place (born-shared), and it does not coerce to `Class&`.
+inline Type makeSharedType(const std::string& name) {
+    Type t;
+    t.kind      = TypeKind::Reference;
+    t.className = name;
+    t.shared    = true;
+    return t;
+}
+
+// True for a `Shared<Class>` handle.
+inline bool isShared(const Type& t) { return t.kind == TypeKind::Reference && t.shared; }
 
 // True for any `ref T` (class or primitive).
 inline bool isBorrow(const Type& t) { return t.kind == TypeKind::Reference && t.borrow; }

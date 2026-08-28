@@ -52,11 +52,21 @@ private:
         std::string allocaPtr;
         std::string className;
         bool        isReference = false;
+        bool        shared      = false;   // a Shared<T> handle → release atomically (gg_release_shared)
     };
     std::vector<std::vector<DtorEntry>> dtorScopes_;
 
     // Set true the first time `new` is lowered; triggers emission of the refcount runtime.
     bool usesRefcount_ = false;
+    // Set true the first time a Shared<T> is lowered; triggers emission of the ATOMIC refcount
+    // runtime (gg_retain_shared/gg_release_shared) in addition to the non-atomic one.
+    bool sharedUsed_ = false;
+
+    // The runtime helper names for a retain/release, chosen by whether the handle is a Shared<T>
+    // (atomic) or a plain Class& (non-atomic). Centralised so every refcount site picks correctly —
+    // a missed atomic on a shared object would be silent heap corruption under threads.
+    static const char* retainFn(bool shared)  { return shared ? "gg_retain_shared"  : "gg_retain";  }
+    static const char* releaseFn(bool shared) { return shared ? "gg_release_shared" : "gg_release"; }
 
     // Classes that need a generated @Class_clone helper (deep copy: memberwise
     // copy with retain at reference-field boundaries). Populated on demand.
@@ -69,7 +79,7 @@ private:
     // Reference values produced with a +1 count (from `new` or a reference-returning
     // call) that are not yet owned by anyone. Released at the end of the enclosing
     // full expression unless a consumer claims ownership first.
-    struct TempRelease { std::string ptr; std::string className; };
+    struct TempRelease { std::string ptr; std::string className; bool shared = false; };
     std::vector<TempRelease> pendingTemps_;
 
     // ---- Module-level state ----
@@ -439,6 +449,18 @@ private:
     void emitStdioHelpers();
     bool targetWindows_   = true;    // target OS is Windows (from the triple) — picks the stdio runtime
     bool panicUsesStderr_ = false;   // a runtime-panic message referenced @gg_stderr (force its define)
+
+    // Emit the OS-thread runtime helpers `@gg_thread_create(entry, arg) -> handle` and
+    // `@gg_thread_join(handle)` — platform split (Windows CreateThread/WaitForSingleObject; else
+    // pthread_create/pthread_join), the same host-split pattern as emitStdioHelpers. Emitted only
+    // when a `Thread` is lowered (threadsUsed_). See docs/concurrency.md §5.
+    void emitThreadRuntime();
+    bool threadsUsed_ = false;       // a Thread was lowered → emit the thread runtime (+ link kernel32)
+    // Per-closure-class C-ABI trampoline `@__thread_entry$Class(ptr) -> {i32|ptr}` that invokes the
+    // closure's `call()` then releases it. Emitted on demand by the `__gg_trampoline` intrinsic,
+    // deduped by closure class. The signature is platform-specific (Windows i32 / pthread ptr return).
+    void emitThreadTrampoline(const std::string& closureClass);
+    std::unordered_set<std::string> threadTrampolines_;
 
     // ---- Low-level emit helpers ----
     void        emit(const std::string& instruction);

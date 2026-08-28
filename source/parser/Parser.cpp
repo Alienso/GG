@@ -220,6 +220,9 @@ bool Parser::isTypeName() const {
         case TokenType::SELF:
             return true;   // valid only inside trait/impl bodies; semantic enforces that
         case TokenType::IDENTIFIER:
+            // `Shared<T>` is a builtin generic handle type (like `ptr<T>`), recognised by the
+            // reserved name `Shared` followed by `<` regardless of declared class names.
+            if (peek().lexeme == "Shared" && peekNext().type == TokenType::LESS) return true;
             return classNames.count(peek().lexeme) > 0 || gen_->classNames.count(peek().lexeme) > 0;
         case TokenType::LEFT_PAREN:
             // A tuple type `(T1, T2, …)` starts with '('. Confirm it is a full, valid tuple-type
@@ -270,6 +273,15 @@ Token Parser::consumeTypeCore() {
         std::vector<std::vector<Token>> args = parseTypeArgList();
         std::string elem = args.empty() ? "" : argMangle(args[0]);
         return Token{ TokenType::IDENTIFIER, "ptr<" + elem + ">", line };
+    }
+
+    // Shared handle: Shared<T> -> synthesized "shared:elem" token (builtin generic, like ptr<T>).
+    // The element must be a class (enforced in the semantic resolveTypeToken, not here). No `&`/`*`
+    // suffix on a Shared handle in Phase 1.
+    if (base.type == TokenType::IDENTIFIER && base.lexeme == "Shared" && check(TokenType::LESS)) {
+        std::vector<std::vector<Token>> args = parseTypeArgList();
+        std::string elem = args.empty() ? "" : argMangle(args[0]);
+        return Token{ TokenType::IDENTIFIER, "shared:" + elem, line };
     }
 
     // Generic class instantiation: Name<args> -> mangled concrete class name.
@@ -333,6 +345,7 @@ Token Parser::consumeTupleType() {
         const std::string& lx = e.lexeme;
         bool badSigil = (!lx.empty() && (lx.back() == '&' || lx.back() == '?'))
                      || lx.rfind("ref:", 0) == 0
+                     || lx.rfind("shared:", 0) == 0
                      || lx == "ptr" || lx.rfind("ptr<", 0) == 0
                      || lx == "void";
         if (badSigil)

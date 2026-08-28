@@ -1,0 +1,43 @@
+module std.thread;
+
+// OS thread primitives. `gg_thread_create`/`gg_thread_join` are DEFINED by the GG compiler per
+// target platform (Windows: CreateThread/WaitForSingleObject; Linux: pthread_create/pthread_join),
+// so this file stays platform-agnostic — exactly like `gg_stdout`/`gg_stderr` in `std.crt`.
+extern gg_thread_create(ptr entry, ptr arg) -> ptr;   // run entry(arg) on a new thread; return a handle
+extern gg_thread_join(ptr handle);                    // block until that thread finishes
+extern gg_thread_dispose(ptr handle);                 // release the OS handle (Windows CloseHandle; POSIX no-op)
+
+// A handle to an OS thread.
+//
+// Spawn one with `Thread.create(closure)`, which starts the thread immediately; call `.join()` to
+// wait for it to finish. The closure is a `() -> void` callable (typically a lambda). Its captured
+// state is copied into the thread, so it must be Sendable — share mutable state across threads with
+// `Shared<T>`, whose reference count is atomic.
+//
+// The closure is heap-copied at spawn time (so it outlives the spawning frame) and owned solely by
+// the new thread, which releases it — running any captured `Shared<T>`/reference destructors — when
+// it finishes. So captures are cleaned up exactly once, on the thread that used them.
+class Thread {
+    private mut ptr handle;   // OS thread handle; set when the thread is spawned (stdlib is ptr-exempt)
+
+    // Spawn a new thread running `closure` and return a handle to it.
+    fn static create<F: Call() -> void>(F closure) -> Thread t {
+        ptr clo = __gg_heap_closure(closure);   // compiler intrinsic: heap-copy the closure
+        ptr ent = __gg_trampoline(closure);      // compiler intrinsic: its C-ABI entry trampoline
+        t.handle = gg_thread_create(ent, clo);   // build directly on the return slot
+        return t;
+    }
+
+    // Block until this thread finishes.
+    fn join() {
+        gg_thread_join(this.handle);
+    }
+
+    // Release the OS thread handle at scope exit. On Windows this is the required CloseHandle (which
+    // WaitForSingleObject/join does NOT do); on POSIX it is a no-op (pthread_join already frees).
+    // Having a raw-`ptr`-owning field + this destructor makes `Thread` non-copyable (the compiler's
+    // raw-pointer copy guard), which is correct — a thread handle should never be duplicated.
+    ~Thread() {
+        gg_thread_dispose(this.handle);
+    }
+}

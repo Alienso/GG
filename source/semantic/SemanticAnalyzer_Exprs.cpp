@@ -1613,6 +1613,38 @@ Type SemanticAnalyzer::analyzeCall(const CallExpr& call) {
     }
     const std::string& name = call.callee.lexeme;
 
+    // Concurrency intrinsics (compiler-provided; stdlib-internal). `__gg_heap_closure(closure)` and
+    // `__gg_trampoline(closure)` both take one closure argument and yield an opaque `ptr`. The
+    // closure must be a `Call() -> void` callable (a class implementing a zero-arg, void `call`).
+    // This is the THREAD BOUNDARY: every value the closure captures crosses into the spawned thread,
+    // so each captured field must be Sendable (see docs/concurrency.md §4). Checked here on the
+    // concrete closure class (a `__lambda_N` after monomorphization); an abstract type-parameter
+    // receiver — the un-instantiated template body — has no class in the registry and is skipped
+    // (the concrete instantiation is what actually gets checked).
+    if (name == "__gg_heap_closure" || name == "__gg_trampoline") {
+        if (call.args.size() != 1)
+            error(call.callee, "'" + name + "' takes exactly one argument (a `() -> void` closure)");
+        Type ct = call.args.empty() ? Type{TypeKind::Error} : analyzeExpr(*call.args[0]);
+        // Check captures for Sendability on ONE of the two intrinsics (both see the same closure) so
+        // a non-Sendable capture is reported exactly once. Also record the concrete closure class so
+        // the post-pass (`checkThreadClosures`) can walk its call-graph for non-Sendable STATICS —
+        // the ambient-globals counterpart the field (capture) check below can't see.
+        if (name == "__gg_heap_closure" && !ct.className.empty()) {
+            threadClosureClasses_.insert(ct.className);
+            auto cit = classRegistry.find(ct.className);
+            if (cit != classRegistry.end())
+                for (const std::string& fname : cit->second.fieldOrder) {
+                    const Type& ft = cit->second.fields.at(fname).type;
+                    if (!isSendableType(ft))
+                        error(call.callee, "captured value '" + fname + "' of type '" + typeName(ft)
+                              + "' is not Sendable and cannot cross into a thread; share it with "
+                                "Shared<" + (ft.className.empty() ? typeName(stripNullable(ft)) : ft.className)
+                              + "> (its refcount is atomic), or capture a copied value instead");
+                }
+        }
+        return Type{TypeKind::Ptr};
+    }
+
     // Constructor call: callee is a class name → resolve among the constructor overloads.
     if (classRegistry.count(name)) {
         const ClassInfo& cls = classRegistry.at(name);
@@ -2730,6 +2762,8 @@ Type SemanticAnalyzer::analyzeCast(const CastExpr& castExpr) {
 
 Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
     const std::string& className = newExpr.className.lexeme;
+    // `Shared<Class>(args)` yields an atomic, born-shared handle; `new Class(args)` an owning ref.
+    const Type resultType = newExpr.shared ? makeSharedType(className) : makeReferenceType(className);
 
     if (enumRegistry.count(className)) {
         error(newExpr.className, "cannot 'new' an enum '" + className
@@ -2747,6 +2781,15 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
 
     const ClassInfo& cls = it->second;
 
+    // Born-shared safety gate: a `Shared<T>` may only wrap a Shareable class (Phase 1) — no mutable
+    // reference-like field (the #2 rebind double-free) and no raw ptr/borrow field. Checked at the
+    // construction site, the point a shared handle is born.
+    if (newExpr.shared && !isShareableClass(className)) {
+        error(newExpr.className, "'Shared<" + className + ">' is not allowed: " + shareableReason(className));
+        for (const auto& arg : newExpr.args) analyzeExpr(*arg);
+        return Type{TypeKind::Error};
+    }
+
     // Copy construction: new Class(x) where x is a value/reference of the same
     // class. Deep-copies x; bypasses regular constructor matching.
     if (newExpr.args.size() == 1) {
@@ -2754,7 +2797,7 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
         if (!isError(argType)
             && (argType.kind == TypeKind::Object || argType.kind == TypeKind::Reference)
             && argType.className == className) {
-            return makeReferenceType(className);
+            return resultType;
         }
         // Not a copy — fall through to regular constructor matching.
     }
@@ -2766,7 +2809,7 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
             error(newExpr.className, "class '" + className
                   + "' has no constructor but 'new' was given arguments");
         for (const auto& arg : newExpr.args) analyzeExpr(*arg);
-        return makeReferenceType(className);
+        return resultType;
     }
 
     const std::vector<ClassInfo::Method>& set = ctorIt->second;
@@ -2777,5 +2820,5 @@ Type SemanticAnalyzer::analyzeNew(const NewExpr& newExpr) {
     if (idx >= 0 && set.size() > 1)
         resolvedCallee[&newExpr] = mangleOverload(className + "_" + className,
                                                   set[idx].paramTypes, set[idx].returnType);
-    return makeReferenceType(className);
+    return resultType;
 }

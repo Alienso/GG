@@ -96,6 +96,10 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     traitRegistry.clear();
     implementedTraits.clear();
     annotationRegistry.clear();
+    shareableCache_.clear();
+    podCache_.clear();
+    sendableCache_.clear();
+    threadClosureClasses_.clear();
     typeAnnotations.clear();
     currentSelfType_ = "";
     currentReturnSlotName_ = "";
@@ -121,6 +125,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
         analyzeStmt(stmt);      // pass 2: full analysis
 
     checkGenericBodies(program);  // pass 3: check bounded generic bodies against their bounds
+    checkThreadClosures(program); // pass 4: reject non-Sendable STATICS reached from a thread body
 
     symbolTable.exitScope();
 
@@ -645,6 +650,112 @@ static std::string prettyBound(const std::string& b) {
     return out;
 }
 
+// ---- Concurrency: Shareable / POD computation (Phase 1) ----
+
+bool SemanticAnalyzer::isPODClass(const std::string& cn) {
+    auto cached = podCache_.find(cn);
+    if (cached != podCache_.end()) return cached->second;
+    auto it = classRegistry.find(cn);
+    if (it == classRegistry.end()) return false;   // unknown → conservatively not POD
+    podCache_[cn] = true;   // assume POD to break reference/embedding cycles; corrected below
+    bool pod = true;
+    for (const std::string& fname : it->second.fieldOrder) {
+        const Type& ft = it->second.fields.at(fname).type;
+        if (ft.kind == TypeKind::Object) { if (!isPODClass(ft.className)) { pod = false; break; } }
+        else if (ft.kind == TypeKind::Reference || ft.kind == TypeKind::Ptr
+                 || ft.kind == TypeKind::TypedPtr) { pod = false; break; }
+        // primitive / bool / char / str / enum (incl. nullable) → POD.
+    }
+    podCache_[cn] = pod;
+    return pod;
+}
+
+// Is a slot of type `ft` (with the given mutability) safe to SHARE across threads in place — i.e.
+// legal as a field of a `Shared<T>` AND as a static a thread body may touch? A slot is *shared*, not
+// copied, so this is stricter than `isSendableType` (which governs by-value CAPTURES): a `mut`
+// reference-like slot is rejected because it can be REBOUND from two threads (torn store /
+// double-free), even for an atomic `Shared<T>` — atomicity protects the count, not the slot.
+bool SemanticAnalyzer::isSharedSafeField(const Type& ft, bool isMut) {
+    if (ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr) return false;  // raw ptr — unsafe
+    if (ft.kind == TypeKind::Reference && ft.borrow)               return false;  // borrow — unsafe
+    if (ft.kind == TypeKind::Reference)                            // owning ref or Shared handle
+        return !isMut && isShareableClass(ft.className);           // mut → rebind hazard; else recurse
+    if (ft.kind == TypeKind::Object)                               // embedded value object
+        return isMut ? isPODClass(ft.className) : isShareableClass(ft.className);
+    return true;   // POD scalar (primitive/bool/char/str/enum, incl. nullable) — safe, any mut
+}
+
+bool SemanticAnalyzer::isShareableClass(const std::string& cn) {
+    auto cached = shareableCache_.find(cn);
+    if (cached != shareableCache_.end()) return cached->second;
+    auto it = classRegistry.find(cn);
+    if (it == classRegistry.end()) return false;
+    shareableCache_[cn] = true;   // break cycles (a cycle through non-mut refs is fine)
+    bool ok = true;
+    for (const std::string& fname : it->second.fieldOrder) {
+        const ClassInfo::Field& f = it->second.fields.at(fname);
+        if (!isSharedSafeField(f.type, f.isMut)) { ok = false; break; }
+    }
+    shareableCache_[cn] = ok;
+    return ok;
+}
+
+// A human-readable reason (naming the first offending field) for why `cn` is not Shareable.
+std::string SemanticAnalyzer::shareableReason(const std::string& cn) {
+    auto it = classRegistry.find(cn);
+    if (it == classRegistry.end()) return "'" + cn + "' is not a class";
+    for (const std::string& fname : it->second.fieldOrder) {
+        const ClassInfo::Field& f = it->second.fields.at(fname);
+        if (isSharedSafeField(f.type, f.isMut))
+            continue;
+        const Type& ft = f.type;
+        if (ft.kind == TypeKind::Ptr || ft.kind == TypeKind::TypedPtr)
+            return "field '" + fname + "' is a raw pointer (cannot be shared across threads)";
+        if (ft.kind == TypeKind::Reference && ft.borrow)
+            return "field '" + fname + "' is a borrow (cannot be shared across threads)";
+        if (ft.kind == TypeKind::Reference && f.isMut)
+            return "field '" + fname + "' is a mutable reference; a mutable reference in a shared type "
+                   "is a data-race hazard — make it non-mut, or wait for Mutex<T> (Phase 2)";
+        if (ft.kind == TypeKind::Object && f.isMut)
+            return "field '" + fname + "' is a mutable value object that owns references; make it "
+                   "non-mut, or wait for Mutex<T> (Phase 2)";
+        // A non-mut reference/value-object whose pointee/class isn't Shareable.
+        return "field '" + fname + "' (of type '" + typeName(ft) + "') is not itself Shareable";
+    }
+    return "it contains a field that cannot be shared";
+}
+
+// Sendable — may this value be moved/copied into a spawned thread? (See the header note.)
+bool SemanticAnalyzer::isSendableType(const Type& t) {
+    Type u = stripNullable(t);
+    switch (u.kind) {
+        case TypeKind::Reference:
+            return u.shared;                    // Shared<T>: atomic → sendable; owning ref / borrow: not
+        case TypeKind::Object:
+            return isSendableClass(u.className); // value object: sendable iff every field is
+        case TypeKind::Ptr:
+        case TypeKind::TypedPtr:
+        case TypeKind::Void:
+        case TypeKind::Error:
+            return false;                        // raw pointer / non-value → not sendable
+        default:
+            return true;                         // primitive / bool / char / str / enum → copied/immutable
+    }
+}
+
+bool SemanticAnalyzer::isSendableClass(const std::string& cn) {
+    auto cached = sendableCache_.find(cn);
+    if (cached != sendableCache_.end()) return cached->second;
+    auto it = classRegistry.find(cn);
+    if (it == classRegistry.end()) return false;
+    sendableCache_[cn] = true;   // break cycles
+    bool ok = true;
+    for (const std::string& fname : it->second.fieldOrder)
+        if (!isSendableType(it->second.fields.at(fname).type)) { ok = false; break; }
+    sendableCache_[cn] = ok;
+    return ok;
+}
+
 void SemanticAnalyzer::checkGenericBounds(const Program& program) {
     for (const GenericBoundCheck& bc : program.genericBoundChecks) {
         Token where{TokenType::IDENTIFIER, bc.typeName, bc.line};
@@ -900,6 +1011,21 @@ Type SemanticAnalyzer::resolveTypeToken(const Token& typeToken) {
     if (!isError(synth)) {
         // `Self&` inside a trait/impl → a reference to the implementing type.
         if (synth.className == "Self") synth.className = currentSelfType_;
+        // `Shared<T>` wraps a CLASS (value object / class), not a primitive/enum/unknown name.
+        if (isShared(synth)) {
+            if (typeKindFromName(synth.className) != TypeKind::Error) {
+                error(typeToken, "'Shared<" + synth.className + ">' is not allowed; Shared<T> wraps "
+                      "a class, not a primitive");
+                return Type{TypeKind::Error};
+            }
+            bool known = classRegistry.count(synth.className) || declaredClassNames_.count(synth.className)
+                      || (!currentSelfType_.empty() && synth.className == currentSelfType_);
+            if (!known) {
+                error(typeToken, "unknown type 'Shared<" + synth.className + ">': '" + synth.className
+                      + "' is not a class");
+                return Type{TypeKind::Error};
+            }
+        }
         return synth;
     }
     // Bare `Self` → the implementing type (object); during a generic body-check where Self is a

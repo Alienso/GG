@@ -267,6 +267,38 @@ private:
     // Verify generic trait-bound obligations recorded during monomorphization:
     // each instantiation's concrete type argument must implement its declared trait(s).
     void checkGenericBounds(const Program& program);
+
+    // ---- Concurrency: Shareable / POD (Phase 1) ----
+    // Whether a class is safe to wrap in a `Shared<T>` handle (shared by reference across threads).
+    // Structural + memoized (cycle-safe). A class is Shareable iff every INSTANCE field is: a POD
+    // scalar (primitive/bool/char/str/enum, any `mut`); a NON-`mut` owning-reference/`Shared` field
+    // whose pointee is Shareable; a NON-`mut` value-object field of a Shareable class; or a `mut`
+    // value-object field of a transitively-POD class. A `mut` reference-like field (the #2 rebind
+    // double-free hazard) or ANY raw `ptr`/borrow field makes it non-Shareable. See
+    // docs/concurrency.md §4. `Sendable` + the thread-boundary/statics confinement are Phase-2/task-17
+    // (they need a thread boundary to gate).
+    bool        isShareableClass(const std::string& className);
+    // Is a slot (type + mutability) safe to SHARE in place across threads — legal as a Shared<T>
+    // field AND as a static a thread may touch (a `mut` reference-like slot is rejected: rebind race).
+    bool        isSharedSafeField(const Type& fieldType, bool isMut);
+    bool        isPODClass(const std::string& className);   // no reference/ptr fields, transitively
+    std::string shareableReason(const std::string& className);  // first offending field, for the error
+    std::unordered_map<std::string, bool> shareableCache_;
+    std::unordered_map<std::string, bool> podCache_;
+    // Sendable — may a value cross into a spawned thread? Enforced on a thread closure's captures at
+    // the `__gg_heap_closure`/`__gg_trampoline` boundary. A value is Sendable if it is copied
+    // (primitive/str/enum/value object of Sendable fields) or atomically shared (`Shared<T>`); a
+    // non-atomic owning `Class&`, a borrow `Class*`, or a raw `ptr` is NOT (would race the refcount /
+    // dangle). See docs/concurrency.md §4.
+    bool isSendableType(const Type& t);
+    bool isSendableClass(const std::string& className);
+    std::unordered_map<std::string, bool> sendableCache_;
+    // Thread closure classes (the concrete `__lambda_N`/callable passed to `__gg_heap_closure`),
+    // recorded during analysis; `checkThreadClosures` (a post-pass, after typeMap is complete) walks
+    // each one's call-graph and rejects any non-Sendable STATIC it transitively touches — the
+    // ambient-globals counterpart to the capture check. See SemanticAnalyzer_Thread.cpp.
+    std::unordered_set<std::string> threadClosureClasses_;
+    void checkThreadClosures(const Program& program);
     // Set up an arrow-form return slot for a function/method body: validate the slot type
     // is a class, inject the slot as a mutable initialized local, and set
     // currentReturnSlotName_. When there is no slot but the return type is an object value,

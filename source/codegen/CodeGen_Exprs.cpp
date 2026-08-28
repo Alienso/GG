@@ -897,21 +897,24 @@ std::string CodeGen::genAssign(const AssignExpr& assign) {
     }
 
     // Reference rebind: retain the new target, release the old, then store.
-    // retain-before-release keeps self-assignment (a = a) safe.
+    // retain-before-release keeps self-assignment (a = a) safe. A Shared<T> handle uses the ATOMIC
+    // retain/release (its count may be touched from multiple threads).
     if (lhsType.kind == TypeKind::Reference) {
         usesRefcount_ = true;
+        bool sh = lhsType.shared;
+        if (sh) sharedUsed_ = true;
         bool plusOne = producesPlusOne(*assign.value);
         Type        rhsType = exprType(*assign.value);
         std::string newVal  = genExpr(*assign.value);
         newVal = emitCast(newVal, rhsType, lhsType);
         if (plusOne) claimTemp(newVal);
-        else         emit("call void @gg_retain(ptr " + newVal + ")");
+        else         emit(std::string("call void @") + retainFn(sh) + "(ptr " + newVal + ")");
 
         std::string oldVal  = emitLoad("ptr", ptrName);
         auto        cgIt    = cgClasses_.find(lhsType.className);
         std::string dtorArg = (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
                             ? ("@" + lhsType.className + "_dtor") : "null";
-        emit("call void @gg_release(ptr " + oldVal + ", ptr " + dtorArg + ")");
+        emit(std::string("call void @") + releaseFn(sh) + "(ptr " + oldVal + ", ptr " + dtorArg + ")");
 
         emitStore("ptr", newVal, ptrName);
         return newVal;
@@ -1032,6 +1035,32 @@ std::string CodeGen::genCall(const CallExpr& call, const Type& resolvedType) {
     }
 
     std::string returnIrType = irTypeName(resolvedType);
+
+    // Concurrency intrinsics (the "function-pointer part" the stdlib Thread can't express itself):
+    //   __gg_heap_closure(closure) -> ptr : heap-copy the closure so it outlives the spawning frame.
+    //   __gg_trampoline(closure)   -> ptr : emit the closure's C-ABI trampoline, return its address.
+    // Both run inside the monomorphized generic factory where the closure's concrete class is known.
+    if (call.callee.lexeme == "__gg_heap_closure" && call.args.size() == 1) {
+        usesRefcount_ = true;
+        Type   ct  = exprType(*call.args[0]);
+        std::string cn = ct.className;
+        std::string src = genExpr(*call.args[0]);   // closure param is a borrow → a ptr to it
+        std::string szPtr = freshTemp();
+        emit("%" + szPtr + " = getelementptr %" + cn + ", ptr null, i32 1");
+        std::string szInt = freshTemp();
+        emit("%" + szInt + " = ptrtoint ptr %" + szPtr + " to i64");
+        std::string heap = freshTemp();
+        emit("%" + heap + " = call ptr @gg_alloc(i64 %" + szInt + ")");
+        emit("store %" + cn + " zeroinitializer, ptr %" + heap);
+        clonesNeeded_.insert(cn);
+        emit("call void @" + cn + "_clone(ptr %" + heap + ", ptr " + src + ")");   // deep-copy (retains captures)
+        return "%" + heap;
+    }
+    if (call.callee.lexeme == "__gg_trampoline" && call.args.size() == 1) {
+        std::string cn = exprType(*call.args[0]).className;   // only the type is needed
+        emitThreadTrampoline(cn);
+        return "@__thread_entry$" + cn;   // a function symbol used as an opaque ptr value
+    }
 
     // Constructor call used as an rvalue (`Class(args)` outside a variable initializer, e.g. as a
     // function argument): materialize a temp value object and return its ADDRESS. Value objects are
@@ -1309,15 +1338,20 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         }
     }
 
-    // ---- Reference (Class&, or nullable Class&?) declaration ----
+    // ---- Reference (Class&, nullable Class&?) or Shared<Class> declaration ----
+    // A Shared<Class> handle (lexeme "shared:Class") is an owning reference like Class&, but
+    // atomically refcounted — same slot/IR (a ptr), differing only in retain/release being atomic.
     {
         std::string lex = typeTok.lexeme;
         bool nullable = !lex.empty() && lex.back() == '?';
-        if (nullable) lex.pop_back();   // `Class&?` → `Class&` (same IR; null is a valid ptr value)
-        if (typeTok.type == TokenType::IDENTIFIER && !lex.empty() && lex.back() == '&') {
+        if (nullable) lex.pop_back();   // `Class&?`/`Shared<Class>?` → drop `?` (null is a valid ptr)
+        bool shared = lex.rfind("shared:", 0) == 0;               // Shared<Class> handle
+        bool owning = !lex.empty() && lex.back() == '&';          // owning Class&
+        if (typeTok.type == TokenType::IDENTIFIER && (owning || shared)) {
         usesRefcount_ = true;
-        std::string className = lex.substr(0, lex.size() - 1);
-        Type        refType   = makeReferenceType(className);
+        if (shared) sharedUsed_ = true;
+        std::string className = shared ? lex.substr(7) : lex.substr(0, lex.size() - 1);
+        Type        refType   = shared ? makeSharedType(className) : makeReferenceType(className);
         if (nullable) refType = makeNullable(refType);
         std::string name      = varDecl.name.lexeme;
         std::string ptrName   = freshAllocaName(name);
@@ -1330,7 +1364,7 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
         // Every reference variable co-owns its target and is released at scope exit
         // (release is null-safe, so an uninitialised slot is harmless).
         if (!dtorScopes_.empty())
-            dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/true });
+            dtorScopes_.back().push_back({ ptrName, className, /*isReference=*/true, /*shared=*/shared });
 
         if (varDecl.initializer) {
             bool plusOne = producesPlusOne(*varDecl.initializer);
@@ -1338,10 +1372,11 @@ std::string CodeGen::genVarDecl(const VarDeclExpr& varDecl) {
             std::string value    = genExpr(*varDecl.initializer);
             value = emitCast(value, initType, refType);   // ref → ref: no-op
 
-            // A +1 producer (`new` / reference-returning call) is taken over directly
-            // (claim its pending release). Copying an existing reference co-owns it → retain.
+            // A +1 producer (`new` / `Shared<..>(..)` / reference-returning call) is taken over
+            // directly (claim its pending release). Copying an existing handle co-owns it → retain
+            // (atomic for a Shared handle).
             if (plusOne) claimTemp(value);
-            else         emit("call void @gg_retain(ptr " + value + ")");
+            else         emit(std::string("call void @") + retainFn(shared) + "(ptr " + value + ")");
 
             emitStore("ptr", value, ptrName);
         } else {
@@ -1949,6 +1984,7 @@ Type CodeGen::resolveReflectType(const Token& tok) {
 
 std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/) {
     usesRefcount_ = true;
+    if (newExpr.shared) sharedUsed_ = true;   // `Shared<Class>(args)` — atomic refcount runtime
     const std::string& className = newExpr.className.lexeme;
 
     // sizeof(%Class) via the null-GEP trick.
@@ -1962,8 +1998,9 @@ std::string CodeGen::genNew(const NewExpr& newExpr, const Type& /*resolvedType*/
     emit("%" + body + " = call ptr @gg_alloc(i64 %" + szInt + ")");
     emit("store %" + className + " zeroinitializer, ptr %" + body);
 
-    // `new` yields a +1 reference; register it for release unless a consumer claims it.
-    pendingTemps_.push_back({ "%" + body, className });
+    // `new` / `Shared<Class>(args)` yields a +1 reference; register it for release unless a consumer
+    // claims it. A shared temp releases atomically.
+    pendingTemps_.push_back({ "%" + body, className, newExpr.shared });
 
     // Copy construction: new Class(x) where x is a value/reference of the same class.
     // Deep-copy x's contents into the fresh allocation via @Class_clone.

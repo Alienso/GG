@@ -502,6 +502,7 @@ void CodeGen::genDestructor(const ClassDeclStmt& classDecl) {
             // A borrow field (`Class*`) is non-owning — never release it (it doesn't own the target).
             if (ft.kind != TypeKind::Reference || ft.borrow) continue;
             usesRefcount_ = true;
+            if (ft.shared) sharedUsed_ = true;   // a Shared<T> field releases atomically
             std::string gep = freshTemp();
             emit("%" + gep + " = getelementptr %" + className + ", ptr %self, i32 0, i32 "
                  + std::to_string(i));
@@ -510,7 +511,7 @@ void CodeGen::genDestructor(const ClassDeclStmt& classDecl) {
             auto fcgIt = cgClasses_.find(fieldClass);
             std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
                                 ? ("@" + fieldClass + "_dtor") : "null";
-            emit("call void @gg_release(ptr " + val + ", ptr " + dtorArg + ")");
+            emit(std::string("call void @") + releaseFn(ft.shared) + "(ptr " + val + ", ptr " + dtorArg + ")");
         }
     }
 
@@ -559,11 +560,12 @@ void CodeGen::genCloneFunction(const std::string& className) {
             emit("call void @" + ft.className + "_clone(ptr %" + dgep + ", ptr %" + sgep + ")");
         } else if (ft.kind == TypeKind::Reference && !ft.borrow) {
             usesRefcount_ = true;
+            if (ft.shared) sharedUsed_ = true;   // a Shared<T> field retains/releases atomically
             // new = load src.field; retain(new)
             std::string sgep = freshTemp();
             emit("%" + sgep + " = getelementptr %" + className + ", ptr %src, i32 0, i32 " + idx);
             std::string nv = emitLoad("ptr", "%" + sgep);
-            emit("call void @gg_retain(ptr " + nv + ")");
+            emit(std::string("call void @") + retainFn(ft.shared) + "(ptr " + nv + ")");
             // old = load dest.field; release(old); store new
             std::string dgep = freshTemp();
             emit("%" + dgep + " = getelementptr %" + className + ", ptr %dest, i32 0, i32 " + idx);
@@ -571,7 +573,7 @@ void CodeGen::genCloneFunction(const std::string& className) {
             auto fcgIt = cgClasses_.find(ft.className);
             std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
                                 ? ("@" + ft.className + "_dtor") : "null";
-            emit("call void @gg_release(ptr " + ov + ", ptr " + dtorArg + ")");
+            emit(std::string("call void @") + releaseFn(ft.shared) + "(ptr " + ov + ", ptr " + dtorArg + ")");
             emit("store ptr " + nv + ", ptr %" + dgep);
         } else {
             // primitive / ptr: dest.field = src.field

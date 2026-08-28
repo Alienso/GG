@@ -47,9 +47,12 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
     module.targetTriple = options.targetTriple;
     targetWindows_      = options.targetTriple.find("windows") != std::string::npos;
     panicUsesStderr_    = false;
+    threadsUsed_        = false;
+    threadTrampolines_.clear();
     dbgNextId_ = 0; dbgFileId_ = -1; dbgCUId_ = -1; currentSubprogram_ = -1;
     currentDbgLoc_.clear(); dbgLineCache_.clear(); dbgTypeCache_.clear();
     usesRefcount_    = false;
+    sharedUsed_      = false;
     clonesNeeded_.clear();
     funcParamTypes.clear();
     funcReturnTypes.clear();
@@ -361,6 +364,9 @@ IRModule CodeGen::generate(const Program& program, const SemanticResult& semanti
 
     // Provide `@gg_stdout`/`@gg_stderr` (platform-specific FILE* accessors) if referenced.
     emitStdioHelpers();
+
+    // Provide the OS-thread runtime (@gg_thread_create/@gg_thread_join) if a Thread was lowered.
+    emitThreadRuntime();
 
     // Register every pre-main initializer in one @llvm.global_ctors array.
     emitGlobalCtors();

@@ -191,8 +191,9 @@ void CodeGen::genReturn(const ReturnStmt& returnStmt) {
         //   borrowed reference (variable / field / param) → retain to produce the +1.
         // A `ref` (borrow) return owns nothing — return the address as-is, no retain.
         if (currentReturnType.kind == TypeKind::Reference && !currentReturnType.borrow) {
+            if (currentReturnType.shared) sharedUsed_ = true;
             if (producesPlusOne(*returnStmt.value)) claimTemp(retVal);
-            else                                    emit("call void @gg_retain(ptr " + retVal + ")");
+            else emit(std::string("call void @") + retainFn(currentReturnType.shared) + "(ptr " + retVal + ")");
         }
     }
 
@@ -220,7 +221,7 @@ void CodeGen::emitDtorsForScope(const std::vector<DtorEntry>& scope) {
             auto cgIt = cgClasses_.find(entry.className);
             std::string dtorArg = (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
                                 ? ("@" + entry.className + "_dtor") : "null";
-            emit("call void @gg_release(ptr " + ref + ", ptr " + dtorArg + ")");
+            emit(std::string("call void @") + releaseFn(entry.shared) + "(ptr " + ref + ", ptr " + dtorArg + ")");
         } else {
             // Value object living in its alloca: run its destructor directly.
             emit("call void @" + entry.className + "_dtor(ptr " + entry.allocaPtr + ")");

@@ -1,0 +1,38 @@
+// End-to-end test: Shared<T> as a class field (co-ownership). A Holder owns a Shared<Counter>;
+// cloning the Holder atomically retains the shared field, destroying it atomically releases it.
+// The live-object counter proves the refcount stays balanced. Expected exit code: 0.
+
+class Counter {
+    mut static i32 live;
+    mut i32 hp;
+    Counter(i32 h) { hp = h; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+    fn get() -> i32 { return hp; }
+}
+
+// A class that OWNS a Shared<Counter> field (co-owns the shared object).
+class Holder {
+    mut Shared<Counter> c;
+    Holder(Shared<Counter> x) { c = x; }        // field store → atomic retain
+    fn peek() -> i32 { return c.get(); }         // auto-deref through the shared field
+}
+
+fn main() -> i32 {
+    {
+        Shared<Counter> s = Shared<Counter>(10);   // live=1, refcount=1
+        {
+            Holder h(s);                            // h.c retains s → refcount=2, live still 1
+            if (h.peek() != 10)     { return 1; }
+            if (Counter::live != 1) { return 2; }
+
+            Holder h2 = h;                          // clone Holder → clone retains the shared field
+            if (Counter::live != 1) { return 3; }   // still ONE Counter (shared), refcount=3
+            if (h2.peek() != 10)    { return 4; }
+        }
+        // h and h2 destroyed → their Shared fields released atomically → refcount 3→2→1
+        if (Counter::live != 1) { return 5; }        // s still owns it
+    }
+    // s destroyed → refcount 1→0 → Counter dtor runs once
+    if (Counter::live != 0) { return 6; }            // balanced: no leak, no double free
+    return 0;
+}

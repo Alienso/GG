@@ -1667,7 +1667,11 @@ semantic/codegen changes — same design as tuples/ternary/lambdas ("parser-only
     (the standard `shared_ptr`/`Arc` pattern). That is a ~10-line change here, but atomic counts
     alone are NOT enough for thread safety — reference **rebind** (`r = e` = retain-new /
     release-old / store) is three non-atomic steps, and shared mutable object state is
-    unsynchronised, so a real threading story needs a memory model on top (deferred).
+    unsynchronised, so a real threading story needs a memory model on top (deferred). **The full
+    concurrency design is written up in `docs/concurrency.md`** — a distinct atomically-refcounted
+    `Shared<T>` type (this atomic variant lives *inside* it; plain `Class&` stays non-atomic),
+    `Sendable`/`Shareable` auto-derived markers, and a stdlib `Thread` class over a minimal spawn
+    intrinsic. Design only, not implemented.
 - **+1 return convention**: functions/methods returning `Class&` return a retained (`+1`)
   reference. Callee retains borrowed references before returning. Unbound temporaries
   (e.g. `make(99);`) are released at the full-expression boundary.
@@ -1783,6 +1787,170 @@ internal `--unsafe-ptr` escape hatch. *(The internal representation still uses t
   a `ref <primitive>` — a borrow needs an addressable lvalue. Passing a primitive lvalue *argument* to
   a `ref <primitive>` param takes its address in `buildArgString` (via `genBorrowSource`).
 - Tests: `tests/ref_tests.cpp` (`[ref]`), `e2e/ref_test.gg`.
+
+### `Shared<T>` — atomic, born-shared ownership handle (concurrency Phase 1)
+The **lifetime axis** of the concurrency design (`docs/concurrency.md`): an owning heap reference like
+`Class&`, but **atomically** refcounted and **born-shared** — the cross-thread ownership handle. This
+is the `Rc` (`Class&`, non-atomic, thread-local) vs `Arc` (`Shared<T>`, atomic) split. The `Thread`
+class + the `Sendable` thread boundary are now implemented too (see the "Threads" invariant below);
+this is the fully-working handle type + its safety gate.
+- **Representation**: a `bool shared` flag on `TypeKind::Reference` (mirrors the `borrow` flag) —
+  owning + atomic. Reuses ALL the reference machinery (member access, method dispatch, **auto-deref**
+  via the reference-receiver path) for free; new logic only at refcount / construction / cast / gate
+  sites. `shared` and `borrow` are mutually exclusive. `makeSharedType`/`isShared` in `Type.h`.
+  Synthesized token `"shared:Class"` (mirrors `"ref:Class"`); `typeName` → `Shared<Class>`;
+  `mangleType` → `Class.shared` (a distinct symbol, never colliding with `Class&`'s `.ref`);
+  `synthTypeToken`/`decodeSynthesizedType` round-trip it.
+- **Parser**: a builtin generic like `ptr<T>`, recognised by the **reserved name `Shared` + `<`**
+  (never a class name) — in `isTypeName`, `consumeTypeCore` (→ `"shared:Elem"`), and the `typeSpanAt`
+  var-decl lookahead. Construction `Shared<Class>(args)` is a `parsePrimary` branch producing a
+  `NewExpr{shared=true}` (reuses the heap-alloc + ctor lowering; build-in-place = born-shared, no raw
+  alias). `parseOneTypeArg` rejects `Shared<…>` as a generic type argument with a clear Phase-1 error.
+- **Semantic**: `resolveTypeToken` decodes it (+ validates `T` is a class — no `Shared<primitive>`).
+  `analyzeNew` returns `makeSharedType` for a shared `NewExpr`. **Born-shared cast rules** (the
+  `from.shared||to.shared` guard in `canImplicitlyCast`, plus `canPassArgument`): `Shared→Shared`
+  (same class) is a retaining copy (Silent); `Shared→Class*` borrow and `Shared→Object` value-clone
+  are allowed (safe view / independent copy, like `Class&→Class*`/`→Object`); `Shared→` **owning
+  `Class&`** is FORBIDDEN (would create a non-atomic co-owner of an atomic object); anything **→
+  `Shared`** is forbidden (born-shared — can't promote an existing alias).
+- **Shareable gate** (`isShareableClass`, memoized structural fixpoint like `needsDtor`): a
+  `Shared<T>` may only wrap a **Shareable** class, enforced at the construction site (`analyzeNew`).
+  A class is Shareable iff every instance field is: a POD scalar (primitive/bool/char/str/enum, **any
+  `mut`** — races to garbage, memory-safe); a **non-`mut`** owning-reference/`Shared` field whose
+  pointee is Shareable (recurse); a **non-`mut`** value-object field of a Shareable class; or a `mut`
+  value-object field of a transitively-**POD** class (`isPODClass`). A **`mut` reference-like field**
+  (the #2 rebind double-free hazard) or ANY raw `ptr`/borrow field makes it non-Shareable →
+  `analyzeNew` errors naming the offending field (`shareableReason`). Caches cleared per `analyze()`.
+- **Codegen**: atomic runtime `gg_retain_shared` (relaxed `atomicrmw add`) / `gg_release_shared`
+  (`release`-ordered `atomicrmw sub` + `acquire` fence before dtor/free — the `Arc` pattern), in
+  `CodeGen_Emit.cpp`, emitted only when `sharedUsed_` (set at every shared lowering). The atomic-vs-
+  non-atomic choice is centralized in `retainFn(bool)/releaseFn(bool)` helpers, threaded through a
+  `shared` bit on `TempRelease`/`DtorEntry` and applied at **every** refcount site: construction/
+  temp-release (`genNew`/`flushTempReleases`), var-init + copy + scope-exit (`genVarDecl`/
+  `emitDtorsForScope`), rebind (`genAssign`), `+1` return (`genReturn`), and **fields** — clone
+  (`genCloneFunction`), dtor (`genDtor`), store/rebind (`genMemberAssign`), default-init
+  (`genFieldInitializer`). A missed atomic would be silent heap corruption under threads, hence the
+  centralization. `hasRefField`/`needsDtor` already count `Shared` fields (they decode to
+  `Reference{shared}`).
+- **Phase-1 limits** (clean errors, never miscompiled): no `Shared<Shared<T>>`, no `Shared<T>` as a
+  generic argument (`Array<Shared<T>>` — needs symbol-safe element mangling), no `Shared` tuple
+  elements; a **mutable** shared reference field needs `Mutex`/`RwLock` (Phase 2, not built).
+  `Shared<T>?` (nullable handle) IS allowed.
+- Tests: `tests/shared_tests.cpp` (`[shared]`, 31 cases — type plumbing, born-shared + borrow/clone
+  cast rules, Shareable gate, construction/rebind/return/field atomic IR), `e2e/shared_test.gg`
+  (construct/auto-deref/copy/rebind/return, balanced refcount via a live counter),
+  `e2e/shared_field_test.gg`, `e2e/shared_field_edge_test.gg` (const/nullable/user-dtor/nested/
+  embedded field compositions). See `docs/concurrency.md`.
+
+### Threads — stdlib `Thread` class + the compiler's "function-pointer part" (concurrency Phase 1)
+The **execution axis** of the concurrency design (`docs/concurrency.md`). `Thread` is an **ordinary
+stdlib class** (`stdlib/thread/Thread.gg`, module `std.thread`); the compiler provides only the parts
+GG source can't express itself — heap-copying/trampolining a closure and the OS-thread runtime. User
+surface: `Thread t = Thread.create(() -> { … }); … t.join();`. The closure is a `Call() -> void`
+callable (a lambda); its captures cross into the spawned thread and so must be **Sendable**.
+- **stdlib `Thread`** (non-generic — no `Thread<F>` needed): one `private mut ptr handle` field, a
+  static factory `fn static create<F: Call() -> void>(F closure) -> Thread t`, and `fn join()`.
+  `create` builds the thread state directly on the return slot (`t.handle = gg_thread_create(ent,
+  clo)`), no nested ctor. Declares `extern gg_thread_create/gg_thread_join` (DEFINED by the compiler,
+  like `gg_stdout`). Being under `stdlibDir`, its raw `ptr` field/params are exempt from the
+  `--unsafe-ptr` gate.
+- **Two compiler intrinsics** (recognised by name in `analyzeCall`/`genCall`; called INSIDE the
+  monomorphized `create$__lambda_N` where the closure's concrete class `F` is known):
+  - `__gg_heap_closure(closure) -> ptr` (`genCall`): `gg_alloc(sizeof %F)` + `store zeroinitializer`
+    + `@F_clone(heap, src)` — a heap copy that **retains** (atomically, for `Shared` captures) the
+    closure's captured fields, so it outlives the spawning frame. Returns the heap ptr.
+  - `__gg_trampoline(closure) -> ptr`: `emitThreadTrampoline(F)` then returns `@__thread_entry$F` as
+    an opaque ptr. Both take exactly one arg and return `ptr` (semantic: `Type{Ptr}`).
+- **Per-closure trampoline** `@__thread_entry$F` (`emitThreadTrampoline`, deduped via
+  `threadTrampolines_`): a C-ABI entry that `call @F_call(ptr %arg)` then `gg_release(%arg,
+  @F_dtor)` (drops the closure's captures — the thread solely owns the heap closure) and returns.
+  Return type is **platform-specific**: Windows `i32` (CreateThread's `DWORD(*)(LPVOID)`), Linux
+  `ptr` (pthread). The closure dtor releases captured `Shared<T>` atomically, so exactly-once
+  destruction holds even as main and the spawned thread race the count.
+- **Runtime** `@gg_thread_create(ptr fn, ptr arg) -> ptr` / `@gg_thread_join(ptr handle)` /
+  `@gg_thread_dispose(ptr handle)` (`emitThreadRuntime`, gated on `threadsUsed_`; emitted after
+  `emitStdioHelpers`): Windows → `CreateThread` + `WaitForSingleObject(h, -1)` + `CloseHandle`
+  (needs **`-lkernel32`**, added to `compile.ps1`); Linux → `pthread_create`/`pthread_join` +
+  a **no-op** dispose. Removes the stdlib `extern gg_thread_create/join/dispose` **declares** (LLVM
+  forbids declare + define), mirroring `emitStdioHelpers`' `gg_stdout` handling. (The block label is
+  `entry:`; the fn param is `%fn`, not `%entry` — a label and an SSA value share one namespace in
+  LLVM, so `%entry` would collide.)
+- **Handle release — `~Thread` + `gg_thread_dispose`** (fixes the OS-handle leak): `Thread` has a
+  destructor `~Thread() { gg_thread_dispose(this.handle); }`, so the handle is released at scope
+  exit. On **Windows** `gg_thread_dispose` = `CloseHandle` (required — `WaitForSingleObject`/`join`
+  does NOT close the handle; closing a still-running thread's handle just drops our reference, so it
+  is correct whether or not the thread was joined first → **no leak** in either the joined or
+  never-joined case). On **POSIX** `pthread_join` already frees the thread, so dispose is a **no-op**
+  and the common create+join path leaks nothing; a POSIX thread that is **never joined** leaks until
+  process exit (Phase-1 limit — a real `detach()` is Phase-2, since detach-after-join is UB and
+  distinguishing the two needs per-`Thread` join-state we don't track yet). **Side effect (correct
+  and intended): `Thread` is now non-copyable** — a raw-`ptr`-owning field + a user destructor trips
+  the raw-pointer copy guard (`rejectUncloneablePtrOwner`), so `Thread a = b;` is a clean compile
+  error (a thread handle must never be duplicated — double-`CloseHandle`). The `Thread t =
+  Thread.create(…)` surface is unaffected (sret direct-construct + return-slot transfer, not a copy);
+  `join()` stays non-`mut`, so `Thread t` (const binding) still works.
+- **Lambda inference for a single-`Call`-bounded generic STATIC method** (`Thread.create(() -> {})`):
+  `parsePostfix`'s method-call path gained the free-function lambda-inference machinery — resolve the
+  receiver class, look up `methodTemplates[Class::method]`, and if it has exactly one `Call`-bounded
+  type param and a lambda-literal argument, infer that param as the lambda's generated class and emit
+  the mangled `MethodCallExpr` (`create$__lambda_N`). Works via `.` or `::`; the signature-exposure
+  half (for typed-param lambdas) is also wired. A no-arg `() -> {}` needs no exposure (already parses
+  as `Call() -> void`).
+- **Sendable boundary check** (`isSendableType`/`isSendableClass`, memoized `sendableCache_`, cleared
+  per `analyze()`): enforced in `analyzeCall`'s `__gg_heap_closure` special-case — every field of the
+  concrete closure class (`__lambda_N`, its captures) must be Sendable, else a clear error naming the
+  field + suggesting `Shared<…>`. Sendable = copied-or-atomic: primitive/bool/char/str/enum (copied),
+  `Shared<T>` (atomic), or a value object all of whose fields are Sendable. NOT Sendable: a non-atomic
+  owning `Class&`, a borrow `Class*`, a raw `ptr`/`ptr<T>`, or a value object embedding any of those
+  (cloning would retain a non-atomic ref shared across threads). An abstract type-param receiver (the
+  un-instantiated template body) has no class in the registry and is skipped — the concrete
+  instantiation is what's checked. **v1 wart**: the error attributes to the stdlib
+  `__gg_heap_closure` line, not the user's capture site (the message names the offending field, so
+  it's actionable).
+- **Static confinement — `checkThreadClosures`** (`SemanticAnalyzer_Thread.cpp`, a post-analysis pass,
+  the ambient-globals counterpart to the capture check): a `static` field touched by name inside a
+  thread body is **not** a capture (not a field of the `__lambda_N` class), so the boundary check
+  above can't see it — this pass closes that hole. It walks each recorded thread-closure class
+  (`threadClosureClasses_`, filled at `__gg_heap_closure`) starting from its `call` method,
+  **transitively** into every function/method it invokes (a body-pointer-deduped worklist), and
+  gates every static it reaches with **`isSharedSafeField`** — the Shared<T>-**field** rule, NOT
+  `isSendableType`. This distinction is load-bearing: `isSendableType` governs by-value **captures**
+  (copied in), but a static is **shared in place**, so the correct rule forbids a **`mut`
+  reference-like** slot — including an atomic **`mut static Shared<T>`** — because it can be REBOUND
+  from two threads (a torn store / double-free; atomicity guards the count, not the slot). Allowed:
+  `mut static i32` (POD scalar), a **non-`mut`** `static Shared<T>`, a non-`mut` `static Class&` to a
+  Shareable class. Rejected: `mut static Class&`, `mut static Shared<T>`, any raw-ptr/borrow static.
+  (`isSharedSafeField(Type,isMut)` is the single source of truth, shared with `isShareableClass`,
+  which was refactored to call it — the Shareable-gate and the static gate can never diverge.)
+  Runs as pass 4 (after `checkGenericBodies`), so the `typeMap` is complete — method receivers
+  resolve precisely (via `typeMap` / a bare class name for the `Class::m` static form); free-function
+  calls scan **all** overloads of the name (sound over-approximation — never misses a reachable
+  static, may over-report). Bare-identifier static reads are gated only when the name is not a
+  declared local/param (shadowing), avoiding that false positive. Errors point at the **actual**
+  offending static reference (even deep in a transitively-called function), a better location than
+  the stdlib-attributed capture error. **Residual v1 gap**: destructors invoked implicitly by a
+  refcount *release* on the thread (e.g. a captured `Shared<T>`'s `T` dtor when the thread drops the
+  last ref) are not in the call AST, so a dtor touching a non-Sendable static isn't traced — exotic,
+  documented, not a common footgun.
+- **v1 limits / deferred**: no `detach()` (a never-joined POSIX thread leaks until process exit — see
+  the handle-release bullet; Windows is leak-free either way); no thread return values, no
+  `Mutex`/`RwLock` (a `mut` `Shared` field is still Phase-2), no thread-local storage. (Static
+  confinement is now enforced — see the bullet above; a plain `mut static` scalar remains touchable,
+  which is memory-safe by design.)
+- Tests: `tests/thread_tests.cpp` (`[thread]`, 22 cases — intrinsic + trampoline + runtime + dispose
+  codegen, static-method lambda inference via `.`/`::`, a **hand-written `impl Call` callable**
+  (non-lambda, via ordinary generic inference into the intrinsics), Sendable accept for primitive/
+  `str`/enum/`Shared`/value-object-of-Sendable-fields/value-object-embedding-`Shared` (the
+  `isSendableClass` recursion, both polarities), Sendable reject for owning-ref/borrow/embedding-
+  owning-ref captures, the error naming the offending capture (not a Sendable sibling), **static
+  confinement** (`[thread][statics]`: Sendable `mut static i32` / `static Shared<T>` allowed;
+  non-Sendable `mut static Class&` rejected directly and transitively via a called free-function
+  **and** a called method; a **`mut static Shared<T>` rebind** rejected (the rebind-race edge — gated
+  by the shareable-field rule, not isSendableType); a non-Sendable static reached **two calls deep
+  through recursion** rejected (worklist depth + cycle-termination); implicit-bare and instance-
+  receiver access to a Sendable static allowed; a local shadowing a static's name not falsely gated),
+  and intrinsic arity), `e2e/thread_test.gg` (a thread mutating a captured `Shared<T>`, joined, with a live-counter
+  proving exactly-once destruction — 30/30 runs deterministic). See `docs/concurrency.md`.
 
 ### Nullable types — `T?` (Kotlin-style)
 `T?` marks a **nullable** type, with two representations by underlying kind:
@@ -2771,6 +2939,45 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1513 test cases / 2822 assertions** (as of implementing **threads** — the stdlib `Thread` class +
+the compiler's "function-pointer part" (concurrency Phase 1, execution axis) — see the "Threads"
+invariant above and `docs/concurrency.md`. `Thread` is ordinary GG (`stdlib/thread/Thread.gg`, module
+`std.thread`); the compiler adds only two intrinsics (`__gg_heap_closure` = heap-copy a closure via
+its clone; `__gg_trampoline` = emit the per-closure C-ABI `@__thread_entry$F` that calls `@F_call`
+then releases the closure), the platform-neutral `@gg_thread_create`/`@gg_thread_join` runtime
+(Windows CreateThread/WaitForSingleObject — needs `-lkernel32`, added to `compile.ps1`; Linux
+pthread), lambda-literal inference for a single-`Call`-bounded generic STATIC method (so
+`Thread.create(() -> {})` infers the closure class the same way a generic free function does), and a
+**Sendable** boundary check (`isSendableType`/`isSendableClass`) enforced on the closure's captures at
+`__gg_heap_closure` — a captured non-atomic owning `Class&`/borrow/`ptr`, or a value object embedding
+one, is rejected naming the field + suggesting `Shared<…>`; primitives/`str`/enum/`Shared<T>`/all-
+Sendable value objects pass. A separate post-pass (`checkThreadClosures`) transitively confines
+STATICS a thread touches to shareable ones too (the ambient-globals hole the capture check can't see;
+gated by the Shared-field rule, so an atomic-but-`mut` `static Shared<T>` rebind is still rejected).
+User surface: `Thread t = Thread.create(() -> { … }); t.join();`. 25
+`tests/thread_tests.cpp` cases (`[thread]`) + `e2e/thread_test.gg` (a thread mutating a captured
+`Shared<T>`, joined, live-counter proving exactly-once destruction, 30/30 runs deterministic). The
+full end-to-end chain (lambda inference → heap-copy → trampoline → CreateThread → join) was proven
+from `build/` before the stdlib surface was wrapped on top. Prior baseline was
+**1488 test cases / 2773 assertions** (as of implementing **`Shared<T>` — the atomic, born-shared
+ownership handle** (concurrency Phase 1) — see the "`Shared<T>`" invariant above and
+`docs/concurrency.md`. This is the compiler-builtin cross-thread lifetime handle: a `bool shared`
+flag on `TypeKind::Reference` (mirrors `borrow`), atomic `gg_retain_shared`/`gg_release_shared`
+runtime, build-in-place construction `Shared<Class>(args)`, born-shared cast rules (retain-copy;
+borrow/value-clone out OK; owning-`Class&` out and anything-in forbidden), the **Shareable gate**
+(`isShareableClass` — a `Shared<T>` may only wrap a class with no mutable reference-like field and no
+raw ptr/borrow field, enforced at construction), and atomic refcounting wired at every site (var-init,
+copy, rebind, `+1` return, scope-exit, temps, and fields: clone/dtor/store/init). 37 new
+`tests/shared_tests.cpp` cases (`[shared]`) + `e2e/shared_test.gg`/`shared_field_test.gg`/
+`shared_field_edge_test.gg` (behavioral, balanced-refcount via a live-object counter). Built
+incrementally across slices, each edge-audited: the type plumbing (tuple-element rejection, nested
+`Shared<Shared<T>>` + generic-arg rejection), the codegen (a real bug fixed: `Shared→Class*` borrow /
+`Shared→Object` clone were wrongly rejected by an over-strict born-shared guard — only `Shared→` owning
+`Class&` is actually unsafe), and the field wiring (const/nullable/user-dtor/nested/embedded
+compositions + implicit-`this` ctor store atomicity). **`Thread`, the `Sendable` marker, and the
+thread-boundary/statics confinement are NOT yet implemented** (task 17) — this is the handle type and
+its Shareable safety gate, single-threaded-correct and atomic-ready. Full `GG_tests` + all 78 e2e
+files frontend-clean, zero regressions. Prior baseline was
 **1451 test cases / 2696 assertions** (as of adding trait-name parameter sugar — `fn f(Trait a)` /
 `fn f(Trait& a)` as sugar for a bounded generic — see the "Trait-name parameter sugar" invariant
 above. 16 `tests/trait_param_sugar_tests.cpp` cases (`[traitparam]`): the desugar records a real

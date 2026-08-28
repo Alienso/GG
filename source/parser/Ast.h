@@ -162,10 +162,12 @@ struct CastExpr {
 // Heap allocation operator: `new ClassName(args)` — allocates a refcounted
 // heap instance and runs its constructor. Evaluates to a reference (Class&).
 struct NewExpr {
-    Token                              keyword;    // the 'new' token
+    Token                              keyword;    // the 'new' token (or the 'Shared' token when shared)
     Token                              className;  // class being allocated
     std::vector<std::unique_ptr<Expr>> args;       // constructor arguments
     std::vector<Token>                 argNames;   // parallel to args; see CallExpr::argNames
+    bool                               shared = false;  // `Shared<Class>(args)` — atomic, born-shared,
+                                                        // yields a Shared<Class> instead of Class&
 };
 
 // `sizeof(T)` — the size in bytes of a type. Evaluates to u64.

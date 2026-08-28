@@ -91,6 +91,7 @@ set(GG_SOURCES
         source/semantic/SemanticAnalyzer_Stmts.cpp
         source/semantic/SemanticAnalyzer_Exprs.cpp
         source/semantic/SemanticAnalyzer_Escape.cpp
+        source/semantic/SemanticAnalyzer_Thread.cpp
         source/codegen/IR.h
         source/codegen/CodeGen.h
         source/codegen/CodeGen.cpp
@@ -179,6 +180,8 @@ add_executable(GG_tests
         tests/address_of_tests.cpp
         tests/generic_overload_tests.cpp
         tests/trait_param_sugar_tests.cpp
+        tests/shared_tests.cpp
+        tests/thread_tests.cpp
 )
 target_compile_options(GG_tests PRIVATE ${GG_WARNING_FLAGS} ${GG_SANITIZER_FLAGS})
 target_link_libraries(GG_tests PRIVATE gg_core Catch2::Catch2WithMain)

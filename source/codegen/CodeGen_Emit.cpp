@@ -244,6 +244,159 @@ void CodeGen::emitRefcountRuntime() {
         "done:\n"
         "  ret void\n"
         "}\n");
+
+    // ---- Atomic refcount runtime for Shared<T> ----
+    // Same intrusive header, but the count is mutated with atomic RMW ops so the count is correct
+    // when a Shared<T> is owned from more than one thread. Retain is a relaxed (monotonic) increment;
+    // release is a `release`-ordered decrement with an `acquire` fence on the count-reaches-0 path
+    // before the dtor/free (the standard Arc pattern — see docs/concurrency.md §7). The BODY is not
+    // synchronised — atomic counts protect the count, not the object's mutable fields (that's the
+    // Mutex/RwLock exclusion axis, Phase 2). Only emitted when a Shared<T> is actually lowered.
+    if (sharedUsed_) {
+        module.runtime.push_back(
+            "define void @gg_retain_shared(ptr %obj) {\n"
+            "entry:\n"
+            "  %isnull = icmp eq ptr %obj, null\n"
+            "  br i1 %isnull, label %done, label %inc\n"
+            "inc:\n"
+            "  %hdr = getelementptr i8, ptr %obj, i64 -8\n"
+            "  %old = atomicrmw add ptr %hdr, i64 1 monotonic\n"
+            "  br label %done\n"
+            "done:\n"
+            "  ret void\n"
+            "}\n");
+
+        module.runtime.push_back(
+            "define void @gg_release_shared(ptr %obj, ptr %dtor) {\n"
+            "entry:\n"
+            "  %isnull = icmp eq ptr %obj, null\n"
+            "  br i1 %isnull, label %done, label %dec\n"
+            "dec:\n"
+            "  %hdr = getelementptr i8, ptr %obj, i64 -8\n"
+            "  %old = atomicrmw sub ptr %hdr, i64 1 release\n"
+            "  %zero = icmp eq i64 %old, 1\n"       // old==1 ⇒ new==0 ⇒ last reference
+            "  br i1 %zero, label %dealloc, label %done\n"
+            "dealloc:\n"
+            "  fence acquire\n"                      // synchronise with other threads' releases
+            "  %hasdtor = icmp ne ptr %dtor, null\n"
+            "  br i1 %hasdtor, label %calldtor, label %freeit\n"
+            "calldtor:\n"
+            "  call void %dtor(ptr %obj)\n"
+            "  br label %freeit\n"
+            "freeit:\n"
+            "  call void @free(ptr %hdr)\n"
+            "  br label %done\n"
+            "done:\n"
+            "  ret void\n"
+            "}\n");
+    }
+}
+
+// ============================================================
+// OS-thread runtime (emitted once, when a Thread is lowered)
+// ============================================================
+//
+// Three platform-neutral helpers the Thread lowering calls:
+//   @gg_thread_create(ptr %entry, ptr %arg) -> ptr    — start a thread running %entry(%arg), return a handle
+//   @gg_thread_join(ptr %handle)                      — block until that thread finishes
+//   @gg_thread_dispose(ptr %handle)                   — release the OS handle (called by `~Thread`)
+// The thread entry is the per-closure trampoline `@__thread_entry$Class` (C ABI). Its signature is
+// platform-specific: Windows CreateThread wants `DWORD (*)(LPVOID)` = i32(ptr); pthread wants
+// `void* (*)(void*)` = ptr(ptr) — the trampoline is emitted to match (see CodeGen_Classes.cpp).
+//
+// Handle lifetime: on Windows a thread HANDLE from CreateThread must be CloseHandle'd exactly once,
+// and WaitForSingleObject (join) does NOT close it — so `gg_thread_dispose` = CloseHandle, run from
+// `~Thread` at scope exit. This is correct whether or not the thread was joined first (closing a
+// running thread's handle just drops our reference; the OS reclaims the thread when it exits). On
+// POSIX, pthread_join itself frees the thread's resources, so the common create+join path already
+// leaks nothing and `gg_thread_dispose` is a no-op; a POSIX thread that is NEVER joined leaks until
+// process exit (a documented Phase-1 limit — a real `detach()` is Phase-2, since detach-after-join
+// is UB and telling them apart needs per-Thread join-state we don't yet track).
+void CodeGen::emitThreadRuntime() {
+    if (!threadsUsed_) return;
+    // Remove the stdlib `extern gg_thread_create/join/dispose` declares — we DEFINE them here, and
+    // LLVM forbids a declare + define of the same symbol (mirrors emitStdioHelpers' gg_stdout).
+    for (auto it = module.declares.begin(); it != module.declares.end(); ) {
+        if (it->find("@gg_thread_create(") != std::string::npos
+            || it->find("@gg_thread_join(") != std::string::npos
+            || it->find("@gg_thread_dispose(") != std::string::npos)
+            it = module.declares.erase(it);
+        else ++it;
+    }
+    if (targetWindows_) {
+        // kernel32: HANDLE CreateThread(NULL,0,start,arg,0,NULL); DWORD WaitForSingleObject(h,ms);
+        //           BOOL CloseHandle(h).
+        module.declares.push_back("declare ptr @CreateThread(ptr, i64, ptr, ptr, i32, ptr)");
+        module.declares.push_back("declare i32 @WaitForSingleObject(ptr, i32)");
+        module.declares.push_back("declare i32 @CloseHandle(ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_thread_create(ptr %fn, ptr %arg) {\n"
+            "entry:\n"
+            "  %h = call ptr @CreateThread(ptr null, i64 0, ptr %fn, ptr %arg, i32 0, ptr null)\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_thread_join(ptr %h) {\n"
+            "entry:\n"
+            "  %w = call i32 @WaitForSingleObject(ptr %h, i32 -1)\n"   // -1 = INFINITE
+            "  ret void\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_thread_dispose(ptr %h) {\n"
+            "entry:\n"
+            "  %c = call i32 @CloseHandle(ptr %h)\n"
+            "  ret void\n"
+            "}\n");
+    } else {
+        // pthread: int pthread_create(pthread_t*, attr, start, arg); int pthread_join(pthread_t, void**).
+        // pthread_t is pointer-sized; we store it in the ptr handle slot (int/ptr round-trip).
+        module.declares.push_back("declare i32 @pthread_create(ptr, ptr, ptr, ptr)");
+        module.declares.push_back("declare i32 @pthread_join(i64, ptr)");
+        module.runtime.push_back(
+            "define ptr @gg_thread_create(ptr %fn, ptr %arg) {\n"
+            "entry:\n"
+            "  %tid = alloca i64\n"
+            "  %rc = call i32 @pthread_create(ptr %tid, ptr null, ptr %fn, ptr %arg)\n"
+            "  %t = load i64, ptr %tid\n"
+            "  %h = inttoptr i64 %t to ptr\n"
+            "  ret ptr %h\n"
+            "}\n");
+        module.runtime.push_back(
+            "define void @gg_thread_join(ptr %h) {\n"
+            "entry:\n"
+            "  %t = ptrtoint ptr %h to i64\n"
+            "  %r = call i32 @pthread_join(i64 %t, ptr null)\n"
+            "  ret void\n"
+            "}\n");
+        // No-op: pthread_join already frees the thread's resources, and pthread_detach after a join
+        // is UB — so a POSIX Thread that is never joined leaks until process exit (Phase-1 limit).
+        module.runtime.push_back(
+            "define void @gg_thread_dispose(ptr %h) {\n"
+            "entry:\n"
+            "  ret void\n"
+            "}\n");
+    }
+}
+
+// The per-closure C-ABI trampoline the OS thread runs: it invokes the closure's `call()` then
+// releases the (heap, sole-owned) closure. Return type matches the platform's thread-entry ABI
+// (Windows `DWORD(*)(LPVOID)` = i32; pthread `void*(*)(void*)` = ptr). Deduped by closure class.
+void CodeGen::emitThreadTrampoline(const std::string& cn) {
+    if (!threadTrampolines_.insert(cn).second) return;   // already emitted for this closure class
+    threadsUsed_ = true;
+    usesRefcount_ = true;
+    auto cgIt = cgClasses_.find(cn);
+    std::string dtorArg = (cgIt != cgClasses_.end() && cgIt->second.needsDtor)
+                        ? ("@" + cn + "_dtor") : "null";
+    std::string retTy  = targetWindows_ ? "i32"       : "ptr";
+    std::string retVal = targetWindows_ ? "ret i32 0" : "ret ptr null";
+    module.runtime.push_back(
+        "define " + retTy + " @__thread_entry$" + cn + "(ptr %arg) {\n"
+        "entry:\n"
+        "  call void @" + cn + "_call(ptr %arg)\n"          // run the closure's Call impl
+        "  call void @gg_release(ptr %arg, ptr " + dtorArg + ")\n"   // free the heap closure (sole owner)
+        "  " + retVal + "\n"
+        "}\n");
 }
 
 // ============================================================
@@ -404,7 +557,7 @@ void CodeGen::flushTempReleases() {
         auto it = cgClasses_.find(t.className);
         std::string dtorArg = (it != cgClasses_.end() && it->second.needsDtor)
                             ? ("@" + t.className + "_dtor") : "null";
-        emit("call void @gg_release(ptr " + t.ptr + ", ptr " + dtorArg + ")");
+        emit(std::string("call void @") + releaseFn(t.shared) + "(ptr " + t.ptr + ", ptr " + dtorArg + ")");
     }
     pendingTemps_.clear();
 }

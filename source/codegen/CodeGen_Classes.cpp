@@ -157,20 +157,22 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
         return newVal;
     }
 
-    // Reference field: co-ownership — retain the new target, release the old.
+    // Reference field: co-ownership — retain the new target, release the old (atomic for Shared<T>).
     if (fieldType.kind == TypeKind::Reference) {
         usesRefcount_ = true;
+        bool sh = fieldType.shared;
+        if (sh) sharedUsed_ = true;
         bool plusOne = producesPlusOne(*ma.value);
         Type        valueType = exprType(*ma.value);
         std::string newVal    = genExpr(*ma.value);
         newVal = emitCast(newVal, valueType, fieldType);
         if (plusOne) claimTemp(newVal);
-        else         emit("call void @gg_retain(ptr " + newVal + ")");
+        else         emit(std::string("call void @") + retainFn(sh) + "(ptr " + newVal + ")");
         std::string oldVal = emitLoad("ptr", gepReg);
         auto fcgIt = cgClasses_.find(fieldType.className);
         std::string dtorArg = (fcgIt != cgClasses_.end() && fcgIt->second.needsDtor)
                             ? ("@" + fieldType.className + "_dtor") : "null";
-        emit("call void @gg_release(ptr " + oldVal + ", ptr " + dtorArg + ")");
+        emit(std::string("call void @") + releaseFn(sh) + "(ptr " + oldVal + ", ptr " + dtorArg + ")");
         emitStore("ptr", newVal, gepReg);
         return newVal;
     }
@@ -226,12 +228,13 @@ void CodeGen::genFieldInitializer(const std::string& className, const std::strin
     // still-null slot would be a safe no-op anyway, but skipping it documents that invariant here.
     if (fieldType.kind == TypeKind::Reference) {
         usesRefcount_ = true;
+        if (fieldType.shared) sharedUsed_ = true;
         bool        plusOne  = producesPlusOne(init);
         Type        valueType = exprType(init);
         std::string newVal    = genExpr(init);
         newVal = emitCast(newVal, valueType, fieldType);
         if (plusOne) claimTemp(newVal);
-        else         emit("call void @gg_retain(ptr " + newVal + ")");
+        else         emit(std::string("call void @") + retainFn(fieldType.shared) + "(ptr " + newVal + ")");
         emitStore("ptr", newVal, gep);
         return;
     }

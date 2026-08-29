@@ -1,0 +1,52 @@
+// End-to-end: the INTERPROCEDURAL borrow-confinement pass must ALLOW safe forwarding of a guarded
+// borrow into a helper function that mutates through it (concurrency Phase 2.5).
+//
+// `.with((mut Counter* p) -> { bump(p); })` forwards the guarded borrow into the free function
+// `bump`, which increments *through* the borrow and never returns or stores it. That is confined —
+// the borrow does not outlive the closure — so the confinement pass (checkSyncConfinement) must NOT
+// reject it. (The rejection cases live in tests/sync_tests.cpp [interproc]; this proves the safe
+// counterpart compiles AND runs correctly end-to-end.)
+//
+// Two threads each forward-and-increment 1000 times under the Mutex → deterministic 2000, and the
+// Shared<Mutex<Counter>> is released exactly once (Counter::live back to 0).
+import std.thread.Thread;
+import std.sync.Mutex;
+
+class Counter {
+    mut static i32 live;
+    mut i32 n;
+    Counter() { n = 0; Counter::live = Counter::live + 1; }
+    ~Counter() { Counter::live = Counter::live - 1; }
+    fn bumpBy(i32 d) mut { n = n + d; }
+    fn get() -> i32 { return n; }
+}
+impl Clone for Counter { fn clone(Counter& src) mut { n = src.n; Counter::live = Counter::live + 1; } }
+class G { mut static i32 total; }
+
+// Safe interprocedural use: the borrow flows in, is mutated through, and never escapes.
+fn bump(mut Counter* p) { p.bumpBy(1); }
+// A two-deep safe chain: forward the borrow again into another mutating helper.
+fn bumpTwice(mut Counter* p) { bump(p); bump(p); }
+
+fn worker(Shared<Mutex<Counter>> c) {
+    mut i32 i = 0;
+    while (i < 500) {
+        c.with((mut Counter* p) -> { bumpTwice(p); });   // +2 per iteration, via a 2-deep helper chain
+        i = i + 1;
+    }
+}
+
+fn main() -> i32 {
+    {
+        Shared<Mutex<Counter>> counter = Shared<Mutex<Counter>>(Counter());
+        Thread t1 = Thread.create(() -> { worker(counter); });
+        Thread t2 = Thread.create(() -> { worker(counter); });
+        t1.join();
+        t2.join();
+        counter.with((mut Counter* p) -> { G::total = p.get(); });
+    }
+
+    // 2 threads * 500 iters * 2 bumps = 2000; live back to 0 ⇒ released exactly once.
+    if (G::total == 2000 && Counter::live == 0) { return 42; }
+    return 1;
+}

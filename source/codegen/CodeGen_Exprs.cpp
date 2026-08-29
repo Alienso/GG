@@ -1210,6 +1210,12 @@ bool CodeGen::emitSlotCall(const Expr& init, const std::string& slotPtr) {
 
     if (std::holds_alternative<MethodCallExpr>(node)) {
         const auto& mc = std::get<MethodCallExpr>(node);
+        // RAII guard acquisition bound directly to a variable: acquire the lock and build the guard
+        // straight into the variable's slot (no temp). The guard's destructor unlocks at scope exit.
+        if (guardCtorCalls_) {
+            auto it = guardCtorCalls_->find(&mc);
+            if (it != guardCtorCalls_->end()) { emitGuardBuild(mc, it->second, slotPtr); return true; }
+        }
         // Built-in `obj.clone()` bound directly to a value variable: deep-copy the receiver straight
         // into the variable's slot (one clone, no intermediate temp).
         if (builtinCloneCalls_) {

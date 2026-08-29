@@ -442,6 +442,39 @@ bool isSyncCellName(const std::string& className) {
     return s == "Mutex" || s == "RwLock";
 }
 
+// RAII lock-guard types (Phase 2.5). `MutexGuard`/`RwWriteGuard` hand out a mutable interior borrow;
+// `RwReadGuard` a read-only one. Recognised by simple name, like the sync cells.
+bool isMutexGuardName(const std::string& className)   { return simpleClassName(className) == "MutexGuard"; }
+bool isRwReadGuardName(const std::string& className)  { return simpleClassName(className) == "RwReadGuard"; }
+bool isRwWriteGuardName(const std::string& className) { return simpleClassName(className) == "RwWriteGuard"; }
+bool isGuardName(const std::string& className) {
+    std::string s = simpleClassName(className);
+    return s == "MutexGuard" || s == "RwReadGuard" || s == "RwWriteGuard";
+}
+// A guard's interior is mutable unless it is a read guard.
+bool isMutableGuardName(const std::string& className) {
+    return isMutexGuardName(className) || isRwWriteGuardName(className);
+}
+// The guarded element type: everything after the first '$' in the monomorphized guard/cell class
+// name (`std.sync.MutexGuard$Counter` → "Counter"). "" if unparameterized.
+std::string guardOrCellElement(const std::string& className) {
+    auto dollar = className.find('$');
+    return dollar == std::string::npos ? std::string{} : className.substr(dollar + 1);
+}
+// The guard class name for a given sync-cell class + accessor kind ("lock"/"rlock"/"wlock"), keeping
+// the cell's module prefix and element: `std.sync.Mutex$Counter` + "lock" → `std.sync.MutexGuard$Counter`.
+std::string guardClassForCell(const std::string& cellClass, const std::string& kind) {
+    auto dollar = cellClass.find('$');
+    if (dollar == std::string::npos) return "";
+    std::string base = cellClass.substr(0, dollar);   // "<mod>.Mutex"
+    std::string elem = cellClass.substr(dollar);      // "$Counter"
+    auto dot = base.rfind('.');
+    std::string prefix = (dot == std::string::npos) ? std::string{} : base.substr(0, dot + 1);
+    std::string guardSimple = (kind == "rlock") ? "RwReadGuard"
+                            : (kind == "wlock") ? "RwWriteGuard" : "MutexGuard";
+    return prefix + guardSimple + elem;
+}
+
 // ============================================================
 // decodeSynthesizedType — parser-synthesized type token → Type
 //

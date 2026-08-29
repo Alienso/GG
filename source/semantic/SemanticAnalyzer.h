@@ -5,6 +5,7 @@
 #ifndef GG_SEMANTICANALYZER_H
 #define GG_SEMANTICANALYZER_H
 
+#include <deque>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -162,6 +163,12 @@ struct SemanticResult {
     // "write" for a RwLock). Codegen lowers it to acquire → closure.call(&interior) → release,
     // instead of an ordinary method call. See docs/concurrency.md Phase 2.
     std::unordered_map<const void*, std::string> syncAccessCalls;
+    // RAII guard construction: MethodCallExpr node (`m.lock()` / `rw.rlock()` / `rw.wlock()`) → kind
+    // ("lock"/"rlock"/"wlock"). Codegen builds the guard in place (acquire + wire handle/interior).
+    std::unordered_map<const void*, std::string> guardCtorCalls;
+    // Auto-deref through a guard: a MemberAccess/MethodCall/MemberAssign node whose receiver is a
+    // guard, so codegen routes access through the guard's `interior` field to the guarded value.
+    std::unordered_set<const void*> guardDeref;
 };
 
 class SemanticAnalyzer {
@@ -224,6 +231,19 @@ private:
     std::unordered_set<const void*> directConstructAssigns_;
     // Scoped sync-cell access nodes → kind ("with"/"read"/"write") (copied to SemanticResult).
     std::unordered_map<const void*, std::string> syncAccessCalls_;
+    // RAII guard construction nodes → kind ("lock"/"rlock"/"wlock") (copied to SemanticResult).
+    std::unordered_map<const void*, std::string> guardCtorCalls_;
+    // Guard auto-deref access nodes (copied to SemanticResult).
+    std::unordered_set<const void*> guardDeref_;
+    // Analyze a guard-obtaining call `m.lock()`/`rw.rlock()`/`rw.wlock()`; returns Object{guardClass}.
+    Type analyzeGuardLock(const MethodCallExpr& mc, const std::string& cellClass, const std::string& kind);
+    // Scoped-local confinement for RAII guards: every guard-ctor site (token + node) and the set of
+    // initializer nodes actually bound to a local var. A guard-ctor NOT bound to a local escapes
+    // (used as an argument / return / bare temp) → error. Non-copyability blocks moving a bound
+    // guard out afterward. Checked in checkGuardConfinement (end of pass 2).
+    std::deque<std::pair<Token, const void*>> guardCtorSites_;
+    std::unordered_set<const void*>           guardCtorBound_;
+    void checkGuardConfinement();
     // Contextual "expected type" for return-type overload disambiguation (set/restored
     // around initializer / rhs / return / field-assign / cast-target sub-analysis).
     std::optional<Type> expectedType_;
@@ -305,6 +325,17 @@ private:
     // ambient-globals counterpart to the capture check. See SemanticAnalyzer_Thread.cpp.
     std::unordered_set<std::string> threadClosureClasses_;
     void checkThreadClosures(const Program& program);
+    // Sync-access closure classes (the concrete `__lambda_N` passed to `.with`/`.read`/`.write`),
+    // recorded in analyzeSyncAccess. `checkSyncConfinement` (a post-pass, after typeMap is complete)
+    // taint-tracks each closure's guarded borrow (its `call` param 0) transitively into every
+    // function/method it calls, erroring if the borrow can outlive the closure (escapes) — the
+    // INTERPROCEDURAL counterpart to the intraprocedural paramEscapes check in analyzeSyncAccess.
+    // See SemanticAnalyzer_Thread.cpp.
+    // (`.with`/`.read`/`.write` method token, concrete closure class). A deque, not a vector,
+    // because the pair holds a `Token` (const members ⇒ deleted copy-assign) — the same
+    // reallocation hazard `ClassDeclStmt::methods` avoids.
+    std::deque<std::pair<Token, std::string>> syncClosures_;
+    void checkSyncConfinement(const Program& program);
     // Set up an arrow-form return slot for a function/method body: validate the slot type
     // is a class, inject the slot as a mutable initialized local, and set
     // currentReturnSlotName_. When there is no slot but the return type is an object value,

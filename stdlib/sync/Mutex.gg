@@ -33,3 +33,22 @@ class Mutex<T> {
         gg_mutex_destroy(handle);
     }
 }
+
+// RAII lock guard for a `Mutex<T>` (concurrency Phase 2.5). Obtained from `m.lock()` (a
+// compiler-recognised call — it acquires the lock and wires the guard's fields, since GG source
+// can't take the address of the cell's private interior). The guard holds the OS handle (to unlock)
+// and a borrow of the interior; its destructor releases the lock at scope exit. Access is by
+// AUTO-DEREF: `g.field` / `g.method()` reach the guarded `T` directly (mutable, like `.with`).
+//
+// The guard owns a raw handle + a user destructor, so it is non-copyable (a lock must never be
+// double-released) and — enforced by the compiler — it is a scoped local that may not escape its
+// function, so the interior borrow can never outlive the lock. There is no user constructor: the
+// only way to make one is `m.lock()`.
+class MutexGuard<T> {
+    private mut ptr handle;    // the OS mutex handle, for unlock in the destructor
+    private mut T* interior;   // borrow of the cell's guarded value (stdlib-exempt from the raw-ptr gate)
+
+    ~MutexGuard() {
+        gg_mutex_unlock(handle);
+    }
+}

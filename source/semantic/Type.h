@@ -255,6 +255,14 @@ bool        parseIntegerLiteral(const std::string& lexeme, unsigned long long& m
 bool        isMutexName(const std::string& className);
 bool        isRwLockName(const std::string& className);
 bool        isSyncCellName(const std::string& className);
+// RAII lock guards (Phase 2.5) — recognised by simple name like the sync cells.
+bool        isMutexGuardName(const std::string& className);
+bool        isRwReadGuardName(const std::string& className);
+bool        isRwWriteGuardName(const std::string& className);
+bool        isGuardName(const std::string& className);
+bool        isMutableGuardName(const std::string& className);
+std::string guardOrCellElement(const std::string& className);
+std::string guardClassForCell(const std::string& cellClass, const std::string& kind);
 // Decodes a parser-synthesized type token: "Class&" → Reference, "ptr<Elem>" → TypedPtr.
 // Returns Type{Error} when `tok` is not such a synthesized token.
 Type        decodeSynthesizedType(const Token& tok);

@@ -1979,16 +1979,35 @@ lowering + confinement. User surface: `m.with(p -> { … })` (Mutex, exclusive, 
   &interior) → release(handle)`, GEPing the cell's `handle`/`value` fields; Windows SRWLOCK needs a
   **mode-matched** release, so read/write have distinct unlock helpers (POSIX maps both to
   `pthread_rwlock_unlock`).
-- **Confinement** (folded into `analyzeSyncAccess`): the guarded borrow must not outlive the lock. The
-  effective guarantee comes from two structural facts — the closure returns **void** (can't return the
-  borrow) and a lambda's captures are **non-`mut` / not borrow-capturable** (can't store the borrow
-  into a capture) — so a `.with` closure has no way to stash `p`. The explicit `paramEscapes` check is
-  kept as a defensive belt-and-braces (it would activate if lambda capture ever gained mutable
-  reference fields) but is effectively unreachable given those facts. **Confirmed v1 hole**
-  (interprocedural, documented): a borrow forwarded into *another* function that stores it into a
-  global/static — `m.with(p -> { stash(p); })` where `stash` does `Reg::held = p` into a
-  `mut static T*` — is NOT caught (the analysis is intraprocedural). Closing it needs the deferred
-  interprocedural borrow-confinement.
+- **Confinement — two layers, INTRA- and INTER-procedural** (the guarded borrow must not outlive the
+  lock):
+  - **Intraprocedural** (folded into `analyzeSyncAccess`): the closure body itself can't leak `p`. The
+    effective guarantee comes from two structural facts — the closure returns **void** (can't return
+    the borrow) and a lambda's captures are **non-`mut` / not borrow-capturable** (can't store the
+    borrow into a capture) — so a `.with` closure has no way to stash `p` in its own body. The explicit
+    `paramEscapes` check is kept as a defensive belt-and-braces (it would activate if lambda capture
+    ever gained mutable reference fields) but is effectively unreachable given those facts.
+  - **Interprocedural** (`checkSyncConfinement`, `SemanticAnalyzer_Thread.cpp`, semantic **pass 5** —
+    after `checkThreadClosures`): closes the escape-through-a-called-function hole. `analyzeSyncAccess`
+    records each concrete closure class in `syncClosures_` (`(.with/.read/.write token, closure class)`
+    — a `std::deque<std::pair<Token,std::string>>`, the Token-container-safety pattern); the pass
+    **taint-tracks** the guarded borrow from the closure's `call` param 0 and follows it transitively
+    into every function/method the closure calls (a demand-driven, memoized escape query built on the
+    same program-index + `typeMap`-based receiver resolution as `checkThreadClosures`). The borrow
+    ESCAPES if the tainted value reaches a `return`/`yield`, a store into a field / array element /
+    reference / static (`obj.f = p`, `a[i] = p`, `*r = p`, `Class::s = p`), or is passed as an
+    argument to (or as the receiver of a method on) a callee whose corresponding parameter (or `this`)
+    escapes there — recursed to a fixpoint. So `m.with(p -> { stash(p); })` where `stash` does
+    `Reg::held = p` is now a clean compile error ("the guarded borrow escapes the lock closure …").
+    **Conservative v1 choices** (sound — over-report, never miss a real escape in the analyzable
+    graph): taint is **monotonic** (a reassigned local stays tainted); **return-flow is dropped** — a
+    helper that `return`s the borrow is treated as escaping even if the closure discards the result (a
+    false positive only for a pass-through getter of the guarded borrow, which a lock guard SHOULD
+    forbid anyway); **unknown/`extern` callees are treated as NON-escaping** (the FFI boundary is
+    already `--unsafe-ptr` territory — passing the borrow to a C function that stashes it is not
+    caught); recursion cycles break optimistically. Verified end-to-end that legitimate 2-deep helper
+    forwarding (`bumpTwice → bump → p.bumpBy(1)`) still compiles and runs
+    (`e2e/mutex_helper_confine_test.gg`).
 - **Runtime** (`emitMutexRuntime`/`emitRwLockRuntime`, declare-presence gated like `emitStdioHelpers`;
   a shared declare-dedup pass in `generate()` removes duplicate OS-intrinsic declares since importing
   one `std.sync` type loads the whole module dir): Windows SRWLOCK (`InitializeSRWLock` +
@@ -2000,21 +2019,89 @@ lowering + confinement. User surface: `m.with(p -> { … })` (Mutex, exclusive, 
   (no fine-grained/per-field locking). **A `.with` cannot nest directly inside a thread closure**
   (nested lambdas are unsupported) — the thread body calls a helper that locks.
 - **Future refinements** (roadmap in `docs/concurrency.md` §9 "Phase 2.5"): interprocedural
-  borrow-confinement (closes the escape-through-a-called-function hole in the Confinement bullet —
-  the only deferred item that's a real safety gap), RAII guard syntax, nested-`.with`-in-a-thread,
-  `try_lock`/reentrant locks, condition variables, per-field locking, and a value-returning scoped
-  access. A different paradigm (channels / actors / move / async) is a notional Phase 3+.
-- Tests: `tests/sync_tests.cpp` (`[mutex]`/`[rwlock]`, 17 cases — gate incl. Mutex-makes-a-non-
+  borrow-confinement (the only real safety gap) and **RAII guard syntax** are both now **DONE** (see
+  the Confinement bullet above and the "RAII lock guards" invariant below). Remaining:
+  nested-`.with`-in-a-thread, `try_lock`/reentrant locks, condition variables, per-field locking, a
+  value-returning scoped access, and closure-parameter inference for the accessors. A different
+  paradigm (channels / actors / move / async) is a notional Phase 3+.
+- Tests: `tests/sync_tests.cpp` (`[mutex]`/`[rwlock]`, 25 cases — gate incl. Mutex-makes-a-non-
   Shareable-T-shareable, `.with`/`.read`/`.write` lowering IR, primitive + class interiors, closure
   validation/confinement rejections (wrong arity, class + primitive element mismatch, read-wants-
   non-`mut` / write-wants-`mut`, non-void return), a non-cell class's own `.with` not intercepted, a
-  nested `.with` rejected, `Mutex<Shared<T>>` rejected, Sendable capture), `e2e/mutex_test.gg` (2 threads × 1000
+  nested `.with` rejected, `Mutex<Shared<T>>` rejected, Sendable capture, **plus 12 `[interproc]` cases**
+  — escape via a called free function (static store), via a function that returns the borrow, two
+  calls deep, via a method that stashes `this`, into a field of an outliving object through a helper,
+  a `.read` escape, **via a NON-FIRST argument** (positional arg→param mapping), **through a local
+  alias** (`var q = c`), and **through terminating recursion** (cycle-safe walk still finds the
+  base-case escape); and three negatives: a helper that only mutates/reads through the borrow, a
+  direct `p.set(x)`, and **a helper returning a value *derived* from the borrow** (`return p.get()`)
+  — none flagged), `e2e/mutex_test.gg` (2 threads × 1000
   `.with` increments of a `Shared<Mutex<Counter>>` → **deterministic 2000** + balanced refcount via a
   live counter, 20/20), `e2e/rwlock_test.gg` (1 writer + 2 readers on a `Shared<RwLock<Data>>`,
-  memory-safe + balanced, 20/20). See `docs/concurrency.md`.
+  memory-safe + balanced, 20/20), `e2e/mutex_helper_confine_test.gg` (safe 2-deep helper forwarding of
+  the guarded borrow compiles + runs → 2000, proving the interprocedural pass doesn't over-report).
+  See `docs/concurrency.md`.
 - **Also this slice**: lambda parameters gained a `mut` flag (`(mut T* p) -> …`) — `Parser::LambdaParam`
   (was a `pair`), threaded to `ParamDecl::isMut`; needed for a mutable guarded borrow. Purely additive
   (a bare/typed lambda param without `mut` is unchanged).
+
+### RAII lock guards — `m.lock()` / `rw.rlock()` / `rw.wlock()` (concurrency Phase 2.5)
+The scope-based alternative to the `.with`/`.read`/`.write` closures: acquire a **guard** value whose
+destructor releases the lock at scope exit, and access the guarded interior by **auto-deref**
+(`g.field` / `g.method()` reach the guarded `T` directly). Same paradigm/runtime as the closures —
+just a different surface. The guards are **ordinary stdlib generic classes** (`stdlib/sync/`,
+`module std.sync`) like the cells; the compiler adds construction lowering, auto-deref, and confinement.
+- **Guard types** (`stdlib/sync/{Mutex,RwLock}.gg`): `class MutexGuard<T> { mut ptr handle; mut T*
+  interior; ~MutexGuard(){ gg_mutex_unlock(handle); } }`, and `RwReadGuard<T>` (read-only `T*
+  interior`, `gg_rwlock_rdunlock`) / `RwWriteGuard<T>` (`mut T* interior`, `gg_rwlock_wrunlock`). No
+  user constructor — the only way to make one is a `.lock()`/`.rlock()`/`.wlock()` call. Struct layout
+  is `{ ptr handle, ptr interior }`. A raw handle + a user dtor ⇒ **non-copyable** for free (the
+  `rejectUncloneablePtrOwner` raw-ptr-owner guard) — a lock must never be double-released.
+- **Recognition + construction** (compiler-lowered, since GG source can't take the address of the
+  cell's private interior): `analyzeMethodCall` recognises `m.lock()` (Mutex), `rw.rlock()`/`rw.wlock()`
+  (RwLock) by receiver-type + method name and dispatches to `analyzeGuardLock`, which returns
+  `Object{guardClass}` and records the node in `SemanticResult::guardCtorCalls`. `guardClassForCell`
+  (`Type.cpp`) maps `<mod>.Mutex$Elem` + kind → `<mod>.MutexGuard$Elem` (etc.), keeping the module
+  prefix + element; the guard class exists because the user writes the type explicitly
+  (`MutexGuard<Counter> g = m.lock();` → the annotation triggers monomorphization). Codegen's
+  `emitGuardBuild` (called from `emitSlotCall`, the var-decl in-place path — mirrors the `.with`
+  lowering) emits `gg_{mutex,rwlock_rd,rwlock_wr}lock(handle)` then stores the cell's `handle` and
+  `&cell.value` into the guard slot's `handle`/`interior` fields — no temp, no clone. (`genMethodCall`
+  has a materialize-temp fallback for a discarded guard, but confinement rejects that shape.)
+- **Auto-deref access** (`SemanticResult::guardDeref` set): `analyzeMemberAccess` /
+  `analyzeMemberAssign` / `analyzeMethodCall` detect a guard receiver, record the node, and **rewrite
+  the receiver type to a class borrow of the element** (`makeBorrowType(guardOrCellElement(...))`),
+  then fall through to the ordinary class-borrow access logic (field read/write, method dispatch,
+  overloads, mut-gating — all reused unchanged). `exprIsMutablePlace` was made **guard-kind-aware**: a
+  guard identifier is a mutable place iff it's a `MutexGuard`/`RwWriteGuard` (not the binding's own
+  `mut`ness). So a **read guard** rejects field writes (a dedicated up-front error naming `.wlock()`)
+  and mut-method calls (via the ordinary mut-gate). Codegen mirrors it: `genMemberAccess` /
+  `genMemberAssign` / `genMethodCall` check `guardDeref_`, load the guard's `interior` field, and use
+  that pointer + the element class as the receiver — so all the existing class-borrow codegen applies.
+- **Confinement — scoped-local-only** (`checkGuardConfinement`, pass 2'): a guard must be **bound to a
+  local variable** — `analyzeVarDecl` marks its initializer node "bound"; any guard-ctor site not
+  bound (used as an argument, a return value, or a discarded temp) is a clean error. Combined with
+  non-copyability (blocks returning/storing/copying a *bound* guard out) this makes the guard a true
+  scoped local, so the interior borrow can never outlive the lock. **v1 residuals** (documented, niche,
+  same class as the closure-form residual): passing a guard **by borrow** into a helper is allowed, and
+  extracting an *interior reference field* and escaping it is not tracked (the same interprocedural
+  interior-borrow analysis `checkSyncConfinement` does for closures could be extended). Non-copyability
+  covers the guard itself.
+- **v1 limitations** (clean errors / inherited, never a miscompile): a **primitive interior**
+  (`Mutex<i32>`) is rejected — the guard would need a primitive-borrow field (`i32*`, always
+  disallowed); `analyzeGuardLock`/`buildClassInfo` give an actionable message steering to the scoped
+  closure form (`.with`/`.read`/`.write`, which handle primitives). **Member compound-assign / postfix
+  through a guard** (`g.n += 1`, `g.n++`) does not parse — but this is a **pre-existing GG-wide parser
+  limitation** (`obj.field += v` / `obj.field++` fail on *any* object, not just guards); write
+  `g.n = g.n + 1`. Reassigning a guard binding is rejected (const binding / non-copyable).
+- Tests: `tests/sync_tests.cpp` (`[guard]`, 12 cases — construction/unlock IR, auto-deref
+  read/write/method, **nested-field + sret-interior-method auto-deref**, **`var`-inferred guard**,
+  non-copyable, argument + discarded-temp confinement rejections, `lock()`-takes-no-args, rlock/wlock
+  recognition + mode-matched unlock IR, read-guard mutation rejected, **primitive-interior rejection**),
+  `e2e/mutex_guard_test.gg` (2 threads × 1000 guard-scoped increments of a `Shared<Mutex<Counter>>` →
+  **deterministic 2000** + balanced refcount, 3/3), `e2e/rwlock_guard_test.gg` (auto-deref through both
+  RwLock guard kinds → 42), `e2e/guard_autoderef_test.gg` (var + nested-field + sret-method edge cases
+  → 42). See `docs/concurrency.md` §9.
 
 ### Nullable types — `T?` (Kotlin-style)
 `T?` marks a **nullable** type, with two representations by underlying kind:
@@ -3003,6 +3090,36 @@ static fields keep external linkage, a no-op until separate compilation exists).
 `methods` deque.
 
 ## Test baseline
+**1554 test cases / 2884 assertions** (as of an edge-case audit of **interprocedural borrow-confinement**
+— +4 `[interproc]` cases: an escape via a **non-first argument** (positional arg→param mapping), through
+a **local alias** (`var q = c`), through **terminating recursion** (cycle-safe walk still finds the
+base-case escape), and a negative for a helper that returns a value **derived** from the borrow
+(`return p.get()`, not the borrow itself — not flagged). All confirmed the pass is both sound and
+precise on these shapes. Prior baseline was
+**1550 test cases / 2879 assertions** (as of implementing **RAII lock guards** — concurrency Phase 2.5,
+item #2. `m.lock()` / `rw.rlock()` / `rw.wlock()` return a scoped guard (a non-copyable value object
+whose destructor unlocks) with **auto-deref** access to the guarded interior (`g.field` / `g.method()`);
+guards are ordinary `std.sync` stdlib generic classes (`MutexGuard<T>`/`RwReadGuard<T>`/`RwWriteGuard<T>`),
+with compiler-lowered construction (`emitGuardBuild`), auto-deref via receiver-type rewrite +
+`guardDeref` redirect through the guard's `interior` field, and **scoped-local confinement**
+(`checkGuardConfinement`: a guard must be bound to a local; non-copyability blocks moving it out). A
+read guard is read-only (mutation → clean error naming `.wlock()`). 12 `tests/sync_tests.cpp` `[guard]`
+cases + `e2e/mutex_guard_test.gg` (2 threads × 1000 guard-scoped increments → deterministic 2000 +
+balanced refcount) + `e2e/rwlock_guard_test.gg`. See the "RAII lock guards" invariant above and
+`docs/concurrency.md` §9. Prior baseline was
+**1538 test cases / 2857 assertions** (as of implementing **interprocedural borrow-confinement** for
+lock accessors — concurrency Phase 2.5, item #1, the only deferred item that was a real safety gap.
+A new semantic **pass 5** (`checkSyncConfinement`, `SemanticAnalyzer_Thread.cpp`) taint-tracks the
+guarded borrow handed to a `.with`/`.read`/`.write` closure and follows it transitively into every
+function/method the closure calls (demand-driven, memoized, cycle-guarded, `typeMap`-based receiver
+resolution — the same skeleton as `checkThreadClosures`), erroring if the borrow can escape (returned,
+stored into a field/element/reference/static, or passed to a callee whose parameter/`this` escapes).
+Closes the documented hole `m.with(p -> { stash(p); })`. Conservative-but-sound v1 (monotonic taint,
+return-flow dropped, extern callees optimistic). Self-contained (a separate confinement-only pass —
+zero blast radius on the intraprocedural `paramEscapes` used by `resolveOverload`). +8 `[interproc]`
+`tests/sync_tests.cpp` cases + `e2e/mutex_helper_confine_test.gg` (safe 2-deep helper forwarding still
+compiles + runs → 2000). See the "`Mutex<T>` / `RwLock<T>`" Confinement bullet above and
+`docs/concurrency.md` §9. Prior baseline was
 **1525 test cases / 2842 assertions** (as of implementing **`Mutex<T>` / `RwLock<T>`** — safe mutable
 shared state, concurrency Phase 2 — see the "`Mutex<T>` / `RwLock<T>`" invariant above and
 `docs/concurrency.md`. Ordinary stdlib generic classes (`stdlib/sync/`, `module std.sync`) recognised
@@ -3083,240 +3200,6 @@ longer auto-invokes a constructor; field default initializers + constructor fiel
 §6 (bare value-object params are sugar for a borrow), §11 (generic-method argument inference), §8
 (private generic functions), §12 (dotted module names, `import a.b.*` wildcards, dotted self-loading
 imports), and §15's stale "not supported" list (tuples/`match`/modules/`str`/variadics all shipped).
-Prior baseline was
-**1435 test cases / 2678 assertions** (as of making `resolveTypeToken` report "unknown type" for a
-bare, unparameterized generic class template name instead of silently degrading to `Error → i32` —
-see the new bullet under the "Generics" invariant above. 4 new `tests/semantic_tests.cpp` cases
-(`[semantic][generics]`): the array-declaration, plain-var-decl, and parameter-type shapes of the bug
-now error, plus a control case confirming a properly instantiated `Vec<i32>` is unaffected. Full
-`GG_tests` suite + a manual sweep of every file under `e2e/`/`samples/` confirmed no regressions —
-7 pre-existing, unrelated e2e failures were found in the sweep (definite-init/field-initialization
-errors, an arg-count mismatch, a use-before-assignment, and a `List.gg` reference-type restriction),
-none mentioning "unknown type," confirmed pre-existing and out of scope. `samples/std_lib.gg`'s own
-stale `Array[5] arrayArray;` line (previously compiling silently wrong, now caught) was removed —
-see the "Generics" invariant. Prior baseline was
-**1431 test cases / 2670 assertions** (as of a follow-up edge-case sweep over the field-init feature
-below, prompted by "double check the tests for missed edge cases." Hand-verified then permanently
-pinned down 8 more `tests/const_tests.cpp` cases (`[fieldinit]`): per-constructor-overload isolation
-(a class with two constructors, only one of which correctly initializes every field, errors on
-exactly that one — and the correct sibling type-checks clean in isolation); a synthesized
-constructor coexisting with a user-written destructor; a generic class's field default staying
-independent per instantiation (two instantiations, no cross-contamination); a field default that
-references the class's own type parameter; and the class's own static field from a default
-initializer — confirmed **asymmetric but intentional**: `Config::DEFAULT` (explicit) works (static
-access resolves via the type name, independent of the `currentClassName`-clearing guard), while bare
-`DEFAULT` fails with "undeclared identifier" — verified this is not a new gap but an exact match for
-`analyzeParamDefaults`' own pre-existing identical limitation (same guard, same asymmetry), so the
-field-initializer feature inherits established behavior rather than introducing a new inconsistency.
-All were already correct before being pinned down — no bugs found, only missing coverage. Prior
-baseline was **1423 test cases / 2658 assertions** (as of adding field default initializers + constructor
-field-initialization enforcement — see the "Field default initializers + constructor
-field-initialization enforcement" invariant above. 16 new `tests/const_tests.cpp` cases
-(`[fieldinit]`) cover both initializer forms, the self-contained-only restriction (field/`this`
-references rejected), the enum exclusion, the synthesized-empty-ctor path (and its interaction with
-the bare-declaration no-magic rule), the missing-field error, all three exemptions (defaulted,
-nullable, ctor-less field class — including the negative case: a field class with a MIXED zero-arg-
-and-parameterized ctor set is NOT exempt), if/else branch-merge, the early-`return;` catch, and the
-direct-construct-not-clone codegen shape plus prologue-before-body ordering. Migration: ~30
-pre-existing tests across 12 files (fixed by adding the missing field assignment/default, not by
-weakening the check — see the invariant above) plus one real stdlib bug fixed
-(`stdlib/utility/HashMap.gg`'s constructor was calling a method on a field before that field's own
-constructor had ever run — see the invariant's "Real-world fix" bullet). Prior baseline was
-**1407 test cases / 2628 assertions** (as of removing the implicit zero-arg-constructor auto-invoke
-on a bare `ClassName name;` declaration — see the "Object (class-value) locals" invariant above.
-A follow-up edge-case sweep (prompted by "double check the tests for missed edge cases") added 3
-more `tests/const_tests.cpp` cases pinning down shapes no existing test covered: a MIXED ctor set
-(a zero-arg overload coexisting with parameterized ones — every existing test used a pure zero-arg
-or pure parameterized set) is still deferred; passing a deferred-init object as a call ARGUMENT
-before assignment errors (every existing test read via a field/method, not an argument); and the
-direct-construct fast path works when a branch picks the zero-arg overload specifically out of a
-mixed set. All three were hand-verified as already correct before being pinned down — no new bug,
-just missing regression coverage. (Also found, en route, a genuinely separate pre-existing bug,
-untouched here at the time: a fixed-size array of a bare non-parameterized generic class, e.g.
-`Array[5] arr;` with no `<T>` — since fixed by teaching `resolveTypeToken` to error on any
-unresolvable identifier; see the "Generics" invariant's "Bare generic template names are rejected as
-an unknown type" bullet below. `samples/std_lib.gg`'s own `Array[5] arrayArray;` line, marked
-`//TODO how does this get initialized?`, was removed as part of that fix — it never did anything real
-in the first place.)
-The prior hybrid auto-invoked a class's zero-arg-callable constructor on a bare declaration to avoid
-disrupting existing code; this was deliberately reverted in favor of a simpler, uniform rule: ANY
-constructor on the class (zero-arg or not) makes a bare declaration deferred-init, full stop — a
-bare declaration never implicitly calls anything. Whether it's safe to use a bare declaration
-immediately must never depend on the invisible detail of the class's constructor shape. An explicit
-`ClassName name();`/`ClassName name{}` is unaffected (an ordinary initializer) and remains the way to
-construct immediately.
-
-This is a real behavioral reversion with a known, bounded migration cost — every bare
-`ClassName x;` for a class that has ANY constructor (not just non-zero-arg ones, as before) must
-become an explicit `ClassName x();`. Fixed across: 6 unit test files with 20 individual call-site
-updates (`escape_tests.cpp`, `generic_method_tests.cpp`, `clone_tests.cpp`, `refcount_tests.cpp`,
-`array_object_tests.cpp`, `ref_tests.cpp`, `variadic_tests.cpp`, `implicit_this_tests.cpp`,
-`var_infer_tests.cpp`, `class_tests.cpp`, `named_args_tests.cpp`, `const_tests.cpp` — the latter also
-had 3 tests specifically validating the now-removed auto-invoke behavior, repurposed to assert the
-new no-magic rule instead), plus `samples/std_lib.gg` and `e2e/definite_init_object_test.gg`/
-`e2e/array_position_ops_test.gg`. A broad re-compile sweep of every file under `e2e/` (not just the
-ones touched by earlier sessions) turned up two more affected sites that had never been re-verified
-against the *earlier* ctor-aware-hybrid work in this same session — `e2e/class_test.gg`'s `Point
-zero;`/`Counter blank;` (both classes have only parameterized constructors, so these were already
-broken under the hybrid, just never caught) — fixed to explicit zero-value constructor calls.
-
-Also fixed along the way, found via the same e2e sweep: `Array<T>::contains(T* value)` compared
-`data[i] == value` — for a class `T` implementing `Eq` with an owning-reference-typed `eq(Self&)`
-parameter (e.g. `String`), passing the borrow parameter `value` as the right-hand operand hit the
-deliberately-forbidden borrow→owning-reference coercion ("no matching 'eq' method"). Flipping the
-comparison to `value == data[i]` fixes it: the right operand (`data[i]`, a genuine object *value*)
-binds to the owning `Self&` parameter via the separately-allowed "value object → reference in
-argument position" rule. This was a latent bug in `contains` since it was added, invisible until a
-class with a real `Eq` impl (`String`) was used as `T` — surfaced by `e2e/array_clone_test.gg`, one
-of two pre-existing stale e2e tests (the other: `e2e/array_object_test.gg`) that predated the
-`push`/`pop` → `pushBack`/`popBack` + positional `push(pos,value)`/`pop(pos)` split and had never
-been updated; both fixed to the current API. A third, previously-undiscovered stale test in the same
-family, `e2e/array_test.gg` (single-arg `push`/no-arg `pop`), was also fixed the same way.
-
-Prior baseline was **1403 test cases / 2618 assertions** (as of implementing `Array<T>`'s remaining unfinished methods
-— `push`/`emplace`/`pop`/`delete`/`contains` — which surfaced two real, unrelated compiler bugs
-along the way, both now fixed:
-1. **`Array<T>::emplaceBack`/`emplace` never compiled for a primitive `T`** (e.g. `Array<i32>`) —
-   the flagship `T(args...)` construct pattern becomes `i32(args...)` after monomorphization, and
-   the parser had no notion of calling a bare primitive-type keyword at all; it was an unconditional
-   hard error. Fixed by adding `PrimitiveType(x)` as cast-call syntax (`≡ x as PrimitiveType`),
-   spread-aware — see the new "Primitive cast-call syntax" invariant above. Purely additive; no
-   prior valid program could have relied on that exact "keyword immediately followed by `(`" shape
-   erroring, since it was the only shape reachable there.
-2. **A far more consequential, PRE-EXISTING definite-initialization gap**, found while chasing a
-   heap-corruption crash in the new `push`/`emplace`/`pop`/`delete` methods against `Array<T>` for a
-   resource-owning `T`: a bare `ClassName name;` (no initializer) was **unconditionally** marked
-   definitely-initialized in `analyzeVarDecl` the instant its struct was zero-initialized —
-   regardless of whether the class had a constructor, so `Array`'s own ctor (which sets up
-   `cap`/`data`) silently never ran, and `cap` stayed `0` forever (`grow()` doubles `0` to `0`).
-   Fixed with a ctor-aware hybrid: auto-invoke a zero-arg-callable constructor at a bare declaration
-   (zero disruption — confirmed by first trying the "always require deferred init" version, which
-   broke 27 pre-existing tests, all of which rely on exactly this "just works" pattern for a
-   trivial zero-arg ctor); genuinely defer (require an explicit assignment before use, exactly like
-   an uninitialized primitive) only when a class has constructor(s) but none is zero-arg-callable.
-   The deferred case's single defining assignment additionally constructs directly into the
-   destination with no temporary/clone (a real efficiency win for a "pick a different constructor
-   per branch" pattern), gated safely against running inside a loop more than once. See the new
-   "Object (class-value) locals" sub-bullet under the const-by-default invariant above for the full
-   mechanism, the two-part `rejectUncloneablePtrOwner` gating this also required, and the specific
-   pre-existing test (`Clone - assigning a raw-ptr class without Clone is a clean error`) whose
-   regression caught an incorrect first draft of that gating.
-Net: +10 test cases in `tests/const_tests.cpp` (`[mut][const]`, the definite-init hybrid across all
-three ctor shapes + the direct-construct codegen shape + the two-part Clone gating), plus
-`e2e/definite_init_object_test.gg` and `e2e/array_position_ops_test.gg` (the new `Array<T>`
-`push`/`emplace`/`pop`/`delete`/`contains` methods against both a primitive and a resource-owning
-element type — previously unreachable at all, since bug #2 corrupted memory before any assertion
-could even run). Prior baseline was
-**1393 test cases / 2604 assertions** (as of adding argument-driven type-argument DEDUCTION for
-generic-method calls — `recv.m(args)` in place of `recv.m<T>(args)` — see the "Generic methods"
-invariant's new sub-bullet above. Extracted the free-function inference's param-list-scan into a
-shared `Parser::inferTypeArgsFromParamList` and added `Parser::inferGenericMethodTypeArgs` +
-a new call-site branch in `parsePostfix` (`Parser_Expr.cpp`) right alongside the existing
-variadic-method-call check. Caught one real bug against my own first draft, via hand-verification
-with a scratch `.gg` program before writing the permanent tests: the call site's methodTemplates
-lookup used the `$`-stripped BASE class name (`"Holder"`, mirroring the cheap `genericMethodKeys`
-check used for the unrelated explicit-call-site heuristic) instead of the receiver's FULL,
-possibly-mangled name (`"Holder$i32"`) — the actual key `captureMethodTemplate` registers under —
-so inference always missed for a method on a generic class, silently falling through to the
-"no method" error instead of ever succeeding. Fixing the lookup key surfaced a second, structural
-finding (not a bug — a real v1 boundary, now pinned down by a dedicated test rather than left as
-prose): inference for a method on a GENERIC owner class can never fire at all in practice, because
-that owner's `methodTemplates` entry doesn't exist until the owner itself is monomorphized, which
-happens strictly after the call site's own parse. So `Array<T>::pushAll`-shaped calls still need
-explicit `<T>`; only methods on plain (non-generic) classes gained the new inference. 6 new
-`tests/generic_method_tests.cpp` cases (`[genericmethod][geninfer]`: instance + static inferred
-calls, dedup against an equivalent explicit call, an un-inferable-literal fallthrough, a named-arg
-fallthrough, and the generic-owner-class limitation) + 1 new `e2e/generic_method_infer_test.gg`.
-Full-suite regression run confirmed zero change to any pre-existing test. Prior baseline was
-**1387 test cases / 2592 assertions** (as of hardening the `MemberAccessExpr` case in
-`Parser::deduceArgTypeToken` added just below — a self-review pass looking for edge cases the
-original fix missed found two real gaps, both now fixed):
-1. **A reference/borrow/nullable-typed FIELD reached the pack-tuple mangling verbatim.** The
-   original fix returned the field's declared type token exactly as stored in `classFieldTypes` —
-   correct for a plain primitive field (`f32 x;`, the reported case) but wrong for a field declared
-   `Class&`/`Class*`/`T?`: the token's lexeme carries the sigil (`"Inner&"`, `"ref:Inner"`, `"i32?"`),
-   and `requestTupleType` mangles a pack element's type by appending its lexeme verbatim (`"$" +
-   e.lexeme`) — `&`/`:`/`?` are not valid unquoted LLVM identifier characters, so e.g. `take(h.item,
-   1)` where `item` is `Inner&` would have silently emitted an unparsable tuple class name
-   (`%Tuple$Inner&$i32`), caught only by clang's parser (GG doesn't self-verify its IR). Fixed by
-   routing the field's type through the SAME `genericArgBaseName` decay an identifier's declared type
-   already gets (strip a trailing `?`/`&` or a `ref:` borrow prefix) before falling through to the
-   shared `base`/`primTokenFor` return path — a reference-typed field and a value-typed field of the
-   same class now both decay to one plain class element, exactly like a reference-typed local already
-   did. Verified via generated IR: `take(h.item, 1)` now correctly emits `%Tuple$Inner$i32 = type {
-   %Inner, i32 }` (not `Tuple$Inner&$i32`).
-2. **`Class::field` (a static field via `::`) was not deducible at all.** `Class::field` parses to
-   the identical `MemberAccessExpr` node as `obj.field` (see the "Static members" invariant) — but the
-   object is an `IdentifierExpr` naming a CLASS, not a variable, so the existing recursive
-   `deduceArgTypeToken(ma->object)` call (which only searches `scopes_`/`classFieldScope_` for a
-   local/param/field binding) always returned `nullopt` for it, making `take(Holder::counter, 2)`
-   silently un-inferable (fell through to the "cannot infer" error). Fixed by special-casing an
-   object that is itself a known class name (`classNames`/`gen_->classNames`, the same check already
-   used for the analogous `Class::method<T>()`/`Class::method(...)` receiver resolution a few lines
-   above in `Parser_Expr.cpp`) before falling back to the recursive-variable-binding case.
-3. Chaining through a reference-typed intermediate field (`h.item.v`, where `item` is `Inner&`) was
-   exercised as a byproduct of fix #1 (the decayed `"Inner"` base name is what makes the recursive
-   `classFieldTypes` lookup for `.v` succeed at all) and confirmed working, not a separate bug.
-
-2 new `tests/variadic_tests.cpp` cases (`[variadic][codegen]`): a reference-typed field passed
-directly into a pack argument (asserts the correctly-decayed `Tuple$Inner$i32`, not a broken
-`Tuple$Inner&$i32`), and a static field accessed via `Class::field` as a pack argument. Net: +2 test
-cases, +4 assertions (2592 vs. 2588). Prior baseline was
-**1385 test cases / 2588 assertions** (as of teaching `Parser::deduceArgTypeToken` to resolve a
-**field access** (`v.x`) as a pack/generic-argument type — found dogfooding `printf`: calling
-`printf("There are {} vectors...", 2, v1.x, v1.y)` (`v1.x`/`v1.y` being plain `f32` fields of a
-`vec2` value) failed with "cannot infer the type of a variadic argument to 'std.io.printf'", even
-though the field's type is perfectly knowable at parse time — `deduceArgTypeToken` simply had no
-case for `MemberAccessExpr` at all (only literals, in-scope identifiers, `Class(...)`/`new Class(...)`,
-and `this`). Fixed by adding a `GenericRegistry::classFieldTypes` map (class/enum name → field name →
-declared type token), populated for **every** class/enum as `Parser::parseMemberList` parses its
-member list — regardless of which class is "current" (unlike the pre-existing `classFieldScope_`,
-which only ever holds the ONE class actively being parsed, for lambda capture, and is cleared on
-every new class). `deduceArgTypeToken` gained a `MemberAccessExpr` case: recursively deduce the
-object's class (reusing the existing identifier/`this`/ctor/`new` cases), then look up the field's
-type in `classFieldTypes` — so `a.b.c` chains work as long as each step is a plain field of an
-already-parsed class. Relies on the same "a file's dependencies are parsed before its own tokens"
-ordering already documented for cross-file generic inference (`std.math.vector.vec2` is parsed
-before `samples/std_lib.gg`'s own call site, so its fields are already registered). Deliberately does
-**not** help `args._0` on a synthesized pack tuple (`identity(args...)`, the pre-existing "cannot
-infer" case for a spread into an inferred generic) — the tuple class isn't synthesized/parsed until
-`runMonomorphization`, well after the call site's own parse, so it has no `classFieldTypes` entry yet
-at deduction time; that limitation is unchanged (see the "Variadic parameters" invariant above). 1
-new `tests/variadic_tests.cpp` case (`[variadic][codegen]`): a field of a value-object local passed
-straight into a pack argument, asserting the correct `Tuple$i32$i32` instantiation. Net: +1 test
-case, +2 assertions (2588 vs. 2586). Prior baseline was
-**1384 test cases / 2586 assertions** (as of fixing `&&`/`||` to genuinely short-circuit — see the
-"Logical `&&`/`||` genuinely short-circuit" invariant above. `genBinary` was eagerly evaluating both
-operands and combining them with a plain `and i1`/`or i1` despite being commented "short-circuit",
-making every `guard && use-guarded-value` idiom unsound (the guarded side still ran, and could still
-trap, even when the guard was false). Caught via a stdlib `printf` format-string scanner
-(`stdlib/io/IO.gg`) that used exactly that idiom for its own bounds guard. Fixed with real branching
-in `CodeGen_Exprs.cpp::genBinary` (mirrors `genElvis`'s result-slot pattern) — no AST/semantic
-change. 2 existing `tests/codegen_tests.cpp` cases were updated (they asserted the OLD eager `and
-i1`/`or i1` shape, which no longer appears) to assert the new branch/label shape instead, and to
-assert a full AND/OR truth table stays correct. 1 new `e2e/short_circuit_test.gg` (behavioral: an
-out-of-bounds array guard that would abort() if the right operand were still evaluated, for both
-`&&` and `||`). Net: 0 new test cases (2 rewritten in place), +8 assertions (2586 vs. 2578). Prior
-baseline was
-**1384 test cases / 2578 assertions** (as of adding Java-style wildcard imports, `import a.b.*;` —
-binds every top-level member (type or free function) that module `a.b` declares, non-recursively
-(a submodule `a.b.c` is a distinct registry key, never pulled in). Implemented entirely in
-`scanModuleDirectives` (`Parser_Modules.cpp`): the existing dotted-segment reader is unchanged, but
-a trailing `DOT STAR` now treats every collected segment as the module path and expands to one
-binding per name found in `moduleTypes`/`moduleFuncs` for that module, reusing the same per-name
-ambiguity-merge logic (`bind` helper) a single-symbol `import a.B;` already used — so a wildcard
-colliding with another import on the same bare name is left unqualified and errors at use exactly
-like today's explicit-import collisions. `scanModuleDirectives` gained two new (default-empty)
-const-ref params (`types`, `funcs`) so it can look up a module's members; all four callers
-(`Parser::parse`, and `ImportResolver`'s `verifyModuleDir`/`qualifyFileTokens`/`scanModules`) were
-updated to pass `moduleTypes`/`moduleFuncs`. No lexer/AST change (`*` already lexes as `STAR`); no
-change needed in `dependencyPaths`/`resolveModuleDir` (directory loading) since they already stop
-their own dotted-chain read at the same `DOT STAR` boundary and resolve the pre-`*` segments to the
-module's directory exactly as a bare `import a.b;` would. See the "Module namespacing" invariant
-above. `samples/std_lib.gg` was updated to use `import std.io.*;` in place of 4 separate
-single-symbol imports, as a real-world smoke test. 3 new `tests/module_tests.cpp` cases
-(`[module]`): a wildcard binding every module member (type + free function), a non-recursion guard
-(a submodule's member is NOT pulled in), and a wildcard-vs-explicit-import ambiguity case.
 
 Runtime leak coverage lives in `e2e/refcount_leak_test.gg`: a live-object counter
 (ctor `inc` / dtor `dec`) proves every heap allocation across ~30 scenarios is released

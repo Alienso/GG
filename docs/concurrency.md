@@ -3,11 +3,14 @@
 **Status:** Phase 1 **IMPLEMENTED** (`Shared<T>` + `Thread` + `Sendable`/`Shareable` + the boundary
 check) and Phase 2 **IMPLEMENTED** (`Mutex<T>` / `RwLock<T>` — guarded mutable sharing via
 compiler-recognised scoped closures `m.with` / `rw.read` / `rw.write`, with the guarded borrow
-confined to the closure). **As-built vs. the §5/Phase-2 sketch:** access is a closure
-(`m.with(p -> {…})`), not a RAII guard, and the sync cells are stdlib generic classes (`std.sync`)
-recognised by simple name, not builtins — see the "`Mutex<T>` / `RwLock<T>`" invariant in CLAUDE.md.
-Still deferred: condition variables, `try_lock`, reentrant locks, fine-grained locking, and the
-interprocedural borrow-confinement that would catch a guarded borrow forwarded into another call.
+confined to the closure) plus Phase 2.5 (interprocedural borrow-confinement + **RAII guards**). **Both
+access forms now ship:** the scoped closure (`m.with(p -> {…})`) and the RAII guard
+(`MutexGuard<T> g = m.lock();`, auto-deref `g.field`, unlock in the guard's destructor). The sync
+cells and guards are stdlib generic classes (`std.sync`) recognised by simple name, not builtins — see
+the "`Mutex<T>` / `RwLock<T>`" and "RAII lock guards" invariants in CLAUDE.md. Interprocedural
+borrow-confinement (catching a guarded borrow forwarded into another call that escapes it) is
+implemented (Phase 2.5 item #1 — `checkSyncConfinement`, §9). Still deferred: condition variables,
+`try_lock`, reentrant locks, and fine-grained locking.
 This note captures the model, the reasoning, and the phased plan. The authoritative
 implementation references are the "`Shared<T>`" / "Threads" / "`Mutex<T>` / `RwLock<T>`" invariants in
 `CLAUDE.md` and the user-facing §15 of `LANGUAGE.md`; where this note's *sketches* differ from what shipped, the shipped
@@ -269,7 +272,7 @@ t.join();                              // block until completion
 | Rebind double-free / reader-vs-rebind UAF on **mutable** shared state | **SHIPPED (Phase 2)** — `Shared<Mutex<T>>` / `Shared<RwLock<T>>` serialise all access |
 | Torn/garbage reads of `mut` **scalar** fields (bare `Shared<T>`, no lock) | **Tolerated** (memory-safe, by design) |
 | Guarded borrow escaping a `.with`/`.read`/`.write` closure **directly** (return / capture) | **Solved** (void return + non-`mut`/uncapturable captures) |
-| Guarded borrow escaping **through a called function** into a global/static | **Phase 2.5 hole** — intraprocedural confinement only; see §9 item #1 |
+| Guarded borrow escaping **through a called function** into a global/static | **SHIPPED (Phase 2.5)** — interprocedural `checkSyncConfinement` taint-tracks the borrow across calls; see §9 item #1 |
 | Logical races (lost updates, deadlock, starvation) | **Not a memory-safety concern**; programmer's responsibility even with locks |
 
 ---
@@ -287,25 +290,48 @@ t.join();                              // block until completion
 ### Phase 2.5 — deferred refinements (build directly on the Phase-2 lock story)
 
 These harden and polish what shipped; same paradigm (lock-based shared memory), same machinery. Not
-a new model. Ordered by value — **#1 is the only one that closes an actual safety gap; the rest are
-ergonomics / features.**
+a new model. Ordered by value — items #1 (interprocedural confinement, the only real safety gap) and
+#2 (RAII guards) are now **DONE**; the rest are ergonomics / features.
 
-1. **Interprocedural borrow-confinement** *(soundness — highest priority)*. Today the "the guarded
-   borrow can't escape the `.with`/`.read`/`.write` closure" check is **intraprocedural**: it relies
-   on the closure returning `void` + captures being non-`mut`/uncapturable, so the closure itself
-   can't stash the borrow — but a borrow **forwarded into a called function** that stores it is not
-   caught. Confirmed hole (compiles today): `m.with(p -> { stash(p); })` where
-   `fn stash(C* q) { Reg::held = q; }` writes into a `mut static C*`; after `.with` unlocks,
-   `Reg::held` dangles into the mutex interior (a UAF/race). Closing it needs following borrows
-   across call boundaries — the same interprocedural escape analysis `docs/escape-analysis.md` also
-   defers. This is shared machinery with item #2. (Impl note: extend the escape summary from
-   per-parameter "returned / stored into a *this*-field" to also propagate through callees; then the
-   `paramEscapes` check in `analyzeSyncAccess` — currently effectively dead — becomes load-bearing.)
-2. **RAII guard syntax** — an alternative to the closure form: `Guard g = m.lock(); g.ref.n += 1;`,
-   unlocking in the guard's destructor (maps onto GG's deterministic scope-exit dtors). More
-   ergonomic than `.with(...)`, but needs the borrow-lifetime analysis "the `T*` from `g` must not
-   outlive `g`" — essentially item #1's interprocedural confinement. The "Option B" we chose against
-   for v1 (see §5 as-built note).
+1. **Interprocedural borrow-confinement** — ✅ **IMPLEMENTED** (`checkSyncConfinement`, semantic
+   pass 5 in `source/semantic/SemanticAnalyzer_Thread.cpp`). Previously the "the guarded borrow can't
+   escape the `.with`/`.read`/`.write` closure" check was **intraprocedural**: it relied on the
+   closure returning `void` + captures being non-`mut`/uncapturable, so the closure itself couldn't
+   stash the borrow — but a borrow **forwarded into a called function** that stored it was not caught
+   (the confirmed hole `m.with(p -> { stash(p); })` where `fn stash(C* q) { Reg::held = q; }` writes
+   into a `mut static C*` → `Reg::held` dangles into the mutex interior after unlock). Now
+   `analyzeSyncAccess` records each concrete closure class (`syncClosures_`) and a dedicated post-pass
+   (after `checkThreadClosures`, when `typeMap` is complete) **taint-tracks** the guarded borrow from
+   the closure's `call` param 0 and follows it transitively into every function/method the closure
+   calls — a demand-driven, memoized, cycle-guarded escape query built on the same program-index +
+   `typeMap`-based receiver resolution as `checkThreadClosures`. The borrow **escapes** if the tainted
+   value reaches a `return`/`yield`, a store into a field / array element / reference / static, or is
+   passed as an argument to (or as the receiver of a method on) a callee whose corresponding
+   parameter (or `this`) escapes there. Built as a **separate confinement-only pass** — zero blast
+   radius on the intraprocedural `paramEscapes` used by `resolveOverload` (that summary stays
+   intraprocedural; generalizing it is still future work, see `docs/escape-analysis.md`).
+   **Conservative v1 (sound — over-report, never miss a real escape in the analyzable graph):** taint
+   is monotonic; **return-flow is dropped** (a helper that returns the borrow is treated as escaping
+   even if the result is discarded — a false positive only for a pass-through getter, which a lock
+   guard should forbid anyway); unknown/`extern` callees are treated as non-escaping (the FFI boundary
+   is already `--unsafe-ptr` territory); recursion cycles break optimistically. Tests: 8 `[interproc]`
+   cases in `tests/sync_tests.cpp` + `e2e/mutex_helper_confine_test.gg` (safe 2-deep helper forwarding
+   still compiles + runs). **This shares its confinement goal with item #2 (RAII guards), which is
+   now also implemented.**
+2. **RAII guard syntax** — ✅ **IMPLEMENTED** (Phase 2.5). The scope-based alternative to the closure
+   form: `MutexGuard<T> g = m.lock();` (Mutex), `RwReadGuard<T> r = rw.rlock();` /
+   `RwWriteGuard<T> w = rw.wlock();` (RwLock). The guard's destructor releases the lock at scope exit;
+   the guarded interior is reached by **auto-deref** (`g.field` / `g.method()` — chosen over the
+   sketch's explicit `g.ref`). The guards are ordinary `std.sync` stdlib generic classes; the compiler
+   supplies construction lowering (acquire + wire the interior borrow), auto-deref (rewrite the guard
+   receiver to a class borrow of the element + redirect codegen through the guard's `interior` field),
+   and **scoped-local confinement** (`checkGuardConfinement`: a guard must be bound to a local, so it
+   cannot be returned/stored/passed as a temp; non-copyability — raw handle + destructor — blocks
+   moving a bound guard out). A read guard is read-only; mutation is a compile error naming `.wlock()`.
+   Residual (v1, niche, same as the closure form): extracting an interior *reference field* and
+   escaping it isn't tracked. Tests: `[guard]` in `tests/sync_tests.cpp`, `e2e/mutex_guard_test.gg`
+   (threaded, deterministic 2000 + balanced refcount), `e2e/rwlock_guard_test.gg`. This was the
+   "Option B" the closure form (Option A) was chosen over for v1 — now both ship.
 3. **Nested `.with` inside a thread closure** — currently blocked (nested lambdas are unsupported), so
    a thread body must call a helper that locks (`Thread.create(() -> { worker(m); })` where `worker`
    does the `.with`). Lifting the nested-lambda restriction (a stack of capture contexts instead of

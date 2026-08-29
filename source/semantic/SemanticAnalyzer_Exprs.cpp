@@ -1789,6 +1789,10 @@ bool SemanticAnalyzer::isConstantExpr(const Expr& expr) {
 }
 
 Type SemanticAnalyzer::analyzeVarDecl(const VarDeclExpr& varDecl) {
+    // A guard-ctor call bound directly to this local is a legal (scoped) use — mark it so
+    // checkGuardConfinement doesn't flag it as an escaping guard. (Harmless for non-guard inits.)
+    if (varDecl.initializer) guardCtorBound_.insert(varDecl.initializer->node.get());
+
     // ---- Inferred `var` local: deduce the type from the initializer ----
     if (varDecl.typeName.type == TokenType::VAR) {
         // Redeclaration in the same scope?
@@ -2248,6 +2252,14 @@ Type SemanticAnalyzer::analyzeMemberAccess(const MemberAccessExpr& memberAccess)
         return makeNullable(t);
     };
 
+    // Auto-deref through a RAII lock guard: `g.field` reads the guarded interior. Rewrite the
+    // receiver to a class borrow of the element (reads are always allowed, even for a read guard)
+    // and record the node so codegen routes through the guard's `interior` field.
+    if (isGuardName(objectType.className)) {
+        guardDeref_.insert(&memberAccess);
+        objectType = makeBorrowType(guardOrCellElement(objectType.className));
+    }
+
     // Generic body-check: a type parameter is opaque — traits declare no fields, so field access
     // on a bounded `T` is an error (unbounded ⇒ permissive/suppressed).
     if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
@@ -2301,6 +2313,11 @@ bool SemanticAnalyzer::exprIsMutablePlace(const Expr& expr) {
         return std::get<CastExpr>(node).isMut;   // `x as mut T` yields a mutable view
     if (std::holds_alternative<IdentifierExpr>(node)) {
         const Symbol* s = symbolTable.lookup(std::get<IdentifierExpr>(node).name.lexeme);
+        // A RAII lock guard is a mutable place iff it grants write access (MutexGuard/RwWriteGuard),
+        // regardless of whether the guard *binding* is `mut` — the interior mutability comes from the
+        // guard kind, not from rebindability. A read guard is a read-only place.
+        if (s && s->type.kind == TypeKind::Object && isGuardName(s->type.className))
+            return isMutableGuardName(s->type.className);
         // Non-variable identifiers (e.g. class names for statics) are not gated here.
         return !s || s->kind != Symbol::Kind::Variable || s->isMutable;
     }
@@ -2359,6 +2376,21 @@ Type SemanticAnalyzer::analyzeMemberAssign(const MemberAssignExpr& memberAssign)
     if (isError(objectType)) {
         analyzeExpr(*memberAssign.value);
         return Type{TypeKind::Error};
+    }
+
+    // Auto-deref through a RAII lock guard: `g.field = v` writes the guarded interior. A read guard
+    // hands out a read-only view, so mutation is rejected up front with a guard-specific message;
+    // a write/mutex guard rewrites to a mutable class borrow and falls through (the field-level
+    // `mut` gate + exprIsMutablePlace, which is guard-kind-aware, then apply as usual).
+    if (isGuardName(objectType.className)) {
+        if (!isMutableGuardName(objectType.className)) {
+            error(memberAssign.field, "cannot mutate the guarded value through a read guard '"
+                  + objectType.className + "'; acquire a write guard with '.wlock()'");
+            analyzeExpr(*memberAssign.value);
+            return Type{TypeKind::Error};
+        }
+        guardDeref_.insert(&memberAssign);
+        objectType = makeBorrowType(guardOrCellElement(objectType.className));
     }
 
     const ClassInfo* cls = lookupObjectClass(objectType, memberAssign.field);
@@ -2548,6 +2580,24 @@ Type SemanticAnalyzer::analyzeMethodCall(const MethodCallExpr& methodCall) {
             return analyzeSyncAccess(methodCall, objectType.className, "write", /*wantMut=*/true);
     }
 
+    // RAII guard acquisition (Phase 2.5): `m.lock()` (Mutex) / `rw.rlock()` / `rw.wlock()` (RwLock)
+    // return a scoped lock guard (a value object whose destructor unlocks). Compiler-recognised —
+    // it acquires the lock and wires the guard's interior borrow, which GG source can't express.
+    if (!methodCall.safe && isMutexName(objectType.className) && methodCall.method.lexeme == "lock")
+        return analyzeGuardLock(methodCall, objectType.className, "lock");
+    if (!methodCall.safe && isRwLockName(objectType.className)) {
+        if (methodCall.method.lexeme == "rlock") return analyzeGuardLock(methodCall, objectType.className, "rlock");
+        if (methodCall.method.lexeme == "wlock") return analyzeGuardLock(methodCall, objectType.className, "wlock");
+    }
+
+    // Auto-deref through a RAII lock guard: `g.method()` calls a method on the guarded interior.
+    // Rewrite the receiver to a class borrow of the element and record the node; a `mut` method on
+    // a read guard is rejected by the mut-gate below (exprIsMutablePlace is guard-kind-aware).
+    if (isGuardName(objectType.className)) {
+        guardDeref_.insert(&methodCall);
+        objectType = makeBorrowType(guardOrCellElement(objectType.className));
+    }
+
     // Generic body-check: a method call on a value of a type parameter resolves against the
     // parameter's bounds (not a concrete class). Unbounded ⇒ permissive (suppressed).
     if (const std::vector<std::string>* bounds = typeParamBoundsOf(objectType)) {
@@ -2697,8 +2747,53 @@ Type SemanticAnalyzer::analyzeSyncAccess(const MethodCallExpr& mc, const std::st
         error(mc.method, "the guarded borrow escapes the '" + kind + "' closure (it is returned or "
               "stored) — a lock guard's borrow is valid only for the duration of the closure");
 
+    // Record the closure class for the INTERPROCEDURAL confinement pass (checkSyncConfinement,
+    // pass 5): the intraprocedural check above only sees the closure's own body; the pass follows
+    // the guarded borrow across the functions/methods the closure calls. The method token anchors
+    // that pass's error message at this call site.
+    syncClosures_.emplace_back(mc.method, closureType.className);
     syncAccessCalls_[&mc] = kind;
     return Type{TypeKind::Void};
+}
+
+// ============================================================
+// RAII lock-guard acquisition — `m.lock()` / `rw.rlock()` / `rw.wlock()` (Phase 2.5)
+// ============================================================
+// Returns a scoped lock guard (`MutexGuard<T>` / `RwReadGuard<T>` / `RwWriteGuard<T>`), a value
+// object whose destructor releases the lock. The guard type must have been instantiated (the user
+// writes the type explicitly, e.g. `MutexGuard<Counter> g = m.lock();`); if it wasn't, that's a
+// clean "unknown type" error at the declaration, not here. Construction is compiler-lowered (codegen
+// acquires the lock and wires the guard's interior borrow). Confinement of the guard to its scope is
+// checked in the interprocedural pass (checkSyncConfinement).
+Type SemanticAnalyzer::analyzeGuardLock(const MethodCallExpr& mc, const std::string& cellClass,
+                                        const std::string& kind) {
+    if (!mc.args.empty()) {
+        error(mc.method, "'" + kind + "' takes no arguments");
+        for (const auto& a : mc.args) analyzeExpr(*a);
+        return Type{TypeKind::Error};
+    }
+    std::string guardClass = guardClassForCell(cellClass, kind);
+    // The guard class must actually exist (was instantiated via the declared type). If not, the
+    // caller's declaration site already errors; here we still return the intended type so the
+    // assignment type-checks against the user's written `MutexGuard<T>` annotation.
+    guardCtorCalls_[&mc] = kind;
+    guardCtorSites_.emplace_back(mc.method, static_cast<const void*>(&mc));
+    Type t{TypeKind::Object};
+    t.className = guardClass;
+    return t;
+}
+
+// A RAII guard must be bound to a local variable — that is what ties its unlock to a scope. A
+// guard-ctor call anywhere else (an argument, a return value, a bare discarded temp, a field/element
+// store) would let the lock be released at the wrong time or the guard escape; reject it. Moving a
+// *bound* guard out afterward is already blocked by non-copyability (raw-handle owner + destructor).
+void SemanticAnalyzer::checkGuardConfinement() {
+    for (const auto& [tok, node] : guardCtorSites_) {
+        if (!guardCtorBound_.count(node))
+            error(tok, "a lock guard must be bound to a local variable (e.g. "
+                  "`MutexGuard<T> g = m.lock();`) — it cannot be used as an argument, a return value, "
+                  "or a discarded temporary, so that the lock is released at a well-defined scope exit");
+    }
 }
 
 // ============================================================

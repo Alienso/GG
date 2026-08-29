@@ -35,3 +35,27 @@ class RwLock<T> {
         gg_rwlock_destroy(handle);
     }
 }
+
+// RAII guards for a `RwLock<T>` (concurrency Phase 2.5), the counterpart to `Mutex`'s `MutexGuard`.
+// Obtained from `rw.rlock()` (shared/read) and `rw.wlock()` (exclusive/write) — compiler-recognised
+// calls that acquire the lock and wire the guard, releasing the matching mode in the destructor.
+// Access is by AUTO-DEREF (`g.field` / `g.method()`): a read guard hands out a READ-ONLY view of the
+// interior (mutation is a compile error — use `.wlock()`), a write guard a mutable one. Both are
+// non-copyable scoped locals that may not escape their function.
+class RwReadGuard<T> {
+    private mut ptr handle;    // the OS rwlock handle, for the shared-mode unlock in the destructor
+    private T* interior;       // read-only borrow of the guarded value
+
+    ~RwReadGuard() {
+        gg_rwlock_rdunlock(handle);
+    }
+}
+
+class RwWriteGuard<T> {
+    private mut ptr handle;    // the OS rwlock handle, for the exclusive-mode unlock in the destructor
+    private mut T* interior;   // mutable borrow of the guarded value
+
+    ~RwWriteGuard() {
+        gg_rwlock_wrunlock(handle);
+    }
+}

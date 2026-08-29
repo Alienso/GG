@@ -136,6 +136,10 @@ private:
     const std::unordered_set<const void*>* directConstructAssigns_ = nullptr;
     // Scoped sync-cell access nodes → kind ("with"/"read"/"write") — lowered to acquire/call/release.
     const std::unordered_map<const void*, std::string>* syncAccessCalls_ = nullptr;
+    // RAII guard construction nodes → kind ("lock"/"rlock"/"wlock") — built in place (acquire + wire).
+    const std::unordered_map<const void*, std::string>* guardCtorCalls_ = nullptr;
+    // Guard auto-deref access nodes — access routes through the guard's `interior` field.
+    const std::unordered_set<const void*>* guardDeref_ = nullptr;
     // Named-argument call/new nodes → per-parameter-slot written-arg permutation.
     const std::unordered_map<const void*, std::vector<int>>* callArgOrder_ = nullptr;
     // Inferred `var` local nodes → synthesized type token; swapped in for the `var` sentinel so
@@ -345,6 +349,9 @@ private:
     // If `init` is a call to a return-slot (sret) function/method, emit it writing the result
     // directly into `slotPtr` (no copy) and return true; otherwise return false (no emission).
     bool emitSlotCall(const Expr& init, const std::string& slotPtr);
+    // RAII guard construction: acquire the lock and wire the guard at `slotPtr` (handle + interior
+    // borrow of the cell's value). `kind` ∈ {"lock","rlock","wlock"}. See guardCtorCalls_.
+    void emitGuardBuild(const MethodCallExpr& mc, const std::string& kind, const std::string& slotPtr);
     // Shared by genVarDecl's object-initializer branch and genAssign's defining-assignment fast
     // path: try to construct `init` directly into `ptrName` (of class `className`) with no
     // temporary + clone. Handles an sret call result (emitSlotCall) and a bare constructor-call

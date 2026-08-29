@@ -91,6 +91,13 @@ std::string CodeGen::genMemberAccess(const MemberAccessExpr& ma, const Type& res
 
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
+    // Auto-deref through a RAII lock guard: redirect the receiver to the guarded interior (load the
+    // guard's `interior` borrow field), then resolve the field on the element class as a borrow.
+    if (guardDeref_ && guardDeref_->count(&ma)) {
+        auto [ig, git] = resolveFieldGEP(objPtr, objType.className, "interior");
+        objPtr  = emitLoad("ptr", ig);
+        objType = makeBorrowType(guardOrCellElement(objType.className));
+    }
     // `str` view: extract `.data` (field 0, ptr) or `.len` (field 1, i64) from the { ptr, i64 } value.
     if (objType.kind == TypeKind::Str) {
         int idx = (ma.field.lexeme == "len") ? 1 : 0;
@@ -131,6 +138,13 @@ std::string CodeGen::genMemberAssign(const MemberAssignExpr& ma) {
 
     std::string objPtr = genExpr(*ma.object);
     Type objType = exprType(*ma.object);
+    // Auto-deref through a RAII lock guard (write/mutex guard only — read guards are rejected in
+    // semantics): redirect the write to the guarded interior.
+    if (guardDeref_ && guardDeref_->count(&ma)) {
+        auto [ig, git] = resolveFieldGEP(objPtr, objType.className, "interior");
+        objPtr  = emitLoad("ptr", ig);
+        objType = makeBorrowType(guardOrCellElement(objType.className));
+    }
     if (objType.kind != TypeKind::Object && objType.kind != TypeKind::Reference
         && objType.kind != TypeKind::Enum) return "0";
     // Static field write through an instance: obj.staticField = value.
@@ -285,6 +299,28 @@ std::string CodeGen::genTraitMethodCall(const void* node, const std::string& cla
     return "%" + t;
 }
 
+// RAII guard construction (Phase 2.5): acquire the lock on the cell (`mc.object`), then wire the
+// guard at `slotPtr` — its `handle` field = the cell's OS handle (for the dtor's unlock) and its
+// `interior` field = a borrow of &cell.value. The guard is a plain value object with a user
+// destructor that releases the matching lock mode at scope exit.
+void CodeGen::emitGuardBuild(const MethodCallExpr& mc, const std::string& kind,
+                             const std::string& slotPtr) {
+    std::string cellClass = exprType(*mc.object).className;
+    std::string recv      = genExpr(*mc.object);                 // ptr to the cell (Shared auto-derefs)
+    auto [handleGep, ht]  = resolveFieldGEP(recv, cellClass, "handle");
+    std::string handle    = emitLoad("ptr", handleGep);          // the OS lock handle
+    auto [valueGep, vt]   = resolveFieldGEP(recv, cellClass, "value");   // &interior : [mut] T*
+    std::string lockFn = (kind == "rlock") ? "gg_rwlock_rdlock"
+                       : (kind == "wlock") ? "gg_rwlock_wrlock" : "gg_mutex_lock";
+    emit("call void @" + lockFn + "(ptr " + handle + ")");
+
+    std::string guardClass = guardClassForCell(cellClass, kind);
+    auto [gHandleGep, ght] = resolveFieldGEP(slotPtr, guardClass, "handle");
+    emitStore("ptr", handle, gHandleGep);
+    auto [gInteriorGep, git] = resolveFieldGEP(slotPtr, guardClass, "interior");
+    emitStore("ptr", valueGep, gInteriorGep);
+}
+
 std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolvedType) {
     // Scoped sync-cell access `cell.with/read/write(closure)` (Phase 2): acquire the lock, invoke the
     // closure with a borrow of the guarded interior, then release. Lowered here (not an ordinary
@@ -312,6 +348,20 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
             emit("call void @" + closureClass + "_call(ptr " + closure + ", ptr " + valueGep + ")");
             emit("call void @" + unlockFn + "(ptr " + handle + ")");
             return "";
+        }
+    }
+
+    // RAII guard acquisition used as a bare expression / discarded temp (not a var initializer —
+    // that goes through emitSlotCall). Materialize a temp guard, build it, return its address; the
+    // temp's destructor unlocks at the full-expression boundary (an effectively empty critical
+    // section). The common `Guard g = m.lock();` form never reaches here.
+    if (guardCtorCalls_) {
+        auto it = guardCtorCalls_->find(&mc);
+        if (it != guardCtorCalls_->end()) {
+            std::string guardClass = guardClassForCell(exprType(*mc.object).className, it->second);
+            std::string slot = materializeSlotTemp(guardClass);   // dtor-scoped
+            emitGuardBuild(mc, it->second, slot);
+            return slot;
         }
     }
 
@@ -378,6 +428,34 @@ std::string CodeGen::genMethodCall(const MethodCallExpr& mc, const Type& resolve
         if (underlying.kind == TypeKind::Reference && !underlying.borrow)
             pendingTemps_.push_back({ res, underlying.className });
         return res;
+    }
+
+    // Auto-deref through a RAII lock guard: `g.method(args)` calls a method on the guarded interior.
+    // Redirect the receiver to the interior borrow and dispatch to the element class's method.
+    if (guardDeref_ && guardDeref_->count(&mc)) {
+        std::string guardClass = exprType(*mc.object).className;
+        std::string gaddr = genExpr(*mc.object);
+        auto [ig, git] = resolveFieldGEP(gaddr, guardClass, "interior");
+        std::string recv = emitLoad("ptr", ig);
+        std::string elem = guardOrCellElement(guardClass);
+        std::string mName = calleeName(&mc, elem + "_" + mc.method.lexeme);
+        // An object-value (sret) return materializes a temp; everything else is an ordinary call.
+        if (resolvedType.kind == TypeKind::Object && slotReturningFns_.count(mName)) {
+            std::string tmp = materializeSlotTemp(resolvedType.className);
+            emitSretCall(mName, mc.args, tmp, recv);
+            return tmp;
+        }
+        auto funcIt = funcParamTypes.find(mName);
+        const std::vector<Type>* declaredParams = funcIt != funcParamTypes.end() ? &funcIt->second : nullptr;
+        std::string argStr   = buildArgString(mc.args, declaredParams, defaultsFor(mName), orderFor(&mc));
+        std::string fullArgs = "ptr " + recv + (argStr.empty() ? "" : ", " + argStr);
+        std::string retIr    = irTypeName(resolvedType);
+        if (retIr == "void") { emit("call void @" + mName + "(" + fullArgs + ")"); return ""; }
+        std::string t = freshTemp();
+        emit("%" + t + " = call " + retIr + " @" + mName + "(" + fullArgs + ")");
+        if (resolvedType.kind == TypeKind::Reference && !resolvedType.borrow)
+            pendingTemps_.push_back({ "%" + t, resolvedType.className });
+        return "%" + t;
     }
 
     std::string returnIrType = irTypeName(resolvedType);

@@ -100,6 +100,7 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     podCache_.clear();
     sendableCache_.clear();
     threadClosureClasses_.clear();
+    syncClosures_.clear();
     typeAnnotations.clear();
     currentSelfType_ = "";
     currentReturnSlotName_ = "";
@@ -108,6 +109,10 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     inferredVarType_.clear();
     directConstructAssigns_.clear();
     syncAccessCalls_.clear();
+    guardCtorCalls_.clear();
+    guardDeref_.clear();
+    guardCtorSites_.clear();
+    guardCtorBound_.clear();
     expectedType_ = std::nullopt;
     allowRawPtr_      = options.allowRawPtr;
     stdlibDir_        = options.stdlibDir;
@@ -125,8 +130,11 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
     for (const Stmt& stmt : program.declarations)
         analyzeStmt(stmt);      // pass 2: full analysis
 
+    checkGuardConfinement();    // pass 2': a RAII lock guard must be bound to a local (can't escape)
+
     checkGenericBodies(program);  // pass 3: check bounded generic bodies against their bounds
     checkThreadClosures(program); // pass 4: reject non-Sendable STATICS reached from a thread body
+    checkSyncConfinement(program);// pass 5: reject a guarded lock borrow that escapes its closure (interproc.)
 
     symbolTable.exitScope();
 
@@ -141,7 +149,8 @@ SemanticResult SemanticAnalyzer::analyze(const Program& program,
                           std::move(callableCalls_), std::move(braceInitClass_),
                           std::move(callArgOrder_), std::move(inferredVarType_),
                           std::move(builtinCloneCalls_), std::move(directConstructAssigns_),
-                          std::move(syncAccessCalls_) };
+                          std::move(syncAccessCalls_), std::move(guardCtorCalls_),
+                          std::move(guardDeref_) };
 }
 
 // ============================================================
@@ -214,8 +223,15 @@ ClassInfo SemanticAnalyzer::buildClassInfo(const std::string& ownerName,
         if (fieldType.kind == TypeKind::Reference && fieldType.borrow) {
             const bool classBorrow = !fieldType.className.empty();
             if (!classBorrow) {
-                error(fd.name, "a field cannot be a primitive borrow ('" + typeName(fieldType)
-                      + "'); store the value directly (or a raw 'ptr<T>' under --unsafe-ptr)");
+                // A RAII guard stores the interior as a `T*` field, so a primitive interior would
+                // need a (disallowed) primitive-borrow field — give the actionable guard message.
+                if (isGuardName(ownerName))
+                    error(fd.name, "a RAII lock guard supports only a CLASS interior; for a primitive "
+                          "'" + typeName(borrowElementType(fieldType)) + "' use the scoped closure form "
+                          "(.with / .read / .write) instead of .lock() / .rlock() / .wlock()");
+                else
+                    error(fd.name, "a field cannot be a primitive borrow ('" + typeName(fieldType)
+                          + "'); store the value directly (or a raw 'ptr<T>' under --unsafe-ptr)");
                 fieldType = Type{TypeKind::Error};
             } else if (!rawPtrAllowedHere()) {
                 error(fd.name, "a field cannot be a borrow ('" + fieldType.className

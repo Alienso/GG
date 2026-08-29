@@ -23,6 +23,11 @@ static const char* MUTEX_PRELUDE = R"(
         Mutex(T v) { handle = gg_mutex_create(); value = v; }
         ~Mutex() { gg_mutex_destroy(handle); }
     }
+    class MutexGuard<T> {
+        private mut ptr handle;
+        private mut T* interior;
+        ~MutexGuard() { gg_mutex_unlock(handle); }
+    }
 )";
 
 // ------------------------------------------------------------
@@ -151,6 +156,16 @@ static const char* RWLOCK_PRELUDE = R"(
         RwLock(T v) { handle = gg_rwlock_create(); value = v; }
         ~RwLock() { gg_rwlock_destroy(handle); }
     }
+    class RwReadGuard<T> {
+        private mut ptr handle;
+        private T* interior;
+        ~RwReadGuard() { gg_rwlock_rdunlock(handle); }
+    }
+    class RwWriteGuard<T> {
+        private mut ptr handle;
+        private mut T* interior;
+        ~RwWriteGuard() { gg_rwlock_wrunlock(handle); }
+    }
 )";
 
 TEST_CASE("RwLock - Shared<RwLock<T>> is Shareable", "[rwlock][shared]") {
@@ -248,6 +263,377 @@ TEST_CASE("Mutex - a nested .with (nested lambda) is rejected", "[mutex][confine
         }
     )");
     REQUIRE(cap.str().find("nested lambdas") != std::string::npos);
+}
+
+// ------------------------------------------------------------
+// Interprocedural borrow-confinement (checkSyncConfinement, Phase 2.5).
+// The guarded borrow must not escape THROUGH a called function, not just the closure body itself.
+// ------------------------------------------------------------
+
+TEST_CASE("Mutex - .with rejects the borrow escaping via a called free function (store to static)", "[mutex][confine][interproc]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Reg { mut static Counter* held; }
+        fn stash(Counter* p) { Reg::held = p; }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { stash(c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("escapes the lock closure") != std::string::npos);
+}
+
+TEST_CASE("Mutex - .with rejects the borrow escaping via a called function that returns it", "[mutex][confine][interproc]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn ident(Counter* p) -> Counter* { return p; }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { ident(c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with rejects a borrow escape two calls deep (transitive)", "[mutex][confine][interproc]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Reg { mut static Counter* held; }
+        fn inner(Counter* q) { Reg::held = q; }
+        fn outer(Counter* p) { inner(p); }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { outer(c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with rejects the borrow escaping via a method that stashes `this`", "[mutex][confine][interproc]") {
+    // A method called ON the guarded borrow whose `this` escapes (stored into a static) is caught
+    // via the receiver-taint path.
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Sink { mut static Counter* held; }
+        class Counter { mut i32 n; Counter() { n = 0; } fn leak() { Sink::held = this; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { c.leak(); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with rejects the borrow stored into a field of an outliving object (via helper)", "[mutex][confine][interproc]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Box { mut Counter* slot; Box() { } fn put(Counter* p) mut { slot = p; } }
+        fn stashInto(Box* b, Counter* p) { b.put(p); }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            Box b();
+            m.with((mut Counter* c) -> { stashInto(b, c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with accepts a helper that only reads/mutates through the borrow (no escape)", "[mutex][confine][interproc]") {
+    // The borrow flows into a helper that uses it (calls a method, passes it to a pure reader) but
+    // never returns or stores it — this must NOT be flagged.
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } fn set(i32 x) mut { n = x; } fn get() -> i32 { return n; } }
+        fn readOnly(Counter* p) -> i32 { return p.get(); }
+        fn bumpIt(mut Counter* p) { p.set(p.get() + 1); }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { bumpIt(c); });
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with accepts a direct method call on the borrow (no escape)", "[mutex][confine][interproc]") {
+    // The common, safe case: the closure mutates the guarded value in place. Regression guard against
+    // the interprocedural pass over-reporting on an ordinary `p.set(x)`.
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } fn set(i32 x) mut { n = x; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            mut i32 i = 5;
+            m.with((mut Counter* c) -> { c.set(i); });
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("RwLock - .read rejects the borrow escaping via a called function", "[rwlock][confine][interproc]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(RWLOCK_PRELUDE) + R"(
+        class Data { mut i32 v; Data() { v = 0; } }
+        class Reg { mut static Data* held; }
+        fn stash(Data* p) { Reg::held = p; }
+        fn main() -> i32 {
+            RwLock<Data> d = RwLock<Data>(Data());
+            d.read((Data* p) -> { stash(p); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with rejects an escape where the borrow is a NON-FIRST argument", "[mutex][confine][interproc]") {
+    // The arg→param mapping must be positional (not always slot 0): the borrow is arg 1 here.
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Reg { mut static Counter* held; }
+        fn f(i32 x, Counter* p) { Reg::held = p; }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { f(1, c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("escapes the lock closure") != std::string::npos);
+}
+
+TEST_CASE("Mutex - .with rejects an escape through a local alias of the borrow", "[mutex][confine][interproc]") {
+    // Taint must flow through `var q = c;` (a local rebind), not only the direct parameter.
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Reg { mut static Counter* held; }
+        fn stash(Counter* p) { Reg::held = p; }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { var q = c; stash(q); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with rejects an escape reached through terminating recursion", "[mutex][confine][interproc]") {
+    // The transitive walk must terminate on a cycle yet still find the base-case escape.
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        class Reg { mut static Counter* held; }
+        fn rec(i32 k, Counter* p) { if (k == 0) { Reg::held = p; } else { rec(k - 1, p); } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { rec(3, c); });
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+}
+
+TEST_CASE("Mutex - .with accepts a helper that returns a value DERIVED from the borrow (no escape)", "[mutex][confine][interproc]") {
+    // Returning `p.get()` (an i32) is not returning the borrow — must not be flagged.
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } fn get() -> i32 { return n; } }
+        fn readN(Counter* p) -> i32 { return p.get(); }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.with((mut Counter* c) -> { i32 x = readN(c); });
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+// ------------------------------------------------------------
+// RAII lock guards (Phase 2.5): `m.lock()` / `rw.rlock()` / `rw.wlock()` + auto-deref access.
+// ------------------------------------------------------------
+
+TEST_CASE("Guard - m.lock() acquires the lock and wires the guard; the guard dtor unlocks", "[guard][codegen]") {
+    std::string ir = codegenString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            { MutexGuard<Counter> g = m.lock(); }
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("call void @gg_mutex_lock(") != std::string::npos);
+    REQUIRE(ir.find("call void @gg_mutex_unlock(") != std::string::npos);   // in the guard's dtor
+}
+
+TEST_CASE("Guard - auto-deref field write + method call through a MutexGuard", "[guard]") {
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } fn bump() mut { n = n + 1; } fn get() -> i32 { return n; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            { MutexGuard<Counter> g = m.lock(); g.n = 10; g.bump(); i32 x = g.get(); }
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Guard - a MutexGuard is non-copyable (owns the lock handle)", "[guard]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            MutexGuard<Counter> a = m.lock();
+            MutexGuard<Counter> b = a;   // copy → would double-unlock
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("owns a raw pointer") != std::string::npos);
+}
+
+TEST_CASE("Guard - a lock guard used as an argument is rejected (must be a scoped local)", "[guard][confine]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn sink(MutexGuard<Counter> g) { }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            sink(m.lock());
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("must be bound to a local") != std::string::npos);
+}
+
+TEST_CASE("Guard - a discarded lock guard temp is rejected", "[guard][confine]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            m.lock();
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("must be bound to a local") != std::string::npos);
+}
+
+TEST_CASE("Guard - lock() takes no arguments", "[guard]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            MutexGuard<Counter> g = m.lock(5);
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("takes no arguments") != std::string::npos);
+}
+
+TEST_CASE("Guard - rlock/wlock recognised; write guard mutates, read guard is read-only", "[rwlock][guard]") {
+    auto ok = analyzeString(std::string(RWLOCK_PRELUDE) + R"(
+        class Data { mut i32 v; Data() { v = 0; } fn get() -> i32 { return v; } }
+        fn main() -> i32 {
+            RwLock<Data> rw = RwLock<Data>(Data());
+            { RwWriteGuard<Data> w = rw.wlock(); w.v = 9; }
+            mut i32 x = 0;
+            { RwReadGuard<Data> r = rw.rlock(); x = r.get(); }
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(ok.hadError);
+}
+
+TEST_CASE("Guard - mutating through a RwReadGuard is rejected", "[rwlock][guard][confine]") {
+    StderrCapture cap;
+    auto result = analyzeString(std::string(RWLOCK_PRELUDE) + R"(
+        class Data { mut i32 v; Data() { v = 0; } }
+        fn main() -> i32 {
+            RwLock<Data> rw = RwLock<Data>(Data());
+            { RwReadGuard<Data> r = rw.rlock(); r.v = 5; }
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("read guard") != std::string::npos);
+}
+
+TEST_CASE("Guard - a primitive interior is rejected with an actionable message", "[guard]") {
+    // A guard stores the interior as a `T*` field; a primitive `T` would need a (disallowed)
+    // primitive-borrow field. The error should steer the user to the scoped closure form.
+    StderrCapture cap;
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        fn main() -> i32 {
+            Mutex<i32> m = Mutex<i32>(0);
+            { MutexGuard<i32> g = m.lock(); }
+            return 0;
+        }
+    )");
+    REQUIRE(result.hadError);
+    REQUIRE(cap.str().find("only a CLASS interior") != std::string::npos);
+}
+
+TEST_CASE("Guard - var inference of a guard is a valid scoped local", "[guard][var]") {
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Counter { mut i32 n; Counter() { n = 0; } fn bump() mut { n = n + 1; } }
+        fn main() -> i32 {
+            Mutex<Counter> m = Mutex<Counter>(Counter());
+            { var g = m.lock(); g.bump(); }
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Guard - auto-deref of a nested field + an sret method through a guard", "[guard]") {
+    auto result = analyzeString(std::string(MUTEX_PRELUDE) + R"(
+        class Inner { mut i32 x; Inner() { x = 0; } }
+        class Box {
+            mut i32 n; mut Inner inner;
+            Box() { n = 0; inner = Inner(); }
+            fn snapshot() -> Inner s { s.x = n; return s; }
+        }
+        fn main() -> i32 {
+            Mutex<Box> m = Mutex<Box>(Box());
+            {
+                MutexGuard<Box> g = m.lock();
+                g.inner.x = 7;                 // nested field write via auto-deref
+                Inner snap = g.snapshot();     // sret method via auto-deref
+            }
+            return 0;
+        }
+    )");
+    REQUIRE_FALSE(result.hadError);
+}
+
+TEST_CASE("Guard - rlock/wlock lower to the mode-matched unlock helpers", "[rwlock][guard][codegen]") {
+    std::string ir = codegenString(std::string(RWLOCK_PRELUDE) + R"(
+        class Data { mut i32 v; Data() { v = 0; } }
+        fn main() -> i32 {
+            RwLock<Data> rw = RwLock<Data>(Data());
+            { RwWriteGuard<Data> w = rw.wlock(); }
+            { RwReadGuard<Data> r = rw.rlock(); }
+            return 0;
+        }
+    )");
+    REQUIRE(ir.find("call void @gg_rwlock_wrlock(")   != std::string::npos);
+    REQUIRE(ir.find("call void @gg_rwlock_wrunlock(") != std::string::npos);   // write guard dtor
+    REQUIRE(ir.find("call void @gg_rwlock_rdlock(")   != std::string::npos);
+    REQUIRE(ir.find("call void @gg_rwlock_rdunlock(") != std::string::npos);   // read guard dtor
 }
 
 TEST_CASE("Mutex - Mutex<Shared<T>> is rejected (Phase-1 generic-arg limit)", "[mutex][shared]") {

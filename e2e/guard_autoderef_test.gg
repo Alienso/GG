@@ -1,0 +1,34 @@
+// End-to-end: guard auto-deref edge cases (Phase 2.5) — var-inferred guard, nested field access,
+// and an sret (object-by-value) interior method reached through the guard. Exit 42.
+import std.sync.Mutex;
+import std.sync.MutexGuard;
+
+class Inner { mut i32 x; Inner() { x = 0; } }
+class Box {
+    mut i32 n;
+    mut Inner inner;
+    Box() { n = 0; inner = Inner(); }
+    fn addN(i32 d) mut { n = n + d; }
+    fn snapshot() -> Inner s { s.x = n; return s; }   // sret: returns an object by value
+}
+
+fn main() -> i32 {
+    Mutex<Box> m = Mutex<Box>(Box());
+    {
+        var g = m.lock();          // var inference of a guard
+        g.n = 10;
+        g.inner.x = 7;             // nested field write through a guard
+        g.addN(1);                 // mut method
+    }
+    mut i32 total = 0;
+    mut i32 innerx = 0;
+    {
+        MutexGuard<Box> g = m.lock();
+        total = g.n;               // 10 + 1 = 11
+        innerx = g.inner.x;        // 7
+        Inner snap = g.snapshot(); // sret method through a guard
+        innerx = innerx + snap.x;  // 7 + 11 = 18
+    }
+    if (total == 11 && innerx == 18) { return 42; }
+    return total;
+}

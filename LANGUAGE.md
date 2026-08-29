@@ -2392,12 +2392,48 @@ cfg.write((mut Config* p) -> { p.host = "new"; });   // exclusive lock
 - **`RwLock<T>`** has `.read((T* p) -> {...})` (shared lock, read-only — many readers at once) and
   `.write((mut T* p) -> {...})` (exclusive).
 - A lock cell is **non-copyable** (it owns an OS handle) — always share it via `Shared<...>`.
+
+**RAII lock guards** — the scope-based alternative to the closures. Acquire a **guard** whose
+destructor releases the lock at scope exit, and access the guarded value by **auto-deref** (`g.field`
+/ `g.method()` reach the inner `T` directly):
+
+```
+Mutex<Counter> m = Mutex<Counter>(Counter());
+{
+    MutexGuard<Counter> g = m.lock();   // acquire; released when `g` leaves this scope
+    g.n = g.n + 1;                       // auto-deref: mutate the guarded value in place
+    g.bump();
+}                                        // g's destructor unlocks here
+
+RwLock<Data> rw = RwLock<Data>(Data());
+{ RwWriteGuard<Data> w = rw.wlock(); w.v = 42; }   // exclusive; mutable auto-deref
+{ RwReadGuard<Data> r = rw.rlock(); i32 x = r.get(); }   // shared; read-only auto-deref
+```
+
+- `Mutex<T>` → `m.lock()` returns a `MutexGuard<T>`. `RwLock<T>` → `rw.rlock()` returns a read-only
+  `RwReadGuard<T>`, `rw.wlock()` an exclusive `RwWriteGuard<T>`.
+- A guard is **non-copyable** and must be a **scoped local** — it cannot be returned, stored, or
+  passed as an argument (a compile error), so the lock is always released at a well-defined scope exit.
+- Mutating through a **read guard** is a compile error (use `.wlock()`).
+- Guards support a **class interior** only; for a primitive `T` (`Mutex<i32>`) use the closure form
+  (`.with`/`.read`/`.write`). Member compound-assign/increment through a guard (`g.n += 1`, `g.n++`)
+  doesn't parse — the same GG-wide limitation as any object member; write `g.n = g.n + 1`.
+- **The guarded borrow may not escape the lock.** You may read/mutate the guarded value inside the
+  closure and forward the borrow into helper functions freely, but it may not be returned or stored
+  anywhere that outlives the closure (a field, an array element, a `static`, or through a function
+  that does so). This is enforced **interprocedurally** — a borrow forwarded into another function
+  that stashes it into a `static`/field is a compile error, not a runtime dangling pointer:
+  ```
+  class Reg { mut static Counter* held; }
+  fn stash(Counter* p) { Reg::held = p; }
+  m.with((mut Counter* c) -> { stash(c); });   // error: the guarded borrow escapes the lock closure
+  ```
 - **Limitations** (compile errors, not crashes): the closure parameter must be explicitly typed (no
-  inference yet); the borrow may not escape its closure (enforced intraprocedurally — a borrow
-  forwarded into another function that stores it is *not* caught yet); a `.with`/`.read`/`.write`
-  closure cannot be written *directly* inside a thread body (nested lambdas are unsupported — call a
-  helper that locks). Locks are **non-reentrant** (re-locking inside the closure deadlocks), there is
-  no deadlock detection, and `Shared<Mutex<T>>` locks all of `T` (no per-field locking).
+  inference yet); a `.with`/`.read`/`.write` closure cannot be written *directly* inside a thread body
+  (nested lambdas are unsupported — call a helper that locks). Locks are **non-reentrant** (re-locking
+  inside the closure deadlocks), there is no deadlock detection, and `Shared<Mutex<T>>` locks all of
+  `T` (no per-field locking). (Escape checking treats a helper that *returns* the borrow as an escape
+  even if you discard the result, and does not follow the borrow into an `extern` C function.)
 
 **Not yet:** condition variables, `try_lock`, reentrant locks, closure-parameter inference for the
 accessors, thread return values, detaching, and thread-local storage.
